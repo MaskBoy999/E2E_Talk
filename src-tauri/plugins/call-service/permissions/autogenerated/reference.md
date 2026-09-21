@@ -12,6 +12,8 @@ not in the foreground.
 - `allow-stop`
 - `allow-incoming-call`
 - `allow-cancel-incoming`
+- `allow-startScreenCapture`
+- `allow-stopScreenCapture`
 
 ## Permission Table
 
@@ -103,6 +105,32 @@ Denies the start command without any pre-configured scope.
 <tr>
 <td>
 
+`call-service:allow-startScreenCapture`
+
+</td>
+<td>
+
+Enables the startScreenCapture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-startScreenCapture`
+
+</td>
+<td>
+
+Denies the startScreenCapture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `call-service:allow-stop`
 
 </td>
@@ -122,6 +150,32 @@ Enables the stop command without any pre-configured scope.
 <td>
 
 Denies the stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:allow-stopScreenCapture`
+
+</td>
+<td>
+
+Enables the stopScreenCapture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-stopScreenCapture`
+
+</td>
+<td>
+
+Denies the stopScreenCapture command without any pre-configured scope.
 
 </td>
 </tr>

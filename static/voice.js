@@ -1714,8 +1714,23 @@
         // pipeline and produce decoder artifacts.
         var scrH = S.settings.sendScreenRes || 480;
         if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-            showToast('Screen sharing is not supported on this device.');
-            return Promise.resolve();
+            // ── Android WebView has no Screen Capture API ──────────────────
+            //
+            // `getDisplayMedia()` is a *Chrome* feature; the Android system
+            // WebView (which is what the box renders in) has never implemented
+            // it — `navigator.mediaDevices` exists (camera and mic work) but
+            // `getDisplayMedia` is simply undefined. That is exactly the "screen
+            // sharing is not supported on this device" the box used to show,
+            // and it is why Discord's Android app captures natively instead of
+            // through the WebView.
+            //
+            // So on Android we go through the native MediaProjection path: the
+            // Kotlin side shows the system picker, captures the display to a
+            // VirtualDisplay and streams JPEG frames back over a Tauri channel;
+            // we paint them onto a canvas and expose that canvas as a real
+            // MediaStream, so the rest of the pipeline (relay encode + encrypt,
+            // tiles, per-member volume) is completely unchanged.
+            return _startNativeScreenCapture(scrH);
         }
         return navigator.mediaDevices.getDisplayMedia({
             video: {
@@ -1733,57 +1748,213 @@
             // volume control (right-click the screen tile).
             audio: true,
         })
-            .then(function (stream) {
-                S.localStreams.screen = stream;
-                S.screenOn = true;
-                _boxSyncCallServiceTypes();
-                var svt = stream.getVideoTracks()[0];
-                if (svt) {
-                    try { svt.contentHint = 'detail'; } catch (_) {}
-                    svt.addEventListener('ended', function () {
-                        stopScreen();
-                    });
-                }
-                if (useVideoRelay('screen')) {
-                    // Server voice channel: relay screen video via WebSocket.
-                    // Screen audio is relayed too if audio relay is active,
-                    // otherwise it stays on WebRTC mesh.
-                    startVideoRelay(stream, 'screen');
-                    if (_audioRelayTimer) {
-                        startScreenAudioRelay();
-                    } else {
-                        // Add audio tracks to peers (audio is still on mesh)
-                        var audioTracks = stream.getAudioTracks();
-                        for (var uid in S.peers) {
-                            var pc = S.peers[uid];
-                            audioTracks.forEach(function (track) {
-                                try { pc.addTrack(track, stream); } catch (_) {}
-                            });
-                        }
-                    }
-                } else {
-                    addLocalTracksToAllPeers();
-                }
-                sendVoiceState();
-                renderSelfPreview();
-                renderPopup();
-                renderDmPanel();
-                updateSelfUI();
-            })
+            .then(_onScreenStream)
             .catch(function (err) {
-                console.warn('Screen share error:', err.name, err.message);
+                console.warn('Screen share error:', err && err.name, err && err.message);
                 var msg = 'Screen sharing failed: ';
-                if (err.name === 'NotAllowedError') {
-                    msg += 'Permission denied. On Android, screen capture requires approval via the system dialog.';
-                } else if (err.name === 'NotFoundError') {
+                if (err && err.name === 'NotAllowedError') {
+                    msg += 'Permission denied.';
+                } else if (err && err.name === 'NotFoundError') {
                     msg += 'No screen capture available on this device.';
-                } else if (err.name === 'AbortError') {
+                } else if (err && err.name === 'AbortError') {
                     msg += 'Cancelled.';
                 } else {
-                    msg += (err.message || 'Unknown error');
+                    msg += ((err && err.message) || 'Unknown error');
                 }
                 showToast(msg);
             });
+    }
+
+    // Everything that has to happen once we own a screen MediaStream, no matter
+    // where it came from: the browser's getDisplayMedia picker, or the native
+    // Android capture (a canvas stream). Shared so the two paths cannot drift.
+    function _onScreenStream(stream) {
+        S.localStreams.screen = stream;
+        S.screenOn = true;
+        _boxSyncCallServiceTypes();
+        var svt = stream.getVideoTracks()[0];
+        if (svt) {
+            try { svt.contentHint = 'detail'; } catch (_) {}
+            svt.addEventListener('ended', function () {
+                stopScreen();
+            });
+        }
+        if (useVideoRelay('screen')) {
+            // Server voice channel: relay screen video via WebSocket.
+            // Screen audio is relayed too if audio relay is active,
+            // otherwise it stays on WebRTC mesh.
+            startVideoRelay(stream, 'screen');
+            if (_audioRelayTimer) {
+                startScreenAudioRelay();
+            } else {
+                // Add audio tracks to peers (audio is still on mesh)
+                var audioTracks = stream.getAudioTracks();
+                for (var uid in S.peers) {
+                    var pc = S.peers[uid];
+                    audioTracks.forEach(function (track) {
+                        try { pc.addTrack(track, stream); } catch (_) {}
+                    });
+                }
+            }
+        } else {
+            addLocalTracksToAllPeers();
+        }
+        sendVoiceState();
+        renderSelfPreview();
+        renderPopup();
+        renderDmPanel();
+        updateSelfUI();
+    }
+
+    // ── Native (Android) screen capture ────────────────────────────────
+    //
+    // The Kotlin half (plugins/call-service → ScreenCapture.kt) asks for the
+    // system MediaProjection permission, mirrors the display into a
+    // VirtualDisplay and pushes JPEG frames over a Tauri *channel* (the one
+    // streaming primitive the remote page is allowed to use — app commands are
+    // ACL-denied there, plugin commands are not). We paint each frame onto a
+    // canvas and hand that canvas out as a MediaStream, so every downstream
+    // consumer sees an ordinary screen stream.
+    //
+    // Nothing here runs outside the Android box: a plain browser (and the
+    // desktop box) has getDisplayMedia and never reaches this function.
+    var _nativeScreen = null; // { canvas, ctx, stream, track, stop }
+
+    function _boxNativeScreenSupported() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || !tauri.core.invoke || !tauri.core.Channel) return false;
+        return /Android/i.test(navigator.userAgent || '');
+    }
+
+    function _startNativeScreenCapture(scrH) {
+        if (!_boxNativeScreenSupported()) {
+            showToast('Screen sharing is not supported on this device.');
+            return Promise.resolve();
+        }
+        var tauri = window.__TAURI__;
+        var canvas = document.createElement('canvas');
+        var ctx = canvas.getContext('2d');
+        var pending = [];
+        var attached = false;
+        var stopped = false;
+        var state = { canvas: canvas, ctx: ctx, stream: null, track: null };
+        _nativeScreen = state;
+
+        // Android needs the mediaProjection foreground-service type to be
+        // claimed *before* the projection starts (API 34+ refuses otherwise),
+        // and `_boxCallMediaTypes()` reads S.screenOn — so claim it first and
+        // roll it back if the user cancels the picker.
+        S.screenOn = true;
+        _boxSyncCallServiceTypes();
+
+        var ch = new tauri.core.Channel();
+        ch.onmessage = function (msg) {
+            if (stopped || !msg) return;
+            if (msg.type === 'error') {
+                _abortNativeScreen(msg.message || 'capture failed');
+                return;
+            }
+            if (msg.type !== 'frame' || !msg.jpeg) return;
+            pending.push(msg);
+            // Decode at most one frame at a time: a burst of base64 payloads
+            // queued as separate Images would decode out of order and waste
+            // memory. Keeping only the newest frame also means a slow decoder
+            // naturally drops stale frames instead of falling behind.
+            if (pending.length > 1) pending.splice(0, pending.length - 1);
+            _drainNativeFrames();
+        };
+
+        function _abortNativeScreen(why) {
+            stopped = true;
+            _nativeScreen = null;
+            S.screenOn = false;
+            _boxSyncCallServiceTypes();
+            // Cancelling the system picker is a normal choice, not a failure —
+            // saying "failed" for it reads like a bug.
+            if (/denied|cancel/i.test(String(why))) showToast('Screen sharing cancelled.');
+            else showToast('Screen share failed: ' + why);
+            try { tauri.core.invoke('plugin:call-service|stopScreenCapture'); } catch (_) {}
+        }
+
+        var decoding = false;
+        function _drainNativeFrames() {
+            if (decoding || !pending.length) return;
+            var frame = pending.pop();
+            pending.length = 0;
+            decoding = true;
+            var img = new Image();
+            img.onload = function () {
+                decoding = false;
+                if (stopped) return;
+                var w = frame.w || img.naturalWidth;
+                var h = frame.h || img.naturalHeight;
+                if (canvas.width !== w || canvas.height !== h) {
+                    canvas.width = w;
+                    canvas.height = h;
+                }
+                try {
+                    ctx.drawImage(img, 0, 0, w, h);
+                } catch (_) { /* ignore a torn frame */ }
+                if (!attached) {
+                    attached = true;
+                    _attachCanvasStream();
+                } else if (state.track && state.track.requestFrame) {
+                    // captureStream(0) only emits on an explicit requestFrame(),
+                    // which keeps one captured frame -> exactly one relayed frame.
+                    try { state.track.requestFrame(); } catch (_) {}
+                }
+                _drainNativeFrames();
+            };
+            img.onerror = function () {
+                decoding = false;
+                _drainNativeFrames();
+            };
+            img.src = 'data:image/jpeg;base64,' + frame.jpeg;
+        }
+
+        function _attachCanvasStream() {
+            if (stopped) return;
+            var stream;
+            try {
+                stream = canvas.captureStream(0);
+            } catch (_) {
+                stream = null;
+            }
+            if (!stream) {
+                _abortNativeScreen('this device cannot use the captured screen');
+                return;
+            }
+            state.stream = stream;
+            state.track = stream.getVideoTracks()[0] || null;
+            if (state.track && state.track.requestFrame) {
+                try { state.track.requestFrame(); } catch (_) {}
+            }
+            // Only now do we hand the stream to the shared pipeline: it is a
+            // real MediaStream, so the relay encoder, tiles and per-member
+            // volume all behave exactly as they do for a browser share.
+            _onScreenStream(stream);
+        }
+
+        return tauri.core.invoke('plugin:call-service|startScreenCapture', {
+            onFrame: ch,
+            maxHeight: scrH,
+            fps: 10,
+        }).catch(function (e) {
+            _abortNativeScreen((e && e.message) || String(e));
+        });
+    }
+
+    function _stopNativeScreenCapture() {
+        if (!_nativeScreen) return;
+        _nativeScreen = null;
+        var tauri = window.__TAURI__;
+        if (tauri && tauri.core && tauri.core.invoke) {
+            try { tauri.core.invoke('plugin:call-service|stopScreenCapture'); } catch (_) {}
+        }
+        if (S.screenOn) {
+            S.screenOn = false;
+            _boxSyncCallServiceTypes();
+        }
     }
 
     function stopScreen() {
@@ -1792,6 +1963,7 @@
             removeTrackFromAllPeers('screen');
             S.localStreams.screen = null;
         }
+        _stopNativeScreenCapture();
         stopVideoRelay('screen');
         stopScreenAudioRelay();
         S.screenOn = false;

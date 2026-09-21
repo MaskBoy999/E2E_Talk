@@ -29,6 +29,14 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
+    // `ComponentActivity.registerForActivityResult` — the MediaProjection
+    // permission dialog is an activity result, and Android only lets a plugin
+    // register the launcher before the activity is STARTED (so it happens in
+    // ScreenCapture's initialiser). The Android module does NOT inherit the app
+    // module's dependencies, so this has to be declared here at the same
+    // version the generated app uses (see plugins/box-shell, which needed the
+    // same line for `onBackPressedDispatcher`).
+    implementation("androidx.appcompat:appcompat:1.7.1")
     // Provided by the generated Android project (`cargo tauri android init`).
     implementation(project(":tauri-android"))
 }

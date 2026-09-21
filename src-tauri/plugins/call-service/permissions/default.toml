@@ -16,4 +16,8 @@ permissions = [
     "allow-stop",
     "allow-incoming-call",
     "allow-cancel-incoming",
+    # Native screen capture: the Android WebView has no getDisplayMedia, so the
+    # page asks the plugin to run MediaProjection instead (and to stop it).
+    "allow-startScreenCapture",
+    "allow-stopScreenCapture",
 ]

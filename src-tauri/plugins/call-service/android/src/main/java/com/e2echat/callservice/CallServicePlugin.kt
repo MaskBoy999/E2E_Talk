@@ -6,6 +6,7 @@ import android.os.Build
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
+import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.Plugin
 
@@ -29,6 +30,20 @@ class IncomingCallArgs {
 }
 
 /**
+ * Screen capture input. `onFrame` is a Tauri channel: the page passes one in
+ * and every captured frame (and every terminal state) is delivered back through
+ * it. A channel is used rather than a command return because a share produces
+ * hundreds of messages over its lifetime — see ScreenCapture.kt for why the
+ * capture is native at all.
+ */
+@InvokeArg
+class ScreenCaptureArgs {
+    var onFrame: Channel? = null
+    var maxHeight: Int? = null
+    var fps: Int? = null
+}
+
+/**
  * Webview-facing half of the plugin. Called from JS as
  * `invoke('plugin:call-service|start', { channelName })` and `…|stop`, plus the
  * `…|incomingCall` / `…|cancelIncoming` pair that raises a full-screen-intent
@@ -36,6 +51,13 @@ class IncomingCallArgs {
  */
 @TauriPlugin
 class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
+
+    /**
+     * Constructed here, not lazily: the class registers the screen-capture
+     * permission launcher in its initialiser, and Android only allows that
+     * before the activity is STARTED (plugins are built during `onCreate`).
+     */
+    private val screenCapture = ScreenCapture(activity)
 
     @Command
     fun start(invoke: Invoke) {
@@ -96,6 +118,37 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         } catch (e: Exception) {
             invoke.reject("Could not update the call service: ${e.message}")
+        }
+    }
+
+    /**
+     * Start sharing the screen natively. Resolves as soon as the system picker
+     * has been asked; the outcome arrives on the `onFrame` channel as
+     * `{type:"started"|"frame"|"stopped"|"error"}`.
+     */
+    @Command
+    fun startScreenCapture(invoke: Invoke) {
+        val args = invoke.parseArgs(ScreenCaptureArgs::class.java)
+        val ch = args.onFrame
+        if (ch == null) {
+            invoke.reject("startScreenCapture needs an onFrame channel")
+            return
+        }
+        try {
+            screenCapture.request(ch, args.maxHeight ?: 480, args.fps ?: 10)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Could not start screen capture: ${e.message}")
+        }
+    }
+
+    @Command
+    fun stopScreenCapture(invoke: Invoke) {
+        try {
+            screenCapture.stop()
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Could not stop screen capture: ${e.message}")
         }
     }
 

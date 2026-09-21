@@ -1,4 +1,12 @@
-const COMMANDS: &[&str] = &["start", "updateMedia", "stop"];
+const COMMANDS: &[&str] = &[
+    "start",
+    "updateMedia",
+    "stop",
+    // Native screen capture (Android WebView has no getDisplayMedia) — see
+    // android/src/main/java/com/e2echat/callservice/ScreenCapture.kt.
+    "startScreenCapture",
+    "stopScreenCapture",
+];
 
 fn main() {
     // The commands are implemented in Kotlin (`CallServicePlugin.kt`) and called
