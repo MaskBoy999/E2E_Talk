@@ -43,6 +43,14 @@ class ScreenCaptureArgs {
     var onFrame: Channel? = null
     var maxHeight: Int? = null
     var fps: Int? = null
+
+    /**
+     * Also mirror the device's playback ("share app audio"). Nullable because
+     * the page may not send it at all, which means off — see `withAudio == true`
+     * at the call site rather than a non-null default, so an older page cannot
+     * silently turn it on.
+     */
+    var withAudio: Boolean? = null
 }
 
 /**
@@ -157,7 +165,7 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         val intent = try {
-            screenCapture.prepare(ch, args.maxHeight ?: 480, args.fps ?: 10)
+            screenCapture.prepare(ch, args.maxHeight ?: 480, args.fps ?: 10, args.withAudio == true)
         } catch (e: Exception) {
             android.util.Log.e(SCREEN_TAG, "prepare() failed", e)
             invoke.reject("Could not start screen capture: ${e.message}")

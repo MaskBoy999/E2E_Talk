@@ -8,7 +8,9 @@ import { test, expect } from '@playwright/test';
 // relative to framesDecoded — a bitrate/decryption problem shows up as high
 // drops / no decoded growth).
 
-const BASE = 'https://localhost:3443';
+// E2E_TEST_BASE_URL lets the suite run against a second, isolated server
+// instance (its own DB and raised rate limits) without disturbing a dev server.
+const BASE = process.env.E2E_TEST_BASE_URL || 'https://localhost:3443';
 
 async function waitForWs(page: any, maxRetries = 60) {
     return await page.evaluate((maxRetries) => {

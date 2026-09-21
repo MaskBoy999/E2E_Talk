@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-const BASE = 'https://localhost:3443';
+// E2E_TEST_BASE_URL lets the suite run against a second, isolated server
+// instance (its own DB and raised rate limits) without disturbing a dev server.
+const BASE = process.env.E2E_TEST_BASE_URL || 'https://localhost:3443';
 
 test.use({
     headless: false,

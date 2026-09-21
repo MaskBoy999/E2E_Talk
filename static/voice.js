@@ -83,6 +83,10 @@
             recvAudioQuality: 'medium',       // default 16 kHz playback
             sendScreenAudioQuality: 'medium', // screen share audio quality (relay)
             recvScreenAudioQuality: 'medium', // screen share audio quality (mesh P2P only)
+            // "Share app audio" in the pre-share sheet (mobile/native capture):
+            // mirror the device's playback into the stream. The sheet rewrites
+            // it on every share, so this default only decides the FIRST one.
+            shareScreenAudio: true,
             // Haptic cues (mobile). hapticIncoming: vibrate when a NEW
             // incoming ring starts (notice a call on silent mode).
             // hapticWaiting: vibrate when the ring flips to the waiting state
@@ -192,6 +196,9 @@
         toggleDeafen: toggleDeafen,
         toggleCamera: toggleCamera,
         toggleScreen: toggleScreen,
+        openScreenShareSheet: openScreenShareSheet,
+        closeScreenShareSheet: closeScreenShareSheet,
+        confirmScreenShare: confirmScreenShare,
         flipCamera: flipCamera,
         toggleCameraFlash: toggleCameraFlash,
         setCameraFlashOn: setCameraFlashOn,
@@ -1719,6 +1726,7 @@
 
     function startScreen() {
         if (S.localStreams.screen) return Promise.resolve();
+        closeScreenShareSheet();
         // Cap capture so the mesh doesn't flood: screen shares are mostly
         // static content — 1080p @ 30fps is plenty, and every frame is AES-GCM
         // encrypted per-peer, so huge native-res/fps captures starve the
@@ -1865,6 +1873,14 @@
         startedAt: 0,
         lastFrameAt: 0,
         lastError: null,
+        // App audio (Android). "off" is a choice, "error" is an answer from
+        // the device, and they must not look alike when read off a phone.
+        audioState: 'off',    // off | starting | ready | error
+        audioRate: 0,
+        audioFrames: 0,
+        audioBytes: 0,
+        audioDropped: 0,
+        audioError: null,
     };
 
     // Everything the native path needs, observed rather than assumed. Each flag
@@ -1938,6 +1954,20 @@
         var state = { canvas: canvas, ctx: ctx, stream: null, track: null };
         _nativeScreen = state;
 
+        // App audio is prepared BEFORE the picker: the AudioContext has to be
+        // created while the click that opened the sheet still counts as a user
+        // gesture (Chrome starts one created outside a gesture suspended), and
+        // the worklet module it needs loads asynchronously. Whether it is
+        // wanted is the sheet's answer, persisted in S.settings.
+        var wantAudio = S.settings.shareScreenAudio !== false;
+        _screenDiag.audioState = wantAudio ? 'starting' : 'off';
+        _screenDiag.audioRate = 0;
+        _screenDiag.audioFrames = 0;
+        _screenDiag.audioBytes = 0;
+        _screenDiag.audioDropped = 0;
+        _screenDiag.audioError = null;
+        if (wantAudio) _startNativeScreenAudio();
+
         // Android needs the mediaProjection foreground-service type to be
         // claimed *before* the projection starts (API 34+ refuses otherwise),
         // and `_boxCallMediaTypes()` reads S.screenOn — so claim it first and
@@ -1961,6 +1991,34 @@
                 _screenDiag.w = msg.w || 0;
                 _screenDiag.h = msg.h || 0;
                 _screenDiag.fps = msg.fps || 10;
+                return;
+            }
+            if (msg.type === 'audioStarted') {
+                // The native side has the AudioRecord running; PCM follows.
+                _screenDiag.audioState = 'ready';
+                _screenDiag.audioRate = msg.rate || 0;
+                return;
+            }
+            if (msg.type === 'audioError') {
+                // Never fatal to the share: Android (or the app being streamed)
+                // refused the audio. Video keeps running and the reason is
+                // readable in the diagnostics panel.
+                _screenDiag.audioState = 'error';
+                _screenDiag.audioError = msg.message || 'audio capture failed';
+                console.warn('Screen share audio unavailable:', _screenDiag.audioError);
+                // Drop the audio pipeline with it. The native side reports this
+                // from `begin()` — before any frame, so before the stream is
+                // handed over — and a track that will only ever be silence must
+                // not be attached: it would make peers show an app-audio volume
+                // control for audio that does not exist.
+                if (_nativeScreenAudio && _nativeScreenAudio.track && state.stream) {
+                    try { state.stream.removeTrack(_nativeScreenAudio.track); } catch (_) {}
+                }
+                _stopNativeScreenAudio();
+                return;
+            }
+            if (msg.type === 'audio') {
+                if (msg.pcm) _pushNativeScreenAudio(msg.pcm);
                 return;
             }
             if (msg.type === 'stopped') {
@@ -1994,6 +2052,10 @@
         function _abortNativeScreen(why) {
             stopped = true;
             _nativeScreen = null;
+            // Cancelling the picker (or a failed start) leaves an audio graph
+            // with nothing feeding it — close it here too, not only in
+            // stopScreen(), which an abort never reaches.
+            _stopNativeScreenAudio();
             if (_screenDiag.state !== 'stopped') {
                 _screenDiag.state = 'error';
                 _screenDiag.lastError = why || 'capture failed';
@@ -2061,9 +2123,33 @@
             if (state.track && state.track.requestFrame) {
                 try { state.track.requestFrame(); } catch (_) {}
             }
-            // Only now do we hand the stream to the shared pipeline: it is a
-            // real MediaStream, so the relay encoder, tiles and per-member
-            // volume all behave exactly as they do for a browser share.
+            // App audio has to be ON the stream before it is handed over: the
+            // pipeline reads `getAudioTracks()` once, when it chooses between
+            // the relay and the mesh, so a track added later would be silently
+            // dropped (and the share would stay mute until it was restarted).
+            // The worklet module load is async, hence the wait — with a
+            // ceiling, because a slow or failed load must cost nothing but the
+            // audio.
+            var ready = _nativeScreenAudioPromise;
+            if (!ready) { _handOverCanvasStream(stream); return; }
+            var settled = false;
+            var hand = function () {
+                if (settled) return;
+                settled = true;
+                if (stopped) return;
+                var track = _nativeScreenAudio && _nativeScreenAudio.track;
+                if (track) { try { stream.addTrack(track); } catch (_) {} }
+                _handOverCanvasStream(stream);
+            };
+            setTimeout(hand, 1500);
+            ready.then(hand, hand);
+        }
+
+        // Only now does the stream reach the shared pipeline: it is a real
+        // MediaStream, so the relay encoder, tiles and per-member volume all
+        // behave exactly as they do for a browser share.
+        function _handOverCanvasStream(stream) {
+            if (stopped) return;
             _onScreenStream(stream);
         }
 
@@ -2082,6 +2168,9 @@
                     onFrame: ch,
                     maxHeight: scrH,
                     fps: 10,
+                    // The sheet's "Share app audio" answer. Older pages that do
+                    // not send it get video only — see ScreenCaptureArgs.
+                    withAudio: wantAudio,
                 });
             })
             .catch(function (e) {
@@ -2089,7 +2178,122 @@
             });
     }
 
+    // ── App audio: native PCM → a real audio track on the screen stream ──
+    //
+    // The Kotlin side mirrors the device's playback into 20 ms PCM16 chunks and
+    // pushes them over the same channel the video frames use. They are fed
+    // through the relay's existing playback worklet into a
+    // MediaStreamAudioDestinationNode, and that track is added to the canvas
+    // stream — so the result is exactly the artifact a desktop share produces
+    // for tab audio, and nothing downstream (relay capture, mesh senders,
+    // per-member volume) needs to know where it came from.
+    var _nativeScreenAudio = null;      // { ctx, node, dest, track, sab, int, float }
+    var _nativeScreenAudioPromise = null;
+
+    function _startNativeScreenAudio() {
+        if (_nativeScreenAudioPromise) return _nativeScreenAudioPromise;
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        var ctx = null;
+        // 48 kHz on purpose: the PCM arrives at 48 kHz, and a context at the
+        // device's own rate (44.1 kHz on some hardware) would play all of it at
+        // the wrong speed — audibly detuned, which reads as a broken feature
+        // rather than as a resampling detail.
+        try { ctx = new Ctx({ sampleRate: 48000 }); } catch (_) { try { ctx = new Ctx(); } catch (_) { ctx = null; } }
+        if (!ctx) {
+            _screenDiag.audioState = 'error';
+            _screenDiag.audioError = 'no AudioContext on this device';
+            return null;
+        }
+        _nativeScreenAudio = { ctx: ctx, node: null, dest: null, track: null, sab: null, int: null, float: null };
+        _nativeScreenAudioPromise = ctx.audioWorklet.addModule('relay-audio-processor.js')
+            .then(function () {
+                var opts = {};
+                if (typeof SharedArrayBuffer !== 'undefined') {
+                    // The same lock-free ring the relay playback uses: the audio
+                    // thread pulls samples out, this one only moves them in.
+                    var sab = new SharedArrayBuffer(8 + 48000 * 4);
+                    _nativeScreenAudio.sab = sab;
+                    _nativeScreenAudio.int = new Int32Array(sab);
+                    _nativeScreenAudio.float = new Float32Array(sab, 8);
+                    Atomics.store(_nativeScreenAudio.int, 0, 0);
+                    Atomics.store(_nativeScreenAudio.int, 1, 0);
+                    opts.processorOptions = { sharedBuffer: sab };
+                }
+                var node = new AudioWorkletNode(ctx, 'relay-audio-processor', opts);
+                var dest = ctx.createMediaStreamDestination();
+                node.connect(dest);
+                _nativeScreenAudio.node = node;
+                _nativeScreenAudio.dest = dest;
+                _nativeScreenAudio.track = dest.stream.getAudioTracks()[0] || null;
+                if (!_nativeScreenAudio.track) throw new Error('the audio pipeline produced no track');
+                if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
+                return _nativeScreenAudio.track;
+            })
+            .catch(function (e) {
+                _screenDiag.audioState = 'error';
+                _screenDiag.audioError = (e && e.message) || 'the screen-audio pipeline did not load';
+                console.warn('Screen share audio unavailable:', _screenDiag.audioError);
+                _stopNativeScreenAudio();
+                return null;
+            });
+        return _nativeScreenAudioPromise;
+    }
+
+    // One PCM16 chunk (base64, little-endian, mono) from the native capture.
+    function _pushNativeScreenAudio(b64) {
+        var a = _nativeScreenAudio;
+        if (!a) return;
+        var i16;
+        try { i16 = new Int16Array(E2ECrypto.base64ToArrayBuffer(b64)); } catch (_) { return; }
+        if (!i16.length) return;
+        _screenDiag.audioFrames++;
+        _screenDiag.audioBytes += i16.length * 2;
+        if (a.int && a.float) {
+            var ringLen = a.float.length;
+            var writePos = Atomics.load(a.int, 0);
+            var readPos = Atomics.load(a.int, 1);
+            var free = ringLen - ((writePos - readPos + ringLen) % ringLen) - 1;
+            if (i16.length > free) {
+                // The consumer stalled (or the projection is silent and the
+                // ring simply filled): drop this chunk rather than block the
+                // channel handler. A dropped chunk is a click, a stalled one is
+                // a growing delay.
+                _screenDiag.audioDropped += i16.length;
+                return;
+            }
+            for (var i = 0; i < i16.length; i++) a.float[(writePos + i) % ringLen] = i16[i] / 32768;
+            Atomics.store(a.int, 0, (writePos + i16.length) % ringLen);
+            return;
+        }
+        if (a.node) {
+            // No SharedArrayBuffer (no cross-origin isolation): the worklet has
+            // a postMessage ring for exactly this case.
+            var f = new Float32Array(i16.length);
+            for (var j = 0; j < i16.length; j++) f[j] = i16[j] / 32768;
+            try { a.node.port.postMessage({ samples: f }); } catch (_) {}
+        }
+    }
+
+    function _stopNativeScreenAudio() {
+        _nativeScreenAudioPromise = null;
+        var a = _nativeScreenAudio;
+        _nativeScreenAudio = null;
+        if (!a) return;
+        try {
+            if (a.node) {
+                try { a.node.port.postMessage({ type: 'stop' }); } catch (_) {}
+                a.node.disconnect();
+            }
+        } catch (_) {}
+        try { if (a.dest) a.dest.disconnect(); } catch (_) {}
+        try { if (a.track) a.track.stop(); } catch (_) {}
+        // The context is private to this share (see _startNativeScreenAudio),
+        // so closing it cannot disturb the mic/relay graph.
+        try { if (a.ctx && a.ctx.close) a.ctx.close(); } catch (_) {}
+    }
+
     function _stopNativeScreenCapture() {
+        _stopNativeScreenAudio();
         if (!_nativeScreen) return;
         _nativeScreen = null;
         if (_screenDiag.state === 'capturing' || _screenDiag.state === 'requested') {
@@ -5398,7 +5602,115 @@
 
     function toggleScreen() {
         ensureAudioCtx();
-        if (S.screenOn) stopScreen(); else startScreen();
+        if (S.screenOn) { stopScreen(); return; }
+        // Native (Android) capture asks HOW first, the way Discord's stream
+        // sheet does: the system picker is one-shot, so the quality and the app
+        // audio have to be chosen before the MediaProjection token exists. A
+        // browser share needs none of that — Chrome's own picker asks about tab
+        // audio and the resolution comes from Settings — so it starts at once.
+        if (!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) && _boxNativeScreenSupported()) {
+            openScreenShareSheet();
+            return;
+        }
+        startScreen();
+    }
+
+    // ------------------------------------------------------------------
+    // Pre-share sheet (mobile / native capture)
+    // ------------------------------------------------------------------
+    // Discord asks this before a stream starts, and the reason carries over
+    // exactly: the Android capture is one-shot. The MediaProjection token is
+    // minted once, by the system picker, so the resolution and "share app
+    // audio" have to be decided *before* it exists — there is nothing to flip
+    // afterwards that would not tear the share down.
+    //
+    // Both answers land in the same S.settings fields the Settings screen
+    // writes, so the sheet reopens on whatever was chosen last time.
+    var _shareSheet = null;
+    var _shareSheetKey = null;
+
+    // The presets, in the order Discord lists them. A stored resolution can be
+    // anything (Settings offers 144p…2160p), so it is snapped to the nearest
+    // preset rather than opening with nothing selected.
+    var SHARE_SHEET_MODES = [
+        { res: 720, label: 'Default', hint: 'Balanced quality and performance (720p)' },
+        { res: 480, label: 'Performance', hint: 'Optimised for slower devices (480p)' },
+        { res: 1080, label: 'High quality', hint: 'For video and gaming (1080p)' },
+    ];
+
+    function shareSheetModeFor(res) {
+        res = parseInt(res, 10) || 480;
+        if (res >= 1080) return 1080;
+        if (res <= 480) return 480;
+        return 720;
+    }
+
+    function openScreenShareSheet() {
+        if (_shareSheet) return;
+        var mode = shareSheetModeFor(S.settings.sendScreenRes);
+        var audioOn = S.settings.shareScreenAudio !== false;
+
+        var rows = SHARE_SHEET_MODES.map(function (m) {
+            return '<label class="share-sheet-mode">'
+                + '<input type="radio" name="share-sheet-mode" id="share-mode-' + m.res + '" value="' + m.res + '"'
+                + (m.res === mode ? ' checked' : '') + '>'
+                + '<span class="share-sheet-mode-text"><strong>' + m.label + '</strong>'
+                + '<span>' + m.hint + '</span></span></label>';
+        }).join('');
+
+        var overlay = document.createElement('div');
+        overlay.className = 'share-sheet-overlay';
+        overlay.id = 'screen-share-sheet';
+        overlay.innerHTML =
+            '<div class="share-sheet" role="dialog" aria-modal="true" aria-label="Stream settings">'
+            + '<h3 class="share-sheet-title">Stream settings</h3>'
+            + '<div class="share-sheet-section">Streaming mode</div>'
+            + rows
+            + '<div class="share-sheet-section">Audio stream</div>'
+            + '<label class="share-sheet-switch">'
+            + '<span class="share-sheet-switch-label">Share app audio</span>'
+            + '<input type="checkbox" id="share-sheet-audio"' + (audioOn ? ' checked' : '') + '>'
+            + '<span class="share-sheet-track"><span class="share-sheet-knob"></span></span>'
+            + '</label>'
+            + '<p class="share-sheet-hint">Others hear the sound from the app you are streaming (Android). Apps that opt out of capture, and copy-protected playback, stay silent.</p>'
+            + '<button type="button" class="share-sheet-start" id="share-sheet-start">Start streaming</button>'
+            + '</div>';
+
+        function onKey(ev) {
+            if (ev.key === 'Escape') { ev.preventDefault(); closeScreenShareSheet(); }
+        }
+        overlay.addEventListener('mousedown', function (ev) {
+            if (ev.target === overlay) closeScreenShareSheet();
+        });
+        overlay.querySelector('#share-sheet-start').addEventListener('click', confirmScreenShare);
+
+        (document.body || document.documentElement).appendChild(overlay);
+        document.addEventListener('keydown', onKey, true);
+        _shareSheet = overlay;
+        _shareSheetKey = onKey;
+    }
+
+    function closeScreenShareSheet() {
+        if (_shareSheetKey) {
+            document.removeEventListener('keydown', _shareSheetKey, true);
+            _shareSheetKey = null;
+        }
+        if (_shareSheet && _shareSheet.parentNode) _shareSheet.parentNode.removeChild(_shareSheet);
+        _shareSheet = null;
+    }
+
+    // The sheet's answer: persist both choices (same fields as Settings), then
+    // start a capture that already reads them — startScreen() picks the
+    // resolution up from S.settings and passes audio to the native side.
+    function confirmScreenShare() {
+        var chosen = _shareSheet && _shareSheet.querySelector('input[name="share-sheet-mode"]:checked');
+        S.settings.sendScreenRes = parseInt((chosen && chosen.value) || '0', 10) || 480;
+        var audio = _shareSheet && _shareSheet.querySelector('#share-sheet-audio');
+        S.settings.shareScreenAudio = audio ? !!audio.checked : true;
+        saveSettings();
+        applySettingsToUI();
+        closeScreenShareSheet();
+        startScreen();
     }
 
     // Switch between the front and back camera (mobile). The camera is
@@ -11205,6 +11517,20 @@
                 + (d.w ? ' · ' + d.w + '×' + d.h + ' @' + (d.fps || 0) + 'fps' : '') + '</div>');
             if (d.lastFrameAt) {
                 rows.push('<div style="padding-left:12px">last frame ' + Math.max(0, Math.round((Date.now() - d.lastFrameAt) / 1000)) + 's ago</div>');
+            }
+            // App audio. "Off" (nobody asked for it) and "error" (the device
+            // refused) are different findings, so they read differently.
+            if (d.audioState !== 'off') {
+                var audioColor = d.audioState === 'error' ? '#f0b232' : 'inherit';
+                rows.push('<div style="padding-left:12px;color:' + audioColor + '">app audio: ' + esc(d.audioState)
+                    + (d.audioRate ? ' @' + d.audioRate + 'Hz' : '')
+                    + ' · chunks ' + (d.audioFrames || 0)
+                    + (d.audioDropped ? ' · dropped ' + d.audioDropped : '')
+                    + (d.audioBytes ? ' · ' + fmtBytes(d.audioBytes) : '')
+                    + (d.audioError ? ' — ' + esc(d.audioError) : '') + '</div>');
+                if (d.audioState === 'error') {
+                    rows.push('<div style="padding-left:12px;color:#f0b232">' + icon('warning') + ' the screen audio was refused — Android only mirrors apps that allow playback capture (DRM/copy-protected audio never can), and the capture policy is per-app.</div>');
+                }
             }
             if (d.state === 'capturing' && d.frames === 0) {
                 rows.push('<div style="padding-left:12px;color:#f0b232">' + icon('warning') + ' the capture started but no frames have arrived — the native side is not producing images (is the foreground-service type mediaProjection actually applied?).</div>');

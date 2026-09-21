@@ -1,6 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 
-const BASE = 'https://localhost:3443';
+// E2E_TEST_BASE_URL lets the suite run against a second, isolated server
+// instance (its own DB and raised rate limits) without disturbing a dev server.
+const BASE = process.env.E2E_TEST_BASE_URL || 'https://localhost:3443';
 const PASSWORD = 'testpass1234';
 
 function unique(b: string): string {
@@ -87,6 +89,21 @@ async function desktopUserAgent(page: Page) {
     });
 }
 
+/**
+ * Press Share screen on the native path.
+ *
+ * The bridge being present now means the pre-share sheet opens first (quality +
+ * "share app audio" have to be answered before the one-shot MediaProjection
+ * picker runs — see screen-share-audio-mobile.spec.ts for the sheet itself), so
+ * a share is only under way once its Start streaming button is pressed.
+ */
+async function startNativeShare(page: Page) {
+    await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
+    await page.waitForSelector('#screen-share-sheet', { timeout: 5000 });
+    await page.click('#share-sheet-start');
+    await page.waitForTimeout(400);
+}
+
 test.describe('screen share — native bridge', () => {
     /**
      * The regression this locks down: the native path used to require an
@@ -101,8 +118,8 @@ test.describe('screen share — native bridge', () => {
         await removeGetDisplayMedia(page);
         await register(page, user);
 
-        await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
-        await page.waitForTimeout(600);
+        await startNativeShare(page);
+        await page.waitForTimeout(200);
 
         const diag = await page.evaluate(() => (window as any).VoiceManager.getScreenDiag());
         expect(diag.path).toBe('native');
@@ -139,8 +156,7 @@ test.describe('screen share — native bridge', () => {
         await removeGetDisplayMedia(page);
         await register(page, user);
 
-        await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
-        await page.waitForTimeout(400);
+        await startNativeShare(page);
 
         // The native side answers the picker and starts producing frames.
         // (`expect` is not available inside page.evaluate — the channel's
@@ -228,8 +244,7 @@ test.describe('screen share — diagnostics panel', () => {
             d.id = 'voice-diag-list';
             document.body.appendChild(d);
         });
-        await page.evaluate(() => (window as any).VoiceManager.toggleScreen());
-        await page.waitForTimeout(300);
+        await startNativeShare(page);
         // The native side reports the failure over the channel.
         await page.evaluate(() => {
             const ch = (window as any).__testChannels[0];

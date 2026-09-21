@@ -7810,3 +7810,57 @@ hook without a custom action, so a user installing only the MSI still needs the
 reinstall-or-`ie4uinit` route described in §140.
 
 **Files:** `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json`
+
+### 145. Mobile screen share can share app audio (v0.2.19)
+
+**Feature:** Discord's Android stream sheet has a "share app audio" switch; ours
+had none — a phone share was always video-only, and `ScreenCapture.kt` said so
+explicitly ("What this deliberately does not do: No audio").
+
+**Why a sheet and not a setting:** the system picker mints the `MediaProjection`
+token once per share, so the resolution *and* "share app audio" have to be
+answered **before** it runs — there is no live switch to flip afterwards that
+would not tear the share down. Pressing Share screen on the native path now opens
+a pre-share sheet (three streaming modes + the audio switch), and only *Start
+streaming* asks the native side for anything. A browser share is untouched:
+Chrome's own picker already offers "share tab audio", so the sheet would only be
+in the way.
+
+**Audio path:** `ScreenCapture.kt` builds an `AudioRecord` from an
+`AudioPlaybackCaptureConfiguration` on the same projection token, pushes 20 ms
+PCM16 chunks over the channel the frames already use (`{type:"audio"}`, plus
+`audioStarted` / `audioError`), and the page feeds them through the relay's
+existing playback worklet into a `MediaStreamAudioDestinationNode`. That track is
+added to the canvas stream **before** it is handed to the pipeline — the pipeline
+reads `getAudioTracks()` once when it picks relay vs mesh, so a track added later
+is silently ignored. Nothing downstream changes: relay capture, per-member volume
+and the mesh senders cannot tell app audio from tab audio.
+
+**Details that are load-bearing:**
+
+* Our own UID is **excluded** (`excludeUid`): the call's own playback would
+  otherwise be re-broadcast to the room, i.e. an echo loop.
+* Only `USAGE_MEDIA` / `USAGE_GAME` / `USAGE_UNKNOWN` are matched — Android
+  forbids combining `addMatchingUsage` with `excludeUsage`, and `addMatchingUid`
+  with `excludeUid`.
+* A refusal degrades to video only: `audioError` detaches the (silent) track and
+  closes the graph, and the reason is readable in Settings → Voice → Advanced
+  rather than a toast that hides the video.
+* The audio context is created at 48 kHz (the capture rate) inside the click that
+  starts the share — one created outside a gesture starts suspended, and one at
+  the device's own rate would detune everything.
+* The answer is persisted in `voice_settings.shareScreenAudio`, so the sheet
+  reopens on the last choice.
+
+**Verified:** `tests/screen-share-audio-mobile.spec.ts` (the sheet gates the
+native call, the switch reaches `withAudio`, the mode becomes `maxHeight`, native
+PCM lands as an audio track on the screen stream, a refusal keeps the video
+running, the diag panel names the audio state); the existing native/fallback
+screen-share specs now go through the sheet; the desktop screen-audio specs are
+unchanged and green. Local release builds: the APK's dex carries the new capture,
+plus the Windows MSI and NSIS installers.
+
+**Files:** `static/voice.js`, `static/style.css`,
+`src-tauri/plugins/call-service/android/…/ScreenCapture.kt`,
+`src-tauri/plugins/call-service/android/…/CallServicePlugin.kt`,
+`tests/screen-share-*.spec.ts`

@@ -11569,3 +11569,147 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     outline: none;
     border-color: var(--accent, #4fc3f7);
 }
+
+/* ─── Screen-share sheet (mobile) ──────────────────────────────────── */
+/* Discord-style settings sheet: it exists because the Android capture is
+   one-shot — the answer has to be given before the system picker mints the
+   MediaProjection token. Bottom-anchored so it reads as a phone sheet, above
+   every other layer (the call UI sits at ~100000). */
+.share-sheet-overlay {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 100050;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+}
+.share-sheet {
+    width: 100%;
+    max-width: 480px;
+    max-height: 88vh;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-border);
+    border-radius: 16px 16px 0 0;
+    padding: 18px 16px 18px;
+    padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    color: var(--text-primary);
+}
+.share-sheet-title {
+    font-size: 18px;
+    font-weight: 600;
+    text-align: center;
+    margin-bottom: 6px;
+}
+.share-sheet-section {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin: 16px 0 8px;
+}
+.share-sheet-mode {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--bg-border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+.share-sheet-mode:hover {
+    background: var(--hover-bg);
+}
+.share-sheet-mode input {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+}
+.share-sheet-mode-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.share-sheet-mode-text strong {
+    font-size: 15px;
+    font-weight: 600;
+}
+.share-sheet-mode-text span {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.share-sheet-switch {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--bg-border);
+    border-radius: 10px;
+    font-size: 15px;
+    cursor: pointer;
+}
+.share-sheet-switch-label {
+    flex: 1 1 auto;
+}
+.share-sheet-switch input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+.share-sheet-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+    background: var(--bg-border);
+    transition: background 0.15s ease;
+}
+.share-sheet-knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s ease;
+}
+.share-sheet-switch input:checked + .share-sheet-track {
+    background: var(--accent);
+}
+.share-sheet-switch input:checked + .share-sheet-track .share-sheet-knob {
+    transform: translateX(20px);
+}
+.share-sheet-switch input:focus-visible + .share-sheet-track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.share-sheet-hint {
+    margin: 8px 2px 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+.share-sheet-start {
+    width: 100%;
+    margin-top: 16px;
+    padding: 13px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #0d1b2a;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.share-sheet-start:hover {
+    background: var(--accent-hover);
+}

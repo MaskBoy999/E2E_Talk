@@ -6,9 +6,14 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Base64
@@ -16,6 +21,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import app.tauri.plugin.Channel
 import java.io.ByteArrayOutputStream
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
@@ -78,13 +84,30 @@ import kotlin.math.roundToInt
  * [prepare] clears the flag again, because a projection that has been stopped
  * must be able to be replaced by the next share.
  *
- * ## What this deliberately does not do
+ * ## App audio ([withAudio])
  *
- * No audio. `MediaProjection` audio capture needs a separate
- * `AudioPlaybackCapture` configuration and only sees other apps' audio when
- * they opt in, and the box already relays the microphone through the existing
- * WebRTC/relay path. Screen *video* is the whole feature; inventing a second
- * audio pipeline here would risk the one that works.
+ * The same projection token also feeds an `AudioRecord` built with an
+ * `AudioPlaybackCaptureConfiguration`, which mirrors what the *other* apps on
+ * the device are playing (games, video players, everything that has not opted
+ * out of capture). That audio is streamed to the page as raw PCM16 over the
+ * same channel as the frames, and the page turns it into a real audio track on
+ * the canvas stream — so the relay/mesh pipeline cannot tell it apart from the
+ * tab audio a desktop `getDisplayMedia` share produces.
+ *
+ * Three things here are easy to get wrong:
+ *
+ * * **Our own playback is excluded** (`excludeUid`). The call itself is playing
+ *   through this app; capturing it would send every remote voice straight back
+ *   out to the room — a feedback loop, not a feature.
+ * * **Only some usages are captured** (`USAGE_MEDIA`, `USAGE_GAME`,
+ *   `USAGE_UNKNOWN`), matching what a user would call "the app's sound".
+ *   Android forbids combining `addMatchingUsage` with `excludeUsage`, and
+ *   `addMatchingUid` with `excludeUid` — so this picks one of each pair.
+ * * **The playing app can refuse.** `allowAudioPlaybackCapture=false` or an
+ *   `ALLOW_CAPTURE_BY_NONE` policy (DRM/copy-protected playback) makes this
+ *   record silence. That is out of our control and must never fail the share:
+ *   audio problems are reported on the channel as their own message and the
+ *   video keeps running.
  */
 class ScreenCapture(private val activity: Activity) {
 
@@ -94,6 +117,18 @@ class ScreenCapture(private val activity: Activity) {
 
         /** Usable formats for the returned `MediaProjection` token. */
         private const val RW_FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
+
+        /**
+         * App audio is captured at the rate the rest of the pipeline assumes
+         * (see `RELAY_SAMPLE_RATE` in voice.js), mono: a screen share's audio is
+         * usually music/effects, and the page feeds it back into a 48 kHz
+         * AudioContext, so anything else would come out pitch-shifted.
+         */
+        private const val AUDIO_RATE = 48000
+
+        /** 20 ms per message — small enough to stay smooth, big enough that the
+         *  Tauri bridge is not chatty (50 messages/second, ~2.6 KB each). */
+        private const val AUDIO_CHUNK = AUDIO_RATE / 50
     }
 
     private var projection: MediaProjection? = null
@@ -103,6 +138,11 @@ class ScreenCapture(private val activity: Activity) {
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
     private var channel: Channel? = null
+
+    /** App-audio capture: the `AudioRecord` and the thread that drains it. */
+    private var audioRecord: AudioRecord? = null
+    private var audioThread: Thread? = null
+    private var withAudio = false
 
     private var width = 0
     private var height = 0
@@ -141,12 +181,13 @@ class ScreenCapture(private val activity: Activity) {
      * Decide the capture geometry and hand back the system picker's Intent.
      * The caller launches it and routes the result to [begin] or [fail].
      */
-    fun prepare(ch: Channel, maxHeight: Int, fps: Int): Intent {
+    fun prepare(ch: Channel, maxHeight: Int, fps: Int, audio: Boolean): Intent {
         stop() // never leave an older capture running
         // A fresh share is allowed to start: the previous one (if any) is now
         // fully torn down.
         stopping = false
         channel = ch
+        withAudio = audio
         targetFps = if (fps in 1..30) fps else 10
         val mgr = activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val metrics = realMetrics()
@@ -254,16 +295,146 @@ class ScreenCapture(private val activity: Activity) {
             return fail("could not create the virtual display: ${e.message}")
         }
 
+        // Audio rides on the same projection token. Started only after the
+        // video pipeline is live, and never allowed to fail the share: the
+        // record's own problems are reported as their own channel message.
+        if (withAudio) startAudio(mp)
+
         running = true
-        Log.i(TAG, "capturing ${width}x$height @ ${targetFps}fps")
+        Log.i(TAG, "capturing ${width}x$height @ ${targetFps}fps (audio=$withAudio)")
         post(
             mapOf(
                 "type" to "started",
                 "w" to width,
                 "h" to height,
-                "fps" to targetFps
+                "fps" to targetFps,
+                "audio" to withAudio
             )
         )
+    }
+
+    // ------------------------------------------------------------------
+    // App audio (AudioPlaybackCapture)
+    // ------------------------------------------------------------------
+
+    /**
+     * Mirror the device's playback into an `AudioRecord`. Android only lets an
+     * app do this from Android 10 on, and only for apps that allow capture —
+     * both cases are reported to the page rather than swallowed.
+     */
+    private fun startAudio(mp: MediaProjection) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            post(mapOf("type" to "audioError", "message" to "app audio needs Android 10 or newer"))
+            return
+        }
+        val rec = try {
+            val config = AudioPlaybackCaptureConfiguration.Builder(mp)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                // The call's own playback must not be re-broadcast — see the
+                // class comment: that is a feedback loop.
+                .excludeUid(activity.applicationInfo.uid)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(AUDIO_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build()
+            val minBytes = AudioRecord.getMinBufferSize(
+                AUDIO_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            AudioRecord.Builder()
+                .setAudioPlaybackCaptureConfig(config)
+                .setAudioFormat(format)
+                // Room for several chunks, so a slow frame cannot starve the
+                // reader and drop samples.
+                .setBufferSizeInBytes(max(minBytes, AUDIO_CHUNK * 2 * 4))
+                .build()
+        } catch (e: Exception) {
+            // A SecurityException here is the normal "this device/OEM forbids
+            // playback capture" answer, not a bug.
+            Log.w(TAG, "could not build the audio capture: ${e.message}")
+            post(mapOf("type" to "audioError", "message" to (e.message ?: "could not capture app audio")))
+            return
+        }
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            try { rec.release() } catch (e: Exception) { Log.w(TAG, "audio release failed: ${e.message}") }
+            post(mapOf("type" to "audioError", "message" to "the device refused the audio capture"))
+            return
+        }
+        val started = try {
+            rec.startRecording()
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "could not start the audio capture: ${e.message}")
+            post(mapOf("type" to "audioError", "message" to (e.message ?: "could not start app audio")))
+            false
+        }
+        if (!started) {
+            try { rec.release() } catch (e: Exception) { Log.w(TAG, "audio release failed: ${e.message}") }
+            return
+        }
+        audioRecord = rec
+        post(mapOf("type" to "audioStarted", "rate" to AUDIO_RATE))
+        Log.i(TAG, "capturing app audio @ ${AUDIO_RATE}Hz")
+        val t = Thread({ audioLoop(rec) }, "e2e-screen-audio")
+        audioThread = t
+        t.start()
+    }
+
+    /**
+     * Drain the record and hand each chunk to the page as PCM16 little-endian.
+     *
+     * `read` is blocking, so the loop is also the thread's shutdown condition:
+     * [stopAudio] clears [audioRecord] and calls `stop()`, which makes the
+     * pending read return and the loop exit.
+     */
+    private fun audioLoop(rec: AudioRecord) {
+        val shorts = ShortArray(AUDIO_CHUNK)
+        val bytes = ByteArray(AUDIO_CHUNK * 2)
+        while (!stopping && audioRecord === rec) {
+            val n = try {
+                rec.read(shorts, 0, shorts.size)
+            } catch (e: Exception) {
+                Log.w(TAG, "audio read failed: ${e.message}")
+                -1
+            }
+            if (n < 0) {
+                // ERROR_INVALID_OPERATION / ERROR_DEAD_OBJECT: the projection
+                // went away under us. Back off rather than spin, and let the
+                // projection callback tear the share down.
+                if (stopping) break
+                try { Thread.sleep(20) } catch (_: InterruptedException) { break }
+                continue
+            }
+            if (n == 0) continue
+            var b = 0
+            for (i in 0 until n) {
+                val s = shorts[i].toInt()
+                bytes[b++] = (s and 0xFF).toByte()
+                bytes[b++] = ((s shr 8) and 0xFF).toByte()
+            }
+            post(mapOf("type" to "audio", "pcm" to Base64.encodeToString(bytes, 0, n * 2, Base64.NO_WRAP)))
+        }
+    }
+
+    /**
+     * Stop and release the audio capture. Idempotent, and safe to call from
+     * [stop] — the record is closed before the projection it was derived from.
+     */
+    private fun stopAudio() {
+        val rec = audioRecord ?: return
+        audioRecord = null
+        try { rec.stop() } catch (e: Exception) { Log.w(TAG, "audio stop failed: ${e.message}") }
+        val t = audioThread
+        audioThread = null
+        if (t != null) {
+            try { t.join(300) } catch (_: InterruptedException) { /* give up waiting */ }
+        }
+        try { rec.release() } catch (e: Exception) { Log.w(TAG, "audio release failed: ${e.message}") }
     }
 
     private fun onFrame(image: android.media.Image) {
@@ -334,6 +505,10 @@ class ScreenCapture(private val activity: Activity) {
         if (stopping) return
         stopping = true
         running = false
+
+        // Audio first: the record was built from the projection, so it has to
+        // be released before the projection it borrows is stopped.
+        stopAudio()
 
         // The callback must be detached BEFORE the projection is stopped,
         // otherwise `stop()` below re-enters `onStop()`. This is the whole
