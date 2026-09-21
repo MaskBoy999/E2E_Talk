@@ -7535,3 +7535,29 @@ platform's own runtime permission, and no app can suppress it; it is asked once 
 **Files:** `src-tauri/src/win_webview.rs`, `src-tauri/src/lib.rs`, `static/box-setup.html`,
 `tests/box-setup.spec.ts`, `tools/box/probe-box-live.mjs`
 
+
+### 136. Android screen share fix (v0.2.15)
+
+**Symptom:** pressing Share screen on Android did nothing — `getDisplayMedia()` either silently
+failed or the system picker never appeared.
+
+**Root cause:** wry's `RustWebChromeClient.onPermissionRequest` handles `AUDIO_CAPTURE` and
+`VIDEO_CAPTURE` by showing the Android permission dialog, but does **not** handle
+`MediaProjection` — which is what `getDisplayMedia()` needs. The previous override called
+`super.onPermissionRequest(request)` *first*, which auto-denied the MediaProjection request
+before the explicit `grant()` could run.
+
+**Fix:** the `onPermissionRequest` override in `.cargo/config.toml` now checks for
+MediaProjection **first** and grants it immediately (returning early), then delegates only
+audio/video capture to wry's default handler. This ensures the display-capture permission
+is never auto-denied.
+
+Additional changes:
+- `static/voice.js`: better error messaging when screen share fails (specific messages for
+  NotAllowedError, NotFoundError, AbortError instead of generic "denied")
+- `static/voice.js`: early guard when `getDisplayMedia` is unavailable on the device
+- Removed unused native `requestScreenCapture`/`stopScreenCapture` commands from
+  `CallServicePlugin.kt` (used `org.json.JSONObject` which is not in the Tauri plugin
+  classpath)
+
+**Files:** `.cargo/config.toml`, `static/voice.js`, `src-tauri/plugins/call-service/android/consumer-proguard-rules.pro`
