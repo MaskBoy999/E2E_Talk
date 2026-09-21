@@ -7561,3 +7561,18 @@ Additional changes:
   classpath)
 
 **Files:** `.cargo/config.toml`, `static/voice.js`, `src-tauri/plugins/call-service/android/consumer-proguard-rules.pro`
+
+### 137. Clear WebView storage on setup save (v0.2.15)
+
+**Symptom:** after switching server addresses in the Android app, old cookies,
+encrypted keys, or session tokens from the previous server persisted in WebView
+storage, causing black screens, wrong identities, or stale data.
+
+**Fix:** `static/box-setup.html` now calls `localStorage.clear()`,
+`sessionStorage.clear()`, and wipes IndexedDB databases before invoking
+`save_config`. This ensures every Save & Launch starts from a clean slate.
+
+**For existing installs without the update:** use Settings → Security →
+"Clear All Data & Sign Out" to achieve the same effect without reinstalling.
+
+**Files:** `static/box-setup.html`
