@@ -7811,7 +7811,7 @@ reinstall-or-`ie4uinit` route described in §140.
 
 **Files:** `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json`
 
-### 145. Mobile screen share can share app audio (v0.2.19)
+### 145. Mobile screen share can share app audio (v0.2.20)
 
 **Feature:** Discord's Android stream sheet has a "share app audio" switch; ours
 had none — a phone share was always video-only, and `ScreenCapture.kt` said so
