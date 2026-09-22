@@ -8183,3 +8183,30 @@ agree — the spec's version checks are format-based and unaffected.
 **Files:** `.github/workflows/release.yml`, `packaging/aur/README.md`,
 `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
 
+### 154. v0.2.23 ships green, Arch package included
+
+The fresh tag did what the forced re-tag could not. `Build Desktop Box`
+(linux-x64 and windows-x64) and `Build Android APK` all completed
+successfully on attempt 1, and the release carries every asset:
+
+    e2e-chat-bin-0.2.23-1-x86_64.pkg.tar.zst   <- the Arch package
+    E2E-Chat-v0.2.23-android.apk
+    E2E.Chat-0.2.23-1.x86_64.rpm
+    E2E.Chat_0.2.23_amd64.AppImage / _amd64.deb
+    E2E.Chat_0.2.23_x64-setup.exe / _x64_en-US.msi
+    SHA256SUMS-android.txt / -linux-x64.txt / -windows-x64.txt
+
+Verified against the published bytes rather than the job status: the
+`pkg.tar.zst` downloads, is a real zstd stream (magic `28b52ffd`), unpacks to
+`usr/bin/e2e-chat-app` plus the `.desktop` and the hicolor icon, and its
+`.PKGINFO` reads `pkgname = e2e-chat-bin` / `pkgver = 0.2.23-1` /
+`pkgarch = x86_64`. Its sha256 equals the line in `SHA256SUMS-linux-x64.txt`,
+and so does the `.deb`'s. The release notes carry the `sudo pacman -U` line.
+
+Leftover: the v0.2.22 release stays partial (no `SHA256SUMS-linux-x64.txt`, no
+`.pkg.tar.zst`) — a release cannot be completed by re-running its tag, and
+deleting one needs a token this project does not have. v0.2.23 supersedes it;
+delete v0.2.22 from the releases UI if it should not linger.
+
+**Files:** none (verification only)
+
