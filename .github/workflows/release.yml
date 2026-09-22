@@ -248,7 +248,16 @@ jobs:
               # exist" while the rendered file sits in /home/builder. This is
               # what failed the first v0.2.22 tag run.
               cd /home/builder
-              sudo -u builder makepkg --force --noconfirm
+              # --nodeps: this image carries base-devel, not the GTK /
+              # webkit2gtk runtime stack the package depends on. Installing
+              # that whole desktop tree just to repack a prebuilt .deb is
+              # pointless, and the makepkg dependency check otherwise fails
+              # the build with "Could not resolve all dependencies" — which is
+              # what failed the second v0.2.22 run (after the cd above fixed
+              # the first). The depends stay declared for the machine that
+              # installs the package, and pacman -Qp / -Qlp below still read
+              # the produced artifact back.
+              sudo -u builder makepkg --nodeps --force --noconfirm
               cp /home/builder/*.pkg.tar.zst /dist/
 
               info="$(pacman -Qp /dist/*.pkg.tar.zst)"

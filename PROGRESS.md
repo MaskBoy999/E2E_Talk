@@ -8149,3 +8149,37 @@ workflows; release-complete verification (the `pkg.tar.zst` plus its
 
 **Files:** `.github/workflows/release.yml`, `packaging/aur/PKGBUILD.template`
 
+### 153. Second v0.2.22 run: makepkg's dependency check, and a release that cannot be re-run
+
+Force-moving `v0.2.22` onto the §152 fix did re-trigger both workflows — and
+both failed again, this time legibly. The `::error::` tail added in §152 was
+the whole diagnosis, because job logs are still 403 to anonymous readers:
+
+* The Arch step got past the `cd` bug and as far as
+  `==> Making package: e2e-chat-bin 0.2.22-1` before dying on its dependency
+  check — `Missing dependencies: cairo, desktop-file-utils, gdk-pixbuf2,
+  gtk3, hicolor-icon-theme, libayatana-appindicator, libsoup3, pango,
+  webkit2gtk-4.1` / `ERROR: Could not resolve all dependencies.` The container
+  is `archlinux:base-devel`: it has no GTK/webkit2gtk runtime stack, and
+  installing that whole desktop tree just to repack a prebuilt `.deb` is
+  pointless. `makepkg` now runs `--nodeps`; the `depends` stay declared for the
+  machine that installs the package, and `pacman -Qp` / `-Qlp` still read the
+  artifact back. (The §152 `pacman -Syu` was clean — it upgraded
+  bash/readline/gzip and moved straight on.)
+* `Attach APK + checksums to release` (Android) and `Attach checksums to
+  release` (Windows) both failed with `Resource not accessible by integration`
+  on `update-a-release`. Not an asset-name collision — `overwrite_files`
+  defaults to true — and not something fixable from here: a release that
+  already exists cannot be completed by re-running its tag, and deleting a
+  release needs API auth this project does not have. Only a **fresh tag**
+  publishes cleanly, which is why the next release is `v0.2.23`; the v0.2.22
+  release stays as it is (every installer, Android + Windows checksums; no
+  `SHA256SUMS-linux-x64.txt` and no `.pkg.tar.zst`).
+
+Version bumped to 0.2.23 (`tauri.conf.json` plus `versionCode` 222,
+`Cargo.toml`, `Cargo.lock`) so the tag, the release name and every installer
+agree — the spec's version checks are format-based and unaffected.
+
+**Files:** `.github/workflows/release.yml`, `packaging/aur/README.md`,
+`src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
+

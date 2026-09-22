@@ -19,7 +19,9 @@ container — the standard pattern for Arch packaging in CI — from the same
 3. In the container, `makepkg` downloads that `.deb` from its **release URL** —
    the identical fetch an Arch user performs, so the step doubles as proof the
    published asset exists — verifies the hash, and repacks it
-   (`bsdtar` unwraps the `ar` container; Arch has no dpkg).
+   (`bsdtar` unwraps the `ar` container; Arch has no dpkg). It runs with
+   `--nodeps`: the container has `base-devel`, not the GTK/webkit2gtk runtime
+   stack, whose `depends` belong to the machine that installs the package.
 4. CI reads the artifact back with **pacman itself**: `pacman -Qp` must report
    `e2e-chat-bin <tag>-1`, and `pacman -Qlp` prints the file list into the job
    log. Version drift (the v0.2.19 phantom-re-update lesson) fails the release
@@ -47,8 +49,9 @@ With Docker (mirrors CI exactly):
     docker run --rm -v /tmp/arch:/pkgbuild:ro archlinux:base-devel bash -ec '
       useradd -m b; echo "b ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/b
       cp /pkgbuild/* /home/b/; chown -R b /home/b
-      pacman -Sy --noconfirm --needed curl
-      sudo -u b makepkg --force --noconfirm
+      pacman -Syu --noconfirm --needed curl
+      cd /home/b
+      sudo -u b makepkg --nodeps --force --noconfirm
       pacman -Qp /home/b/*.pkg.tar.zst'
 
 Without Docker, the extraction half still checks out on any OS — Windows' built-in
