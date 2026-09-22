@@ -104,6 +104,9 @@ keystore-base64.txt
 # Signed release artifacts staged by the release workflows
 /dist/
 
+# Rendered AUR package (tools/aur-render.mjs output — the AUR holds the copies)
+packaging/aur/out/
+
 # Agent skill customizations (local)
 .agents/
 AGENTS.md

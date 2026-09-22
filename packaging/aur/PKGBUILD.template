@@ -1,0 +1,39 @@
+# Maintainer: MaskBoy999 <MaskBoy999@users.noreply.github.com>
+#
+# AUR recipe for E2E Chat. This file is a TEMPLATE: tools/aur-render.mjs fills
+# the version and sha256 placeholders on every release tag and pushes the
+# result — together with the .SRCINFO it derives from it — to the AUR package
+# `e2e-chat-bin`. Fix packaging here or on the AUR, never against a rendered
+# copy.
+#
+# NOTE for humans editing this template: keep every array on ONE line. The
+# header (everything before package()) is parsed line-wise to produce the
+# .SRCINFO, and a multi-line array would fail the render loudly.
+
+pkgname=e2e-chat-bin
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='End-to-end encrypted chat with voice, video and screen share (prebuilt desktop app)'
+arch=('x86_64')
+url='https://github.com/MaskBoy999/E2E_Talk'
+license=('ISC')
+depends=('cairo' 'desktop-file-utils' 'gdk-pixbuf2' 'glib2' 'gtk3' 'hicolor-icon-theme' 'libayatana-appindicator' 'libsoup3' 'pango' 'webkit2gtk-4.1')
+options=('!strip')
+install=e2e-chat-bin.install
+# The exact asset name Tauri publishes (verified against the v0.2.21 release),
+# pinned by the sha256 from SHA256SUMS-linux-x64.txt — the file users verify.
+source_x86_64=('https://github.com/MaskBoy999/E2E_Talk/releases/download/v@PKGVER@/E2E.Chat_@PKGVER@_amd64.deb')
+sha256sums_x86_64=('@SHA256@')
+# Without this makepkg tries to auto-extract the .deb itself and does not know
+# how; package() below unwraps it on purpose.
+noextract=("E2E.Chat_${pkgver}_amd64.deb")
+
+# A .deb is an `ar` archive: bsdtar reads those natively (Arch has no dpkg),
+# then data.tar.* unpacks straight into $pkgdir so pacman owns every file.
+# Shared-library deps are declared by hand above because there is no
+# dpkg-shlibdeps step on this side of the fence — that list follows Tauri's
+# own AUR guide, plus libayatana-appindicator for the tray icon.
+package() {
+  bsdtar -C "$srcdir" -xf "$srcdir"/E2E.Chat_"${pkgver}"_amd64.deb
+  tar -xf "$srcdir"/data.tar.* -C "$pkgdir"
+}

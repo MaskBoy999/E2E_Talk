@@ -8008,3 +8008,62 @@ and on a screen-share start) and measures the peer's first decoded frame off
 **Files:** `static/voice.js`, `static/e2ee-worker.js`,
 `tests/video-first-frame.spec.ts`
 
+---
+
+### 150. Arch Linux installs from the AUR (next release)
+
+**Why:** Linux shipped as `.AppImage` / `.deb` / `.rpm` only — nothing a
+pacman user can install without hand-wrapping a `.deb` themselves. The AUR is
+the standard Arch channel, and its rules are satisfied by an artifact the
+release already publishes: a `-bin` package that repacks the published `.deb`
+(the `-bin` suffix is mandatory for prebuilt deliverables per the AUR
+submission guidelines).
+
+**What:**
+* `packaging/aur/PKGBUILD.template` — downloads
+  `E2E.Chat_<ver>_amd64.deb` from the release pinned by sha256, unwraps the
+  `ar` container with bsdtar (Arch has no dpkg) and unpacks `data.tar.*`
+  straight into `$pkgdir` so pacman owns every file. `noextract` keeps
+  makepkg's own auto-extraction away from the `.deb`. Runtime depends follow
+  Tauri's AUR guide (`webkit2gtk-4.1`, gtk3 stack, …) plus
+  `libayatana-appindicator` for the tray, plus an `.install` scriptlet that
+  refreshes the icon cache and desktop database.
+* `tools/aur-render.mjs` — fills `@PKGVER@`/`@SHA256@` and derives the
+  `.SRCINFO` the AUR rejects pushes without *from the rendered PKGBUILD
+  itself*. The official producer is `makepkg --printsrcinfo`, which does not
+  exist on the Ubuntu release runners; deriving both outputs from the one
+  template makes drift impossible. It fails loudly on anything questionable:
+  a checksum that is not 64 hex, a missing header field, a multi-line array,
+  a source URL not pinned to the version, `install=` not matching `pkgname`,
+  or `webkit2gtk-4.1` dropping out of depends.
+* `release.yml` — a new step on the Linux leg, after the checksums are
+  attached: renders this tag's package and pushes it to
+  `ssh://aur@aur.archlinux.org/e2e-chat-bin.git`. The hash is taken from
+  `SHA256SUMS-linux-x64.txt` (the file users verify) and a missing `.deb`
+  entry aborts the push. Gated on the new `AUR_SSH_KEY` secret exactly like
+  the Windows certificate: step `if:` cannot read `secrets`, so it is
+  surfaced as job env — absent → skipped, release unaffected. Tag-only,
+  Linux-leg-only. Per the ArchWiki, cloning a package name that does not
+  exist yet yields an empty repo, so the first push creates the package —
+  no manual bootstrap. The release notes now name the install line too
+  (`yay -S e2e-chat-bin`).
+
+**One-time setup:** an AUR account, a dedicated SSH key registered on it,
+and that private key stored as the `AUR_SSH_KEY` repo secret — full steps in
+`packaging/aur/README.md`. Known gap: `package.json` declares ISC but the
+repo has no LICENSE file; the AUR guidelines ask for one, so add it before
+the first publish if possible (flagged, not done — choosing the license text
+is the owner's call).
+
+**Verified:** `tests/aur-packaging.spec.ts` renders a package with a fake
+version/checksum and asserts the PKGBUILD pins the real asset name, the
+.SRCINFO mirrors it field-for-field with no `$` or placeholder residue, bad
+input exits non-zero, and the workflow step is wired tag-only + secret-gated
+with the install line in the release notes. ArchWiki checked for the two
+mechanics that could sink a push: `-bin` naming and first-push-creates-repo.
+
+**Files:** `packaging/aur/PKGBUILD.template`,
+`packaging/aur/e2e-chat-bin.install`, `packaging/aur/README.md`,
+`tools/aur-render.mjs`, `.github/workflows/release.yml`,
+`tests/aur-packaging.spec.ts`, `.gitignore`
+
