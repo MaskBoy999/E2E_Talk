@@ -144,4 +144,18 @@ test.describe('AUR packaging', () => {
     // And the release notes tell Arch users how to install.
     expect(wf).toContain('yay -S e2e-chat-bin');
   });
+
+  test('the repo ships the LICENSE file the AUR guidelines require', () => {
+    // The AUR submission guidelines ask the upstream repo to carry a license
+    // file, and package.json has always declared ISC — the three must agree,
+    // or the package would advertise a license nothing backs (and a
+    // placeholder like <holder> would slip straight onto the AUR page).
+    const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+    const license = readFileSync(join(ROOT, 'LICENSE'), 'utf8');
+    expect(pkg.license).toBe('ISC');
+    expect(license).toContain('ISC License');
+    expect(license).toContain('Copyright (c) 2026 Dorcu Eduard-Daniel');
+    expect(license).toContain('Permission to use, copy, modify, and/or distribute');
+    expect(license).not.toMatch(/<holder>|YOUR NAME|TODO/i);
+  });
 });

@@ -71,6 +71,7 @@ so CI catches template edits that would otherwise only fail at push time.
 - The template's `# Maintainer:` line is a placeholder (GitHub noreply) —
   change it in `PKGBUILD.template` to your AUR identity if you want it to
   show properly on the package page.
-- `license=('ISC')` matches `package.json`, but the repo still has **no
-  LICENSE file**. The AUR guidelines ask for one; add it before the first
-  publish if possible.
+- `license=('ISC')` matches `package.json`, and the repo carries the
+  matching `LICENSE` file at its root (the AUR submission guidelines ask
+  upstream for one). `tests/aur-packaging.spec.ts` keeps the SPDX id, the
+  file text and the copyright line in agreement.

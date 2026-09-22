@@ -8050,10 +8050,11 @@ submission guidelines).
 
 **One-time setup:** an AUR account, a dedicated SSH key registered on it,
 and that private key stored as the `AUR_SSH_KEY` repo secret — full steps in
-`packaging/aur/README.md`. Known gap: `package.json` declares ISC but the
-repo has no LICENSE file; the AUR guidelines ask for one, so add it before
-the first publish if possible (flagged, not done — choosing the license text
-is the owner's call).
+`packaging/aur/README.md`. Known gap closed in the same cycle: the repo
+carries the ISC `LICENSE` file `package.json` has always declared, under the
+author's own name — the AUR's "upstream must ship a license" requirement is
+met, and the spec asserts package.json's SPDX id, the file's text and the
+copyright line stay in agreement.
 
 **Verified:** `tests/aur-packaging.spec.ts` renders a package with a fake
 version/checksum and asserts the PKGBUILD pins the real asset name, the
