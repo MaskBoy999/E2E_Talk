@@ -175,7 +175,10 @@ class CallForegroundService : Service() {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("E2E Chat")
             .setContentText("In call — $channelName")
-            .setSmallIcon(applicationInfo.icon)
+            // Silhouette, not the launcher icon — see IncomingCallNotifier:
+            // a small icon is an alpha mask, so the full-colour app icon came
+            // out as a white blob in the status bar.
+            .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)

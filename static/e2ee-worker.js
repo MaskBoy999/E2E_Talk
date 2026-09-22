@@ -117,6 +117,16 @@ addEventListener('rtctransform', (event) => {
                     encodedFrame.type !== undefined &&
                     typeof event.transformer.generateKeyFrame === 'function') {
                     event.transformer._codebuffKfStarted = true;
+                    // Keyframe NOW as well as on the 2.5s cadence. A receiver's
+                    // decrypt transform is attached a beat after our encoder
+                    // starts, so it misses the opening keyframe and can only
+                    // drop the delta frames that follow — its tile stays black
+                    // until the next keyframe arrives. Forcing one on the first
+                    // encrypted video frame (and the page re-kicks a few times
+                    // after a track change) is what turns "black for a while,
+                    // fine after toggling it off and on again" into "visible
+                    // immediately".
+                    try { event.transformer.generateKeyFrame(); } catch (_) {}
                     event.transformer._codebuffKfTimer = setInterval(() => {
                         try { event.transformer.generateKeyFrame(); } catch (_) {}
                     }, 2500);

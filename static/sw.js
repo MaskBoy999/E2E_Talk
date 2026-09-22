@@ -10,7 +10,7 @@
 // Bump this whenever static JS changes: assets are served cache-first, so an
 // unchanged cache name keeps an OLD voice.js/chat.js alive and code fixes look
 // like they "didn't apply".
-const CACHE_NAME = 'e2e-chat-v11';
+const CACHE_NAME = 'e2e-chat-v12';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -26,6 +26,15 @@ const STATIC_ASSETS = [
     '/thread_categories_shortcuts.js',
     '/roles.js',
     '/manifest.json',
+    // The app's icons, generated from the single source of truth by
+    // `npm run icon` (tools/box-icon.mjs). Cached so notifications and the
+    // installed-app icon still resolve offline.
+    '/favicon.ico',
+    '/icons/icon-192.png',
+    '/icons/icon-512.png',
+    '/icons/icon-maskable-512.png',
+    '/icons/apple-touch-icon.png',
+    '/icons/badge-96.png',
 ];
 
 // Install: cache static assets
@@ -178,7 +187,10 @@ self.addEventListener('push', (event) => {
     const options = {
         body: data.body || 'New message',
         icon: '/icons/icon-192.png',
-        badge: '/icons/icon-192.png',
+        // Android paints the badge as a white silhouette, so it has to be the
+        // monochrome mark rather than the full-colour icon (a colour bitmap
+        // comes out as a solid blob).
+        badge: '/icons/badge-96.png',
         tag: data.tag || 'e2e-chat',
         data: data.url || '/',
         actions: data.actions || [],

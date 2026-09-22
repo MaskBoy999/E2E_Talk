@@ -8,6 +8,15 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="/manifest.json">
     <title>E2E Chat</title>
+    <!-- One logo everywhere. Every file below is generated from the single
+         source of truth (src-tauri/icons/source/box-icon.png) by `npm run icon`
+         — the same artwork the desktop bundle and the Android launcher icon are
+         built from, so the tab icon, the installed-app icon and the phone's home
+         screen cannot drift apart. -->
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
     <link rel="stylesheet" href="style.css?v=24">
 </head>
 <body>
@@ -774,6 +783,15 @@
             <!-- Notification Settings -->
             <div class="settings-panel" id="notification-settings" style="display:none">
                 <div class="settings-group">
+                    <h4>Notification Privacy</h4>
+                    <label class="settings-checkbox-label" style="margin-top:6px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
+                        <input type="checkbox" id="notif-hide-preview" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Hide message content in notifications
+                    </label>
+                    <p class="settings-hint">When on, every notification says only <strong>that</strong> something happened — no sender name, no channel or server, and no message text. Your operating system stores whatever a notification says (Windows keeps it in its notification database; a phone keeps it in the notification shade, and can show it on the lock screen), so a decrypted preview handed to the OS outlives the app. This keeps decrypted content out of the OS entirely, while notifications still arrive and still open the right conversation.</p>
+                    <p class="settings-hint" style="color:var(--text-muted)">On Android the content is already hidden on the lock screen until you unlock. Streamer mode blanks notifications too, regardless of this setting.</p>
+                </div>
+                <div class="settings-group">
                     <h4>Notification Sound</h4>
                     <p class="settings-hint">Choose the sound played when you get a notification. Sounds are capped at 30 seconds — longer files let you pick the 1–30s part to keep. Encrypted end-to-end so it syncs across your devices.</p>
                 </div>
@@ -1294,16 +1312,17 @@
                         <option value="2160">2160p (4K)</option>
                     </select>
                     <p class="settings-hint" style="margin-top:4px;color:var(--warning,#f0b232);">⚠ Receive resolutions only affect mesh P2P mode (the default). If you switch a feed to server relay, you receive at whatever the sender sends.</p>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Relay video FPS (server-relayed mode):</span></label>
+                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Send — frame rate (camera, screen share &amp; relay):</span></label>
                     <select id="voice-relay-video-fps" class="modal-input" style="margin-top:4px;max-width:200px;">
                         <option value="5">5 FPS</option>
                         <option value="10">10 FPS</option>
-                        <option value="15" selected>15 FPS</option>
+                        <option value="15">15 FPS</option>
                         <option value="20">20 FPS</option>
                         <option value="25">25 FPS</option>
-                        <option value="30">30 FPS</option>
+                        <option value="30" selected>30 FPS</option>
+                        <option value="60">60 FPS</option>
                     </select>
-                    <p class="settings-hint">Frame rate for server-relayed video (camera/screen). Higher = smoother but uses more bandwidth. Default 15 FPS is a good balance.</p>
+                    <p class="settings-hint">The frame rate every feed is <strong>sent</strong> at: the camera, your screen share (including the Android screen capture), the mesh encoders and the server relay all read this one value. Higher = smoother but uses more bandwidth. Changing it applies to every sender immediately; a live camera restarts at the new rate, while a live screen share keeps its rate until it is next started.</p>
                     <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Relay JPEG quality (server-relayed mode):</span></label>
                     <select id="voice-relay-jpeg-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
                         <option value="0.3">Low (0.3) — small blobs, more compression</option>
@@ -2378,12 +2397,12 @@
 
     <script src="ui-dialog.js?v=1"></script>
     <script src="secure-storage.js?v=3"></script>
-    <script src="voice.js?v=22"></script>
+    <script src="voice.js?v=23"></script>
     <script src="soundboard-pairing.js?v=12"></script>
     <script src="thread_categories_shortcuts.js?v=9"></script>
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=53"></script>
+    <script src="chat.js?v=55"></script>
     <!-- Android shell: immersive system bars + Back closing the top layer.
          Inert in a browser and on desktop (see the file's header). -->
     <script src="box-shell.js?v=1"></script>

@@ -4290,6 +4290,19 @@ document.addEventListener('DOMContentLoaded', () => {
         updateComposerVisibility();
     })();
 
+    // Notification privacy: "Hide message content in notifications". A local
+    // preference that syncs with the account bundle (crypto.js
+    // BUNDLE_EXACT_KEYS), so it follows the user to every device. Nothing else
+    // has to be re-rendered — notifText() reads it when a notification is
+    // raised.
+    const notifHidePreviewToggle = document.getElementById('notif-hide-preview');
+    if (notifHidePreviewToggle) {
+        notifHidePreviewToggle.checked = localStorage.getItem('notifHidePreview') === 'true';
+        notifHidePreviewToggle.addEventListener('change', () => {
+            localStorage.setItem('notifHidePreview', notifHidePreviewToggle.checked);
+        });
+    }
+
     // Streamer mode toggle
     const streamerToggle = document.getElementById('streamer-mode-toggle');
     if (streamerToggle) {
@@ -10559,29 +10572,80 @@ function startNotifVisualizer(durationMs) {
 // ── Notification wording: who / where / (what) ───────────────────────────────
 // One place builds every message notification's title + body, so a notification
 // says the same things wherever it is raised from: **who** it is from, and — for
-// a channel — **which channel in which server**. Streamer mode has to blank all
-// of that, and it can only do so reliably if there is a single spot to blank:
-// while it is on, a notification may say no more than *that* something happened
-// ("New message in a server", "New direct message", "Call activity") — no name,
-// no channel, no server, no content.
-function notifStreamerHidden() {
-    try { return localStorage.getItem('streamerMode') === 'true'; } catch (_) { return false; }
+// a channel — **which channel in which server**. Two things have to blank all of
+// that, and they can only do so reliably if there is a single spot to blank:
+//
+//  * **Streamer mode** — nothing on screen may name who or where;
+//  * **"Hide message content in notifications"** (Settings → Notifications) —
+//    the OS keeps whatever a notification says. On Windows the text lands in
+//    Explorer's notification database, and on a phone in the notification
+//    shade, so a decrypted message preview handed to the OS outlives the app
+//    and is readable by anything with access to the device's notification
+//    store (the exact class of leak behind the "an OS handed over Signal's
+//    notifications" reports). Turning this on keeps decrypted content out of
+//    the OS entirely: the banner says only *that* something happened.
+//
+// While either is on, a notification may say no more than "New message in a
+// server", "New direct message", "Call activity" — no name, no channel, no
+// server, no content — and it still deep-links to the right conversation.
+function notifContentHidden() {
+    try {
+        return localStorage.getItem('streamerMode') === 'true'
+            || localStorage.getItem('notifHidePreview') === 'true';
+    } catch (_) { return false; }
+}
+
+/**
+ * The sender's **plaintext @username** — the one piece of identity a
+ * notification is allowed to name.
+ *
+ * Resolution order: the raiser's own answer, then whatever local (non-E2E)
+ * caches know about that user id (DM conversation partner, server member list,
+ * self). Display names are deliberately never consulted: a nickname is
+ * end-to-end encrypted, so putting it in a notification would hand decrypted
+ * E2E data to the operating system.
+ */
+function plaintextUsernameFor(userId) {
+    if (!userId) return '';
+    try {
+        if (currentDmOtherUser && currentDmOtherUser.id === userId) return currentDmOtherUser.username || '';
+        for (var i = 0; i < dmConversations.length; i++) {
+            if (dmConversations[i].other_user_id === userId && dmConversations[i].other_username) {
+                return dmConversations[i].other_username;
+            }
+        }
+        for (var j = 0; j < currentServerMemberList.length; j++) {
+            if (currentServerMemberList[j].id === userId && currentServerMemberList[j].username) {
+                return currentServerMemberList[j].username;
+            }
+        }
+        if (typeof user !== 'undefined' && user && user.id === userId && user.username) return user.username;
+    } catch (_) {}
+    return '';
+}
+
+/** The `@username` a notification may show for this sender, or '' when unknown. */
+function notifUsername(o) {
+    o = o || {};
+    var raw = o.username || plaintextUsernameFor(o.userId) || '';
+    return String(raw).replace(/^@/, '').trim();
 }
 
 /**
  * @param {'dm'|'mention'|'reply'|'call'} kind
- * @param {{sender?:string, channel?:string, server?:string, text?:string}} o
+ * @param {{username?:string, userId?:string, dm?:boolean, text?:string}} o
+ *
+ * `username` / `userId` name the sender with plaintext metadata only. `dm`
+ * only chooses between the two SAFE place words ("a direct message" /
+ * "a channel") — it is a boolean, never a name.
  */
 function notifText(kind, o) {
     o = o || {};
-    var sender = o.sender || '';
-    var channel = o.channel ? '#' + o.channel : '';
-    var server = o.server || '';
-    // "#general · My Server", "#general", "My Server", or nothing known.
-    var where = (channel && server) ? channel + ' · ' + server : (channel || server);
-    var what = o.text ? ' — ' + o.text : '';
+    var who = notifUsername(o);
+    var from = who ? '@' + who : 'Someone';
+    var place = o.dm ? 'a direct message' : 'a channel';
 
-    if (notifStreamerHidden()) {
+    if (notifContentHidden()) {
         if (kind === 'call') return { title: 'E2E Chat', body: 'Call activity' };
         if (kind === 'dm') return { title: 'E2E Chat', body: 'New direct message' };
         if (kind === 'mention') return { title: 'E2E Chat', body: 'You were mentioned in a server' };
@@ -10591,15 +10655,15 @@ function notifText(kind, o) {
 
     switch (kind) {
         case 'dm':
-            return { title: 'New DM from ' + sender, body: (where || 'Direct message') + what };
+            return { title: 'New DM from ' + from, body: 'Direct message' };
         case 'mention':
-            return { title: 'Mentioned by ' + sender, body: 'You were mentioned in ' + (where || 'a channel') + what };
+            return { title: 'Mentioned by ' + from, body: 'You were mentioned in ' + place };
         case 'reply':
-            return { title: 'Reply from ' + sender, body: 'in ' + (where || 'a channel') + what };
+            return { title: 'Reply from ' + from, body: 'New reply in ' + place };
         case 'call':
-            return { title: 'Call from ' + sender, body: where ? 'in ' + where : 'Incoming call' };
+            return { title: 'Call from ' + from, body: 'Incoming call' };
         default:
-            return { title: 'E2E Chat', body: where + what };
+            return { title: 'E2E Chat', body: 'New message in ' + place };
     }
 }
 
@@ -10614,7 +10678,25 @@ function showBrowserNotification(title, body, onClick) {
     // only option: the WebView has no Web Notification API at all.
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     try {
-        var notif = new Notification(title, { body, icon: '/favicon.ico' });
+        // The app's own icon (generated from the single source of truth by
+        // `npm run icon`) — not /favicon.ico, which never existed, so every
+        // notification used to come out with the browser's generic placeholder.
+        //
+        // The two platforms resolve `icon` differently, so it has two forms: a
+        // browser/desktop notification takes a URL, while the Android box's
+        // notification plugin resolves the string as a `res/drawable` NAME.
+        // The Android drawable is the app mark in silhouette, because Android
+        // masks a small icon down to its alpha — the full-colour icon there
+        // came out as a shapeless white blob.
+        var notifIcon = (function () {
+            try {
+                var tauri = window.__TAURI__;
+                var androidBox = !!(tauri && tauri.core && tauri.core.invoke)
+                    && /Android/i.test(navigator.userAgent || '');
+                return androidBox ? 'ic_notification' : '/icons/icon-192.png';
+            } catch (_) { return '/icons/icon-192.png'; }
+        })();
+        var notif = new Notification(title, { body, icon: notifIcon });
         if (onClick) {
             var cb = onClick;
             notif.onclick = function () {
@@ -12263,7 +12345,7 @@ function connectWebSocket(t) {
                             updateDmStripBadge();
                             updateMentionsBadge();
                             saveMentionState();
-                            var _dmNotif = notifText('dm', { sender: data.message.sender_username });
+                            var _dmNotif = notifText('dm', { userId: msgSenderUserId, dm: true });
                             showBrowserNotification(_dmNotif.title, _dmNotif.body, function () {
                                 navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message.id);
                             });
@@ -13318,7 +13400,7 @@ function connectWebSocket(t) {
                     if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_user_id || data.sender_id)) {
                         trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'mention', data.sender_user_id || data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
-                        var _mNotif = notifText('mention', { sender: decSender, channel: decChannel, server: decServer });
+                        var _mNotif = notifText('mention', { username: decSender, dm: !!data.dm_channel_id });
                         showBrowserNotification(_mNotif.title, _mNotif.body, function () {
                             navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
                         });
@@ -13374,7 +13456,7 @@ function connectWebSocket(t) {
                     if (!isMuted(data.server_id, data.channel_id) && !isUserMuted(data.sender_user_id || data.sender_id)) {
                         trackUnreadMention(data.server_id, data.channel_id, data.dm_channel_id, data.message_id, decSender, decChannel, decServer, 'reply', data.sender_user_id || data.sender_id, data.sender_profile_pic);
                         playNotificationSound();
-                        var _rNotif = notifText('reply', { sender: decSender, channel: decChannel, server: decServer });
+                        var _rNotif = notifText('reply', { username: decSender, dm: !!data.dm_channel_id });
                         showBrowserNotification(_rNotif.title, _rNotif.body, function () {
                             navigateToMessage(data.server_id, data.channel_id, data.dm_channel_id, data.message_id);
                         });
@@ -30525,7 +30607,7 @@ function handleDecryptedNotification(notifData) {
                 trackUnreadMention(notifData.server_id, notifData.channel_id, notifData.dm_channel_id, notifData.message_id, dSender, dChannel, dServer, ntype === 'mention_notification' ? 'mention' : 'reply', notifData.sender_user_id || notifData.sender_id, notifData.sender_profile_pic);
                 playNotificationSound();
                 var _pNotif = notifText(ntype === 'mention_notification' ? 'mention' : 'reply', {
-                    sender: dSender, channel: dChannel, server: dServer
+                    username: dSender, dm: !!notifData.dm_channel_id
                 });
                 showBrowserNotification(_pNotif.title, _pNotif.body, function () {
                     navigateToMessage(notifData.server_id, notifData.channel_id, notifData.dm_channel_id, notifData.message_id);
@@ -30538,7 +30620,7 @@ function handleDecryptedNotification(notifData) {
         if (notifData.dm_channel_id && notifData.dm_channel_id !== currentDmChannelId) {
             trackUnreadDm(notifData.dm_channel_id);
             playNotificationSound();
-            var _offDmNotif = notifText('dm', { sender: notifData.sender_username });
+            var _offDmNotif = notifText('dm', { userId: notifData.sender_user_id || notifData.sender_id, dm: true });
             showBrowserNotification(_offDmNotif.title, _offDmNotif.body, function () {
                 navigateToMessage(notifData.server_id, notifData.channel_id, notifData.dm_channel_id, notifData.message_id);
             });

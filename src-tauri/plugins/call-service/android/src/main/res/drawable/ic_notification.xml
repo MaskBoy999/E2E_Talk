@@ -1,0 +1,39 @@
+<!--
+  The status-bar / shade icon for the call notifications on Android.
+
+  Android draws a notification's small icon as a **mask** — only its alpha is
+  used and the system tints it. Passing the app's launcher icon here therefore
+  renders as a solid blob: `applicationInfo.icon` is the full-colour (and on
+  API 26+, adaptive) icon, so every voice-call and incoming-call notification
+  used to show a shapeless white square instead of the app's mark.
+
+  So: the app's own mark, in silhouette, on transparent — the two interlocking
+  rings of the launcher icon. The geometry mirrors the icon source
+  (src-tauri/icons/source/box-icon.png) scaled from its 192-unit drawing to
+  24dp, so the status bar shows the same logo as the home screen.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Gold ring (top-right) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.3"
+        android:pathData="M13.75,10.25 m-4.75,0 a4.75,4.75 0 1,0 9.5,0 a4.75,4.75 0 1,0 -9.5,0" />
+    <!-- Cyan ring (bottom-left) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.3"
+        android:pathData="M10.25,13.75 m-4.75,0 a4.75,4.75 0 1,0 9.5,0 a4.75,4.75 0 1,0 -9.5,0" />
+    <!-- Centres -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13.75,8.5 a1.75,1.75 0 1,0 0,3.5 a1.75,1.75 0 1,0 0,-3.5" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M10.25,12 a1.75,1.75 0 1,0 0,3.5 a1.75,1.75 0 1,0 0,-3.5" />
+</vector>

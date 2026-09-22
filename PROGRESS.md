@@ -7864,3 +7864,147 @@ plus the Windows MSI and NSIS installers.
 `src-tauri/plugins/call-service/android/…/ScreenCapture.kt`,
 `src-tauri/plugins/call-service/android/…/CallServicePlugin.kt`,
 `tests/screen-share-*.spec.ts`
+
+### 146. The mobile stream sheet no longer asks for a resolution (v0.2.21)
+
+**Symptom:** pressing *Share screen* on a phone asked two questions: "share app
+audio" (right) and a resolution (wrong). The resolution it offered was not the
+one in Settings → Voice → Video Quality, and answering it silently overwrote the
+stored setting — so the value the user had actually chosen was never the value
+the app captured at. The same held in reverse: some capture paths read the
+setting and others kept their own copy.
+
+**Fix:** the sheet asks about audio only. The streaming resolution and frame
+rate are Settings values that every capture path now reads: the browser
+`getDisplayMedia` constraints, the native Android capture (`mode` / `maxHeight` /
+frame rate over the bridge), the per-receiver mesh senders
+(`scaleResolutionDownBy` + `maxFramerate` + the matching bitrate) and the relay
+capture loop's encoder target. `toggleScreen()` chooses between the sheet and
+`startScreen()` from one place, so a phone share can never mint a
+`MediaProjection` token without the audio answer, and a desktop share still goes
+straight to Chrome's own picker.
+
+**Verified:** `tests/screen-share-audio-mobile.spec.ts` asserts the sheet has no
+resolution control and that the Settings resolution/frame rate are what the
+native side is asked for; `tests/settings-fps-wiring.spec.ts` walks the settings
+through the capture and sender paths.
+
+**Files:** `static/voice.js`, `static/style.css`,
+`tests/screen-share-audio-mobile.spec.ts`, `tests/settings-fps-wiring.spec.ts`
+
+### 147. One logo, everywhere (v0.2.21)
+
+**Symptom:** the desktop bundle carried the real artwork, but every *web*
+surface — the browser tab, the installed PWA, the home-screen icon, the push
+notification — showed a generic placeholder. `tools/box-icon.mjs` already
+rasterised the Android launcher mipmaps from
+`src-tauri/icons/source/box-icon.png`; nothing else was generated from it.
+
+**Two faults, and fixing either alone changed nothing:**
+
+1. **The references were wrong or missing.** `index.html` had no
+   `<link rel="icon">` at all, the manifest declared an SVG (which Android
+   ignores for installs), and both `sw.js` (push notification `icon`/`badge`) and
+   `chat.js` (in-app notifier) pointed at `/icons/icon-192.png`, which did not
+   exist.
+2. **The server would not serve the files as images.** The static handler knew
+   html/js/css/json and sent everything else as `application/octet-stream`;
+   with the response's `X-Content-Type-Options: nosniff` the browser downloads a
+   mislabelled icon and then ignores it. So even once the files existed, the tab
+   stayed on its placeholder. The handler now names png/ico/svg/webp/jpeg/wasm/
+   woff2/txt and `.webmanifest` too.
+
+**Fix:** `npm run icon` emits the web set as well — `static/favicon.ico`,
+`static/icons/icon-192.png`, `-512.png`, `-maskable-512.png`,
+`apple-touch-icon.png`, `badge-96.png` — from that one source, and the
+hand-drawn `icon-192.svg` is gone. The head, the manifest (with a `maskable`
+entry, or Android crops the mark), the service worker and the in-app notifier
+all point at the generated files. On Android the *notification* icon is now a
+real silhouette (`ic_notification.xml`, the two rings on transparent at 24dp):
+Android draws a small icon as a mask over its alpha, so the full-colour launcher
+artwork the call notifications used to pass came out as a shapeless white blob.
+
+**Verified:** `tests/app-icons.spec.ts` fetches every icon the app references
+through the real server — status, content type and PNG/ICO magic bytes — and
+walks the manifest, the head and the push handler for dead paths;
+`tests/notification-privacy.spec.ts` covers the Android drawable name.
+
+**Files:** `tools/box-icon.mjs`, `static/index.html`, `static/login.html`,
+`static/admin.html`, `static/pair.html`, `static/manifest.json`, `static/sw.js`,
+`static/chat.js`, `static/icons/*`, `server/src/main.rs`,
+`src-tauri/plugins/call-service/android/…/IncomingCallNotifier.kt`,
+`…/CallForegroundService.kt`, `tests/app-icons.spec.ts`
+
+### 148. Notifications carry nothing end-to-end encrypted (v0.2.21)
+
+**Why this matters:** a notification is handed to the *operating system*. Windows
+files it in its notification database, Android paints it in the shade and on the
+lock screen, and it outlives the app. Anything named there has left the
+end-to-end boundary, which is how an OS has been able to hand over another
+messenger's messages from its own store rather than from the app.
+
+**What changed:** the sender in a notification is the plaintext `@username` the
+server already knows — never the display name / nickname, which is encrypted
+(and is looked up in `userDisplayNameCache`, so a nickname was one field away
+from being painted on a lock screen). A notification also never names a server,
+channel or category: those names are encrypted too, and a name is enough to link
+a notification to a room. Mentions and replies read "You were mentioned in a
+channel" / "New reply in a channel", and an unknown sender degrades to "Someone".
+With *hide message content in notifications* on, the sender is blanked as
+well — the switch on the Settings screen is the same one the notifier reads.
+The in-app inbox is untouched: it never leaves the app, so it still shows
+nicknames and channel names.
+
+**Verified:** `tests/notification-privacy.spec.ts` (a nickname that exists only
+as decrypted data never appears in the title or body, channel/server/category
+names are absent, the hide switch blanks the sender, and the Android path passes
+the silhouette drawable rather than the launcher icon).
+
+**Files:** `static/chat.js`, `static/index.html`,
+`src-tauri/plugins/call-service/android/…/ic_notification.xml`,
+`tests/notification-privacy.spec.ts`
+
+### 149. A freshly started camera or screen is visible without the off/on workaround (v0.2.21)
+
+**Symptom:** a camera or screen share arrived black for a while on the other
+side, and toggling the feed off and on made it appear instantly.
+
+**Root cause:** two encrypted transforms are attached at different times. The
+sender encrypts from the moment its track is added, but the receiver only
+attaches its decrypt transform once the new m-line reaches it — and the frames in
+between are decoded as ciphertext, which fails silently. The opening keyframe is
+usually one of them, and a decoder with no reference frame cannot render any of
+the delta frames that follow, so the tile stays black until the next keyframe
+arrives. Nothing else could rescue it: the transform drops frames at the RTP
+layer, so the decoder never sees the loss and never asks for a keyframe of its
+own. Toggling the feed "fixed" it only because by then both transforms existed.
+
+**Fix:**
+
+* **Ask on start.** A fresh camera/screen start re-kicks a keyframe from our own
+  encoders immediately and twice more over the next second
+  (`kickVideoKeyframes()`), so the receiver's first decodable frame does not wait
+  out the periodic 2.5s keyframe timer. It is gated on actually sending video, so
+  an audio-only call stays quiet.
+* **Ask on attach.** Attaching a *decrypt* transform to a remote **video**
+  receiver asks the peer's encoder for a keyframe right there (a
+  `generateKeyFrame()` on a receiver transform becomes an RTCP keyframe request
+  to the remote sender) — the receiving half of the fix, and the path that
+  covers a slow renegotiation.
+* A peer created while a feed is already live gets the same kick.
+
+**Also fixed here:** `setSenderPriority()` wrapped the **synchronous**
+`RTCRtpSender.getParameters()` in `.then(...)`, so the call threw on its own
+result and the surrounding `try/catch` swallowed it — a freshly added sender
+never got its `networkPriority` or audio `maxBitrate` until the per-peer tuners
+ran.
+
+**Verified:** `tests/video-first-frame.spec.ts` counts the keyframe requests in
+the page (none in an audio-only call, at least two immediately on a camera start
+and on a screen-share start) and measures the peer's first decoded frame off
+`getStats()`. `voice-video-quality`, `voice-blackfeed-watchdog`,
+`voice-e2ee-loopback` and `voice-server-latekey` (17 tests) stay green.
+
+**Files:** `static/voice.js`, `static/e2ee-worker.js`,
+`tests/video-first-frame.spec.ts`
+

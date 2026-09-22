@@ -82,11 +82,10 @@ async function pressShareScreen(page: Page) {
     await page.waitForSelector('#screen-share-sheet', { timeout: 5000 });
 }
 
-async function startStreaming(page: Page, opts?: { audio?: boolean; mode?: number }) {
+async function startStreaming(page: Page, opts?: { audio?: boolean }) {
     await pressShareScreen(page);
     if (opts && opts.audio === false) await page.uncheck('#share-sheet-audio');
     if (opts && opts.audio === true) await page.check('#share-sheet-audio');
-    if (opts && opts.mode) await page.check(`#share-mode-${opts.mode}`);
     await page.click('#share-sheet-start');
     await page.waitForTimeout(400);
 }
@@ -183,19 +182,66 @@ test.describe('mobile screen share — pre-share sheet', () => {
         await expect(page.locator('#share-sheet-audio')).not.toBeChecked();
     });
 
-    test('the chosen streaming mode becomes the capture height', async ({ page }) => {
+    /**
+     * The sheet asks about app audio and NOTHING else. It used to offer three
+     * "streaming modes" and write the answer into sendScreenRes, so the
+     * resolution picked in Settings → Voice → Video Quality was overwritten by
+     * whatever the sheet happened to default to every time a phone started a
+     * share. The capture size now comes from that one setting.
+     */
+    test('the sheet has no resolution picker and the Settings resolution is what gets captured', async ({ page }) => {
         await installTauriBridge(page);
         await desktopUserAgent(page);
         await removeGetDisplayMedia(page);
-        await register(page, unique('ssmode'));
+        await register(page, unique('ssres'));
 
-        await startStreaming(page, { mode: 1080 });
+        // What the user chose in Settings.
+        await page.evaluate(() => {
+            const S = (window as any).VoiceManager._debug.state;
+            S.settings.sendScreenRes = 720;
+            localStorage.setItem('voice_settings', JSON.stringify(S.settings));
+        });
+
+        await pressShareScreen(page);
+
+        await expect(page.locator('input[name="share-sheet-mode"]')).toHaveCount(0);
+        await expect(page.locator('[id^="share-mode-"]')).toHaveCount(0);
+        // ...and it still asks the question it is there for.
+        await expect(page.locator('#share-sheet-audio')).toHaveCount(1);
+
+        await page.click('#share-sheet-start');
+        await page.waitForTimeout(400);
 
         const invoked = await page.evaluate(() => (window as any).__testInvoked);
         const start = invoked.find((i: any) => i.cmd === 'plugin:call-service|startScreenCapture');
-        expect(start.args.maxHeight).toBe(1080);
+        expect(start.args.maxHeight).toBe(720);
+        // The sheet must not rewrite the setting it read.
         const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('voice_settings') || '{}'));
-        expect(stored.sendScreenRes).toBe(1080);
+        expect(stored.sendScreenRes).toBe(720);
+    });
+
+    /**
+     * The Send frame rate (Settings → Voice → Video Quality) reaches the native
+     * capture instead of the hard-coded 10 fps the Android path used to ask the
+     * Kotlin side for.
+     */
+    test('the native capture is asked for the Settings frame rate', async ({ page }) => {
+        await installTauriBridge(page);
+        await desktopUserAgent(page);
+        await removeGetDisplayMedia(page);
+        await register(page, unique('ssfps'));
+
+        await page.evaluate(() => {
+            const S = (window as any).VoiceManager._debug.state;
+            S.settings.relayVideoFps = 12;
+            localStorage.setItem('voice_settings', JSON.stringify(S.settings));
+        });
+
+        await startStreaming(page);
+
+        const invoked = await page.evaluate(() => (window as any).__testInvoked);
+        const start = invoked.find((i: any) => i.cmd === 'plugin:call-service|startScreenCapture');
+        expect(start.args.fps).toBe(12);
     });
 
     test('a desktop browser share never shows the sheet', async ({ page }) => {

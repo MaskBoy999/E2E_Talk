@@ -11612,38 +11612,6 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     color: var(--text-muted);
     margin: 16px 0 8px;
 }
-.share-sheet-mode {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    border: 1px solid var(--bg-border);
-    border-radius: 10px;
-    margin-bottom: 8px;
-    cursor: pointer;
-}
-.share-sheet-mode:hover {
-    background: var(--hover-bg);
-}
-.share-sheet-mode input {
-    flex: 0 0 auto;
-    width: 18px;
-    height: 18px;
-    accent-color: var(--accent);
-}
-.share-sheet-mode-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-.share-sheet-mode-text strong {
-    font-size: 15px;
-    font-weight: 600;
-}
-.share-sheet-mode-text span {
-    font-size: 12px;
-    color: var(--text-muted);
-}
 .share-sheet-switch {
     display: flex;
     align-items: center;

@@ -92,10 +92,11 @@ async function desktopUserAgent(page: Page) {
 /**
  * Press Share screen on the native path.
  *
- * The bridge being present now means the pre-share sheet opens first (quality +
- * "share app audio" have to be answered before the one-shot MediaProjection
- * picker runs — see screen-share-audio-mobile.spec.ts for the sheet itself), so
- * a share is only under way once its Start streaming button is pressed.
+ * The bridge being present now means the pre-share sheet opens first ("share app
+ * audio" has to be answered before the one-shot MediaProjection picker runs —
+ * the resolution comes from Settings, see screen-share-audio-mobile.spec.ts for
+ * the sheet itself), so a share is only under way once its Start streaming
+ * button is pressed.
  */
 async function startNativeShare(page: Page) {
     await page.evaluate(() => (window as any).VoiceManager.toggleScreen());

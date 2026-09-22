@@ -126,7 +126,13 @@
             sendScreenRes: 480,
             recvCameraRes: 360,
             recvScreenRes: 480,
-            relayVideoFps: 15,
+            // The ONE send frame rate (Settings → Voice → Video Quality →
+            // "Send — frame rate"). It is read by every capture and every
+            // sender: the camera constraint, the browser's screen capture, the
+            // native Android capture, each mesh encoder's maxFramerate and the
+            // relay loop. The key keeps its old relay-flavoured name so stored
+            // settings keep working.
+            relayVideoFps: 30,
             relayVideoQuality: 0.6,
             // When ON, remote camera/screen feeds are NOT auto-loaded: each
             // feed shows a "Load" button (per user AND per kind) and is
@@ -701,7 +707,7 @@
         var rs = document.getElementById('voice-recv-screen-res');
         if (rs) rs.value = S.settings.recvScreenRes || 480;
         var rf = document.getElementById('voice-relay-video-fps');
-        if (rf) rf.value = S.settings.relayVideoFps || 15;
+        if (rf) rf.value = S.settings.relayVideoFps || 30;
         var jq = document.getElementById('voice-relay-jpeg-quality');
         if (jq) jq.value = S.settings.relayVideoQuality || 0.6;
         var ml = document.getElementById('voice-manual-video-load');
@@ -1682,7 +1688,8 @@
         // the cheapest way to cut encode cost + bitrate — the mesh-friendly
         // default is deliberately low to avoid decoder artifacts.
         var camH = S.settings.sendCameraRes || 360;
-        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: resW(camH) }, height: { ideal: camH }, frameRate: { ideal: 30, max: 30 }, facingMode: S.cameraFacing || 'user' }, audio: false })
+        var camFps = sendVideoFps();
+        return navigator.mediaDevices.getUserMedia({ video: { width: { ideal: resW(camH) }, height: { ideal: camH }, frameRate: { ideal: camFps, max: camFps }, facingMode: S.cameraFacing || 'user' }, audio: false })
             .then(function (stream) {
                 S.localStreams.camera = stream;
                 S.cameraOn = true;
@@ -1732,6 +1739,7 @@
         // encrypted per-peer, so huge native-res/fps captures starve the
         // pipeline and produce decoder artifacts.
         var scrH = S.settings.sendScreenRes || 480;
+        var scrFps = sendVideoFps();
         if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
             // ── Android WebView has no Screen Capture API ──────────────────
             //
@@ -1749,7 +1757,7 @@
             // we paint them onto a canvas and expose that canvas as a real
             // MediaStream, so the rest of the pipeline (relay encode + encrypt,
             // tiles, per-member volume) is completely unchanged.
-            return _startNativeScreenCapture(scrH);
+            return _startNativeScreenCapture(scrH, scrFps);
         }
         _screenDiag.path = 'browser';
         _screenDiag.state = 'requested';
@@ -1761,12 +1769,13 @@
         return navigator.mediaDevices.getDisplayMedia({
             video: {
                 cursor: 'always',
-                // Cap capture at the configured SEND resolution — asking the
-                // screen capture for less than native res cuts encode cost and
-                // bitrate at the source (the mesh-friendly default is low).
+                // Cap capture at the configured SEND resolution AND frame rate —
+                // asking the screen capture for less than native res/fps cuts
+                // encode cost and bitrate at the source (the mesh-friendly
+                // default resolution is deliberately low).
                 width: { max: resW(scrH) },
                 height: { max: scrH },
-                frameRate: { ideal: 30, max: 30 },
+                frameRate: { ideal: scrFps, max: scrFps },
             },
             // Capture tab/system audio too (the Chrome picker shows the
             // "Share tab audio" checkbox). The remote side receives it as a
@@ -1914,7 +1923,7 @@
         return JSON.parse(JSON.stringify(_screenDiag));
     }
 
-    function _startNativeScreenCapture(scrH) {
+    function _startNativeScreenCapture(scrH, scrFps) {
         var probe = _screenProbe();
         _screenDiag.path = 'native';
         _screenDiag.state = 'requested';
@@ -2167,7 +2176,8 @@
                 return tauri.core.invoke('plugin:call-service|startScreenCapture', {
                     onFrame: ch,
                     maxHeight: scrH,
-                    fps: 10,
+                    // The same Settings frame rate every other capture uses.
+                    fps: scrFps || sendVideoFps(),
                     // The sheet's "Share app audio" answer. Older pages that do
                     // not send it get video only — see ScreenCaptureArgs.
                     withAudio: wantAudio,
@@ -2778,6 +2788,9 @@
         tuneFeedSenders(pc, uid);
         tuneAudioSenders(pc, uid);
         tuneVideoSenders(pc, uid);
+        // A peer that joins while we are already sharing video gets the same
+        // early keyframe kick as a feed that was started after the peer existed.
+        kickVideoKeyframes();
         return pc;
     }
 
@@ -2802,18 +2815,22 @@
             try {
                 var sender = pc.getSenders().find(function (s) { return s.track === track; });
                 if (sender && sender.getParameters) {
-                    sender.getParameters().then(function (params) {
-                        if (params.encodings && params.encodings[0]) {
-                            params.encodings[0].networkPriority = 'high';
-                            // Apply audio bitrate based on send quality
-                            if (track.kind === 'audio') {
-                                var sq = (S.settings && S.settings.sendAudioQuality) || 'medium';
-                                var audioBitrate = { low: 16000, medium: 32000, high: 64000, ultra: 128000 }[sq] || 32000;
-                                params.encodings[0].maxBitrate = audioBitrate;
-                            }
-                            sender.setParameters(params);
+                    // getParameters() is SYNCHRONOUS (RTCSendParameters, not a
+                    // promise). The `.then(...)` that used to wrap this threw on
+                    // its result — and the surrounding try/catch swallowed it —
+                    // so a freshly added sender never actually got its priority
+                    // or audio bitrate until the per-peer tuners ran.
+                    var params = sender.getParameters();
+                    if (params.encodings && params.encodings[0]) {
+                        params.encodings[0].networkPriority = 'high';
+                        // Apply audio bitrate based on send quality
+                        if (track.kind === 'audio') {
+                            var sq = (S.settings && S.settings.sendAudioQuality) || 'medium';
+                            var audioBitrate = { low: 16000, medium: 32000, high: 64000, ultra: 128000 }[sq] || 32000;
+                            params.encodings[0].maxBitrate = audioBitrate;
                         }
-                    }).catch(function () {});
+                        sender.setParameters(params).catch(function () {});
+                    }
                 }
             } catch (_) {}
         }
@@ -2866,6 +2883,37 @@
             tuneAudioSenders(S.peers[uid], uid);
             tuneVideoSenders(S.peers[uid], uid);
         }
+        kickVideoKeyframes();
+    }
+
+    // Ask our own video encoders for a keyframe right now, a few times over the
+    // next second.
+    //
+    // Why this exists: the E2EE send transform is attached in the same tick the
+    // track is added, and a receiver only attaches ITS decrypt transform once
+    // the new m-line reaches it. The frames encoded in between are dropped by
+    // that receiver (a raw frame is "not our format"; an encrypted one cannot be
+    // opened without the transform), and the opening keyframe is usually one of
+    // them — so the peer's tile stays black until the next keyframe shows up.
+    // The worker's periodic timer does eventually cover it, which is exactly why
+    // the symptom is "black for a while" and why toggling the feed off and on
+    // "fixes" it (the second time the transforms already exist). Re-kicking
+    // turns the wait into the first frame or two.
+    // `force` skips the "are we sending video?" gate: a caller that has just
+    // attached a REMOTE video decrypt transform is asking the PEER's encoder for
+    // a keyframe, which has nothing to do with what we are sending.
+    function kickVideoKeyframes(force) {
+        if (!e2eeWorker || !S.connected) return;
+        if (!force) {
+            var sendingVideo = (S.cameraOn && S.localStreams.camera && !useVideoRelay('camera'))
+                || (S.screenOn && S.localStreams.screen && !useVideoRelay('screen'));
+            if (!sendingVideo) return;
+        }
+        [0, 400, 1200].forEach(function (ms) {
+            setTimeout(function () {
+                try { e2eeWorker.postMessage({ type: 'generate-keyframes' }); } catch (_) {}
+            }, ms);
+        });
     }
 
     // Cap video send bitrate so screen shares / cameras don't saturate the
@@ -2903,7 +2951,7 @@
                     if (!params.encodings || params.encodings.length === 0) return;
                     params.encodings.forEach(function (enc) {
                         enc.maxBitrate = maxBitrate;
-                        enc.maxFramerate = 30;
+                        enc.maxFramerate = sendVideoFps();
                         // scaleResolutionDownBy is per-encoding, so each peer
                         // gets its own resolution in the mesh ("what I send to
                         // that person"). Scale DOWN only — never upscale.
@@ -3105,6 +3153,16 @@
             // replacement, silently killing that direction (one-sided audio).
             if (receiver.transform) return true;
             receiver.transform = new RTCRtpScriptTransform(e2eeWorker, { operation: 'decrypt', key: S.roomKeyB64 });
+            // We just started decrypting a stream that was already flowing: the
+            // sender's opening keyframe was encoded before this transform
+            // existed (so it reached our decoder as opaque bytes) and every
+            // delta frame that follows decrypts but cannot be decoded — the tile
+            // sits black until the sender happens to emit the next keyframe.
+            // Ask for one now. generateKeyFrame() on a RECEIVER transform becomes
+            // a keyframe request to the REMOTE sender (RTCP), so this recovers in
+            // one round trip and is the receiving half of kickVideoKeyframes().
+            // Video only: audio has no keyframes.
+            if (receiver.track && receiver.track.kind === 'video') kickVideoKeyframes();
             return true;
         } catch (_) {
             return false;
@@ -5603,11 +5661,14 @@
     function toggleScreen() {
         ensureAudioCtx();
         if (S.screenOn) { stopScreen(); return; }
-        // Native (Android) capture asks HOW first, the way Discord's stream
-        // sheet does: the system picker is one-shot, so the quality and the app
-        // audio have to be chosen before the MediaProjection token exists. A
-        // browser share needs none of that — Chrome's own picker asks about tab
-        // audio and the resolution comes from Settings — so it starts at once.
+        // Native (Android) capture asks about AUDIO first: the system picker is
+        // one-shot, so "share app audio" has to be answered before the
+        // MediaProjection token exists. The resolution is NOT asked — it comes
+        // from Settings → Voice → Video Quality, like every other capture in the
+        // app, and the sheet showing its own resolution picker meant the stored
+        // setting was silently overwritten every time a phone started a share.
+        // A browser share needs none of that: Chrome's own picker asks about
+        // tab audio and the capture size comes from the same setting.
         if (!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) && _boxNativeScreenSupported()) {
             openScreenShareSheet();
             return;
@@ -5620,43 +5681,22 @@
     // ------------------------------------------------------------------
     // Discord asks this before a stream starts, and the reason carries over
     // exactly: the Android capture is one-shot. The MediaProjection token is
-    // minted once, by the system picker, so the resolution and "share app
-    // audio" have to be decided *before* it exists — there is nothing to flip
-    // afterwards that would not tear the share down.
+    // minted once, by the system picker, so "share app audio" has to be decided
+    // *before* it exists — there is nothing to flip afterwards that would tear
+    // the share down.
     //
-    // Both answers land in the same S.settings fields the Settings screen
-    // writes, so the sheet reopens on whatever was chosen last time.
+    // The answer lands in the same S.settings field the Settings screen writes,
+    // so the sheet reopens on whatever was chosen last time. The sheet
+    // deliberately asks nothing else: the streaming resolution and frame rate
+    // are Settings values (sendScreenRes / relayVideoFps) and a pre-share picker
+    // that wrote its own copy of them is exactly how they stopped being the
+    // values the app actually captured at.
     var _shareSheet = null;
     var _shareSheetKey = null;
 
-    // The presets, in the order Discord lists them. A stored resolution can be
-    // anything (Settings offers 144p…2160p), so it is snapped to the nearest
-    // preset rather than opening with nothing selected.
-    var SHARE_SHEET_MODES = [
-        { res: 720, label: 'Default', hint: 'Balanced quality and performance (720p)' },
-        { res: 480, label: 'Performance', hint: 'Optimised for slower devices (480p)' },
-        { res: 1080, label: 'High quality', hint: 'For video and gaming (1080p)' },
-    ];
-
-    function shareSheetModeFor(res) {
-        res = parseInt(res, 10) || 480;
-        if (res >= 1080) return 1080;
-        if (res <= 480) return 480;
-        return 720;
-    }
-
     function openScreenShareSheet() {
         if (_shareSheet) return;
-        var mode = shareSheetModeFor(S.settings.sendScreenRes);
         var audioOn = S.settings.shareScreenAudio !== false;
-
-        var rows = SHARE_SHEET_MODES.map(function (m) {
-            return '<label class="share-sheet-mode">'
-                + '<input type="radio" name="share-sheet-mode" id="share-mode-' + m.res + '" value="' + m.res + '"'
-                + (m.res === mode ? ' checked' : '') + '>'
-                + '<span class="share-sheet-mode-text"><strong>' + m.label + '</strong>'
-                + '<span>' + m.hint + '</span></span></label>';
-        }).join('');
 
         var overlay = document.createElement('div');
         overlay.className = 'share-sheet-overlay';
@@ -5664,8 +5704,6 @@
         overlay.innerHTML =
             '<div class="share-sheet" role="dialog" aria-modal="true" aria-label="Stream settings">'
             + '<h3 class="share-sheet-title">Stream settings</h3>'
-            + '<div class="share-sheet-section">Streaming mode</div>'
-            + rows
             + '<div class="share-sheet-section">Audio stream</div>'
             + '<label class="share-sheet-switch">'
             + '<span class="share-sheet-switch-label">Share app audio</span>'
@@ -5699,16 +5737,13 @@
         _shareSheet = null;
     }
 
-    // The sheet's answer: persist both choices (same fields as Settings), then
-    // start a capture that already reads them — startScreen() picks the
-    // resolution up from S.settings and passes audio to the native side.
+    // The sheet's answer: persist the audio choice, then start a capture that
+    // reads the resolution AND frame rate from Settings (startScreen() picks
+    // them up from S.settings and passes them to the native side).
     function confirmScreenShare() {
-        var chosen = _shareSheet && _shareSheet.querySelector('input[name="share-sheet-mode"]:checked');
-        S.settings.sendScreenRes = parseInt((chosen && chosen.value) || '0', 10) || 480;
         var audio = _shareSheet && _shareSheet.querySelector('#share-sheet-audio');
         S.settings.shareScreenAudio = audio ? !!audio.checked : true;
         saveSettings();
-        applySettingsToUI();
         closeScreenShareSheet();
         startScreen();
     }
@@ -7006,7 +7041,7 @@
         var rs = document.getElementById('voice-recv-screen-res');
         if (rs) rs.addEventListener('change', function (e) { setRecvRes('screen', e.target.value); });
         var rf = document.getElementById('voice-relay-video-fps');
-        if (rf) rf.addEventListener('change', function (e) { S.settings.relayVideoFps = Math.max(1, Math.min(30, parseInt(e.target.value) || 30)); saveSettings(); });
+        if (rf) rf.addEventListener('change', function (e) { setSendFps(e.target.value); });
         var jq = document.getElementById('voice-relay-jpeg-quality');
         if (jq) jq.addEventListener('change', function (e) { S.settings.relayVideoQuality = Math.max(0.1, Math.min(1.0, parseFloat(e.target.value) || 0.6)); saveSettings(); });
         var ml = document.getElementById('voice-manual-video-load');
@@ -9687,6 +9722,19 @@
         return Math.round((h || 360) * 16 / 9);
     }
 
+    // The ONE frame rate for everything this device sends (Settings → Voice →
+    // Video Quality → "Send — frame rate"): the camera's capture constraint, the
+    // browser's screen capture, the native Android capture, every mesh encoder's
+    // maxFramerate and the relay capture loop.
+    //
+    // Before this existed the setting drove only the relay loop while every
+    // other path hard-coded 30 (the native capture hard-coded 10), so the value
+    // in Settings was ignored by whichever pipeline you happened to be on.
+    function sendVideoFps() {
+        var f = parseInt(S.settings && S.settings.relayVideoFps, 10) || 30;
+        return Math.max(1, Math.min(60, f));
+    }
+
     // A bitrate that matches the EFFECTIVE resolution. Over-allocating bitrate
     // at low resolution is harmless, but under-allocating at high resolution is
     // exactly what produces the blocky/"torn" artifacts — so the cap follows
@@ -9710,11 +9758,35 @@
         S.settings[kind === 'screen' ? 'sendScreenRes' : 'sendCameraRes'] = h;
         saveSettings();
         updateSettingsLabels();
-        if (!S.connected) return;
+        // Restart a live source at the new size. This used to bail out unless a
+        // call was already joined, which meant a camera (or screen share)
+        // previewing before the join kept capturing at the old resolution — the
+        // setting said one thing and the capture did another.
         if (kind === 'screen' && S.screenOn) {
             stopScreen();
             startScreen();
         } else if (kind === 'camera' && S.cameraOn) {
+            stopCamera();
+            startCamera();
+        }
+        retuneAllVideoSenders();
+    }
+
+    // Change the SEND frame rate (Settings → Voice → Video Quality → "Send —
+    // frame rate"). Every sender honours it on the spot — the mesh encoders'
+    // maxFramerate and any running relay loop re-read the setting — and the next
+    // capture is requested at it too.
+    //
+    // A live CAMERA is restarted so the new rate reaches the capture itself
+    // (cheap, no prompt, exactly what setSendRes does). A live SCREEN share is
+    // deliberately left running: restarting one re-runs the browser's picker and
+    // on Android re-mints the one-shot MediaProjection token, which is a worse
+    // trade than a share that keeps its frame rate until it is next started.
+    function setSendFps(fps) {
+        S.settings.relayVideoFps = Math.max(1, Math.min(60, parseInt(fps, 10) || 30));
+        saveSettings();
+        updateSettingsLabels();
+        if (S.cameraOn) {
             stopCamera();
             startCamera();
         }
@@ -9758,7 +9830,6 @@
     function startVideoRelay(stream, kind) {
         if (S._relayTimers[kind]) return; // already running
 
-        var fps = S.settings.relayVideoFps || 15;
         var maxH = S.settings[kind === 'screen' ? 'sendScreenRes' : 'sendCameraRes'] || (kind === 'screen' ? 480 : 360);
 
         // Multithreading support: the JPEG encode runs in a worker (needs
@@ -9814,7 +9885,9 @@
             var encodingA = false; // per-canvas: true while encode+encrypt is in flight
             var encodingB = false;
             var reusableKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(S.roomKeyB64));
-            var targetMs = Math.max(16, 1000 / fps);
+            // Read live, so a frame-rate change in Settings retunes a running
+            // relay on its next tick instead of needing the stream restarted.
+            function relayTargetMs() { return Math.max(16, 1000 / sendVideoFps()); }
             var sendIndex = 0; // alternates 0/1 for double-buffer
 
             // Chrome clamps setTimeout on a HIDDEN page to ~1/s (and to
@@ -9930,12 +10003,12 @@
                         return;
                     }
                     var now = performance.now();
-                    if (now - _tickLast >= targetMs) {
+                    if (now - _tickLast >= relayTargetMs()) {
                         captureFrame();
                         _tickLast = now;
                     }
                 };
-                _tickWorker.postMessage({ cmd: 'start', ms: Math.max(10, Math.min(60, targetMs)) });
+                _tickWorker.postMessage({ cmd: 'start', ms: Math.max(10, Math.min(60, relayTargetMs())) });
             }
 
             function scheduleNext() {
@@ -9962,7 +10035,7 @@
                     }
                     captureFrame();
                     if (state.running) scheduleNext();
-                }, targetMs);
+                }, relayTargetMs());
                 S._relayTimers[kind] = _timerId;
             }
 

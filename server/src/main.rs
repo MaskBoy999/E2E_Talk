@@ -313,14 +313,37 @@ async fn serve_static(
 
     match tokio::fs::read(&path).await {
         Ok(contents) => {
+            // Every type the app actually ships has to be named here, because
+            // these responses carry `X-Content-Type-Options: nosniff` — the
+            // browser then refuses to sniff a wrong type. Images used to fall
+            // through to `application/octet-stream`, so `/favicon.ico` and the
+            // PWA/home-screen PNGs were downloaded and then **ignored**: the tab
+            // and the installed app fell back to a generic placeholder icon no
+            // matter what artwork they contained.
             let mime = if path.ends_with(".html") {
                 "text/html"
             } else if path.ends_with(".js") {
                 "application/javascript"
             } else if path.ends_with(".css") {
                 "text/css"
-            } else if path.ends_with(".json") {
+            } else if path.ends_with(".json") || path.ends_with(".webmanifest") {
                 "application/json"
+            } else if path.ends_with(".png") {
+                "image/png"
+            } else if path.ends_with(".ico") {
+                "image/x-icon"
+            } else if path.ends_with(".svg") {
+                "image/svg+xml"
+            } else if path.ends_with(".webp") {
+                "image/webp"
+            } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+                "image/jpeg"
+            } else if path.ends_with(".wasm") {
+                "application/wasm"
+            } else if path.ends_with(".woff2") {
+                "font/woff2"
+            } else if path.ends_with(".txt") {
+                "text/plain; charset=utf-8"
             } else {
                 "application/octet-stream"
             };

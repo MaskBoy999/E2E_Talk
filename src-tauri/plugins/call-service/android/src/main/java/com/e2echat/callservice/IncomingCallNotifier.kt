@@ -56,7 +56,11 @@ object IncomingCallNotifier {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("Incoming call")
             .setContentText("$callerName is calling…")
-            .setSmallIcon(context.applicationInfo.icon)
+            // The app's own mark, in silhouette — NOT applicationInfo.icon.
+            // Android renders a small icon as an alpha mask, so handing it the
+            // full-colour (and adaptive) launcher icon produced a shapeless
+            // white blob in the status bar instead of the app's logo.
+            .setSmallIcon(R.drawable.ic_notification)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)

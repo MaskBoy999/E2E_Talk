@@ -29,7 +29,7 @@
  * the kind of thing that quietly produces a broken `.ico`.
  */
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +38,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE = join(root, 'src-tauri/icons/source/box-icon.png');
 const ICONS = join(root, 'src-tauri/icons');
 const ANDROID_RES = join(root, 'src-tauri/gen/android/app/src/main/res');
+const WEB_ICONS = join(root, 'static/icons');
+
+// The app's own background colour (the one the source artwork sits on). Only
+// used for the maskable icon, where the artwork has to be inset.
+const ICON_BG = '#0d0d1a';
 
 if (!existsSync(SOURCE)) {
     console.error(
@@ -85,7 +90,79 @@ try {
         }
         console.log('  gen/android/app/src/main/res/mipmap-*');
     }
-    console.log('Done — desktop and mobile icons now come from the same file.');
+    // ── Web / PWA ────────────────────────────────────────────────────────
+    // Everything the browser can see: the tab icon, the home-screen icon, the
+    // browser-notification icon and the push badge. All of it is rasterised
+    // here from the same source, because a web app icon has to be a PNG — the
+    // manifest used to declare an SVG, which Chrome and Android ignore for
+    // installs, so the installed app fell back to a generic placeholder.
+    await writeWebIcons();
+
+    console.log('Done — desktop, mobile and web icons now come from the same file.');
 } finally {
     rmSync(scratch, { recursive: true, force: true });
+}
+
+/**
+ * Write the browser-visible icon set. `canvas` is already a project dependency
+ * (it is what the icon pipeline uses elsewhere), and it is only ever needed
+ * here — which is why it is imported lazily, so `npm run icon` still works in
+ * an install that skipped native modules.
+ */
+async function writeWebIcons() {
+    const { loadImage, createCanvas } = await import('canvas');
+    const src = await loadImage(SOURCE);
+    mkdirSync(WEB_ICONS, { recursive: true });
+
+    const sized = (size, inset = 0) => {
+        const c = createCanvas(size, size);
+        const ctx = c.getContext('2d');
+        if (inset > 0) {
+            ctx.fillStyle = ICON_BG;
+            ctx.fillRect(0, 0, size, size);
+        }
+        const inner = size - inset * 2;
+        ctx.drawImage(src, inset, inset, inner, inner);
+        return c.toBuffer('image/png');
+    };
+
+    for (const size of [192, 512]) {
+        writeFileSync(join(WEB_ICONS, `icon-${size}.png`), sized(size));
+        console.log(`  static/icons/icon-${size}.png`);
+    }
+
+    // iOS ignores the web manifest and uses this one for the home screen.
+    writeFileSync(join(WEB_ICONS, 'apple-touch-icon.png'), sized(180));
+    console.log('  static/icons/apple-touch-icon.png');
+
+    // Maskable: the launcher may crop up to 20% off every edge, so the artwork
+    // is drawn at 80% with the margin filled by the app's own background.
+    writeFileSync(join(WEB_ICONS, 'icon-maskable-512.png'), sized(512, Math.round(512 * 0.1)));
+    console.log('  static/icons/icon-maskable-512.png');
+
+    // Notification badge: Chrome and Android paint it as a white silhouette on
+    // the system colour, so the bright artwork is kept and the dark background
+    // dropped — a full-colour bitmap comes out as a solid blob.
+    const badge = createCanvas(96, 96);
+    const bctx = badge.getContext('2d');
+    bctx.drawImage(src, 0, 0, 96, 96);
+    const data = bctx.getImageData(0, 0, 96, 96);
+    for (let i = 0; i < data.data.length; i += 4) {
+        const lum = (data.data[i] + data.data[i + 1] + data.data[i + 2]) / 3;
+        // Soft ramp instead of a hard cut, so the ring outlines stay smooth.
+        const a = Math.max(0, Math.min(1, (lum - 40) / 70));
+        data.data[i] = 255;
+        data.data[i + 1] = 255;
+        data.data[i + 2] = 255;
+        data.data[i + 3] = Math.round(255 * a);
+    }
+    bctx.putImageData(data, 0, 0);
+    writeFileSync(join(WEB_ICONS, 'badge-96.png'), badge.toBuffer('image/png'));
+    console.log('  static/icons/badge-96.png');
+
+    // `favicon.ico` is what a browser asks for when a page has no <link rel=icon>
+    // — and a hand-rolled .ico is exactly the kind of thing that quietly comes
+    // out broken, so the one the desktop bundler just produced is copied.
+    cpSync(join(ICONS, 'icon.ico'), join(root, 'static/favicon.ico'));
+    console.log('  static/favicon.ico');
 }
