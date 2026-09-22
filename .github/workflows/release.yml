@@ -220,6 +220,11 @@ jobs:
           cat "$out/PKGBUILD"
 
           mkdir -p dist
+          # Job logs 403 for anonymous readers even on public repos (the
+          # lesson written into android.yml), so tee the container output and
+          # — on failure — re-emit its tail as an annotation: the one failure
+          # surface that IS publicly readable.
+          set +e
           docker run --rm \
             -v "$out":/pkgbuild:ro \
             -v "$PWD/dist":/dist \
@@ -231,9 +236,18 @@ jobs:
               echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
               cp /pkgbuild/PKGBUILD /pkgbuild/e2e-chat-bin.install /home/builder/
               chown -R builder:builder /home/builder
-              # makepkg downloads the .deb with the curl binary, which is not
-              # part of the image (pacman links libcurl, not the tool).
-              pacman -Sy --noconfirm --needed curl
+              # -Syu, never -Sy: syncing without upgrading against a stale
+              # image snapshot can leave versioned dependencies unsatisfiable
+              # (the classic partial-upgrade transaction failure). curl is not
+              # in the image either — pacman links libcurl, it does not ship
+              # the tool makepkg downloads with.
+              pacman -Syu --noconfirm --needed curl
+              # The image sets no WORKDIR, so the container starts in / —
+              # and makepkg only ever reads ./PKGBUILD from the current
+              # directory. Without this cd it dies with "PKGBUILD does not
+              # exist" while the rendered file sits in /home/builder. This is
+              # what failed the first v0.2.22 tag run.
+              cd /home/builder
               sudo -u builder makepkg --force --noconfirm
               cp /home/builder/*.pkg.tar.zst /dist/
 
@@ -245,7 +259,14 @@ jobs:
               esac
               echo "--- package contents ---"
               pacman -Qlp /dist/*.pkg.tar.zst | sed -n "1,40p"
-            '
+            ' 2>&1 | tee "$RUNNER_TEMP/arch-build.log"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            BLOCK="Arch package build failed (exit $rc) — tail of the container log:%0A$(tail -n 25 "$RUNNER_TEMP/arch-build.log" | sed -e 's/%/%25/g' -e 's/\r$//' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            printf '::error::%s\n' "$BLOCK"
+            exit "$rc"
+          fi
           ls -la dist/
 
       # ---------------------------------------------------------------------

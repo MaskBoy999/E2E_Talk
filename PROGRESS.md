@@ -8117,3 +8117,35 @@ build — watched end-to-end on the v0.2.22 tag.
 `tests/arch-packaging.spec.ts`, `src-tauri/tauri.conf.json`,
 `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
 
+### 152. v0.2.22's Arch CI step failed: makepkg ran in `/`, not the build dir
+
+The container block shipped in §151 had two bugs that only a real CI run
+could reach (no Docker on the dev machine, whose local proof therefore only
+covered render + download + the `package()` extraction chain):
+
+* **`sudo -u builder makepkg` ran in the container's default WORKDIR `/`**,
+  while the rendered `PKGBUILD` had been copied to `/home/builder/` — and
+  makepkg only ever reads `./PKGBUILD`. It died with "PKGBUILD does not
+  exist" before downloading anything. Now an explicit `cd /home/builder`.
+* **`pacman -Sy`** synced without upgrading — the partial-upgrade
+  transaction failure waiting to happen against a stale image snapshot.
+  Now `-Syu`.
+
+Signature of the failure: every leg except the Linux job published (exe,
+msi, deb, rpm, AppImage via tauri-action; apk plus the Windows/Android
+checksum files), while everything *after* the container — the checksums
+step, `SHA256SUMS-linux-x64.txt`, the `.pkg.tar.zst` attach — never ran,
+i.e. precisely the two assets v0.2.22's release was missing.
+
+Job logs 403 for anonymous readers even on public repos (android.yml already
+carries this lesson), so the container output is now teed and its tail
+re-emitted as a single `::error::` annotation on failure — the one failure
+surface that is publicly readable, and the one this diagnosis had to infer
+around.
+
+Re-tag pending: force-moving `v0.2.22` to this commit re-triggers both
+workflows; release-complete verification (the `pkg.tar.zst` plus its
+`SHA256SUMS-linux-x64.txt` line present) follows once they finish.
+
+**Files:** `.github/workflows/release.yml`, `packaging/aur/PKGBUILD.template`
+
