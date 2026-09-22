@@ -8274,3 +8274,47 @@ credential-free middle ground is an opt-in `dataSync` service.
 `static/{index,login,box-setup}.html`, `tests/box-device.spec.ts`,
 `src-tauri/android-templates/README.md`
 
+### 156. v0.2.24 published only the Windows bundles: one release, two racing publishers
+
+**What failed.** The v0.2.24 tag run built on both legs and then left the release
+holding two assets — `E2E.Chat_0.2.24_x64-setup.exe` and `.msi`. No `.deb`, no
+`.AppImage`, no `.rpm`, no checksums. The Linux leg's Arch step then died, and
+for exactly that reason: `makepkg` downloads the `.deb` *from that same
+release*, so it 404'd on a file its own run was supposed to have published. The
+Android leg failed too, on its attach step. Nothing about the apps was wrong.
+
+**Why, precisely.** The release object was created by `tauri-action` at the
+*start* of the build — its `created_at` precedes the jobs, and the notes on it
+are release.yml's `releaseBody` — so publishing is claimed before any artifact
+exists. Both matrix legs then race to create/update that single release, and the
+losing leg's uploads vanish while its job still reports success. This is not a
+transient: it is what `softprops/action-gh-release` cannot repair either, since
+on an existing release it fails with `already_exists` and the retry path is
+`Resource not accessible by integration ... update-a-release`. That same wall is
+why the v0.2.22 release could never be completed afterwards, and why the fix
+had to ship as a new tag (v0.2.23) rather than a re-run.
+
+**Fix.** `gh release upload --clobber` is now the only uploader, in both
+workflows, and in release.yml it runs *before* the Arch step — the ordering is
+the point: the `.deb` is on the release by the time `makepkg` asks for it. It
+uploads the bundle directory this leg just built ("Verify installers were
+produced" has already proven those files exist), so it cannot silently lose
+them, and `--clobber` is idempotent, so an unfinished tag can simply be re-run
+instead of cut again. The release notes moved into that step
+(`gh release create ... || gh release edit ...`), which also repairs a release
+whose notes some other actor left empty. The Android leg keeps the APK and its
+checksums together or fails loudly rather than attaching half of them.
+
+**Verified locally.** The new scripts were extracted from the YAML and run
+against fake bundle trees with a stubbed `gh`: the Linux leg uploads
+AppImage/deb/rpm, the Windows leg only msi/exe, the checksums step carries the
+`.pkg.tar.zst`, the "release already exists" path falls back to `edit`, and an
+APK-less `dist/` is a hard error. Plus `bash -n` on all three scripts, a YAML
+parse of both workflows, and `tests/release-publishing.spec.ts` (3 tests) which
+pins the single publisher, the tag-only gate, and the publish-before-Arch
+ordering. No app code changed since the local Android + desktop builds of
+0.2.24, so those artifacts still stand.
+
+**Files:** `.github/workflows/release.yml`, `.github/workflows/android.yml`,
+`tests/release-publishing.spec.ts`
+

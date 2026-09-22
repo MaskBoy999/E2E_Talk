@@ -19,8 +19,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# tauri-action creates/updates the Release, so the token needs write access.
-# Without this the build succeeds but publishing fails silently in some repos.
+# Publishing runs through `gh release` (see "Publish release assets"), which
+# needs write access to the repository contents. Without it the build succeeds
+# while the release keeps only whatever tauri-action managed to push.
 permissions:
   contents: write
 
@@ -183,6 +184,72 @@ jobs:
           if-no-files-found: error
 
       # ---------------------------------------------------------------------
+      # Publish THIS leg's installers, from the files just built, with `gh`.
+      #
+      # Why not leave it to tauri-action (which still runs above and does
+      # publish): the release object appears at the START of the run, and the
+      # two matrix legs race to create/update it — after which the losing
+      # leg's assets silently never upload. That is exactly what happened on
+      # v0.2.24: the release carried only the two Windows bundles, makepkg
+      # then 404'd on the .deb it was told to repack (the reason the Arch step
+      # failed too), and softprops died trying to patch it up afterwards.
+      #
+      # Uploading the local bundle directory ourselves cannot silently lose
+      # files — "Verify installers were produced" above already proved they
+      # exist — and running BEFORE the Arch step guarantees the .deb that
+      # makepkg downloads is published by the time it asks for it. --clobber
+      # is idempotent, so this survives a re-run of the same tag (creating
+      # was the part that used to fail with "already_exists").
+      # ---------------------------------------------------------------------
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          notes=$(cat <<'NOTES'
+          Native desktop app for E2E Chat — no browser required.
+
+          **Install:** download the file for your platform below and run it.
+          - Windows: `.msi` or `.exe` (NSIS)
+          - Linux: `.AppImage` or `.deb`
+          - Arch Linux: `.pkg.tar.zst` — download it and run `sudo pacman -U <file>`
+          - Android: `.apk` (attached by the Android workflow)
+
+          Verify your download against `SHA256SUMS-<platform>.txt`.
+
+          On first launch, enter your server's Tailscale address
+          (e.g. `https://100.x.x.x:3443`) and click **Test connection**.
+
+          To update later, download the new installer from this page again.
+          NOTES
+          )
+          # Create the release if it is missing, otherwise refresh it: the
+          # other leg may have created it a moment ago, and tauri-action may
+          # have left it without these notes.
+          gh release create "$tag" --title "E2E Chat $tag" --notes "$notes" \
+            || gh release edit "$tag" --title "E2E Chat $tag" --notes "$notes"
+
+          # Exactly the bundles this leg produced. On Windows the AppImage/deb
+          # globs simply match nothing (nullglob drops them); the legs never
+          # produce the same file name, so concurrent uploads cannot collide.
+          shopt -s nullglob
+          files=(src-tauri/target/release/bundle/*/*.msi
+                 src-tauri/target/release/bundle/*/*.exe
+                 src-tauri/target/release/bundle/*/*.AppImage
+                 src-tauri/target/release/bundle/*/*.deb
+                 src-tauri/target/release/bundle/*/*.rpm)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No installers to publish — the bundle step produced nothing."
+            exit 1
+          fi
+          gh release upload "$tag" "${files[@]}" --clobber
+          gh release view "$tag" --json assets \
+            --jq '"published: " + ([.assets[].name] | sort | join(", "))'
+
+      # ---------------------------------------------------------------------
       # Arch Linux: build a real pacman package for this tag — no AUR account
       # involved (GitHub has no Arch runner, so the build runs inside the
       # official archlinux container, the standard pattern for Arch packaging
@@ -305,14 +372,33 @@ jobs:
           echo "--- $out"
           cat "$out"
 
+      # ---------------------------------------------------------------------
+      # The checksum lists and the Arch package join the release through the
+      # same `gh` uploader. This step was softprops/action-gh-release, which
+      # cannot complete an EXISTING release: on the v0.2.22 and v0.2.24 tags it
+      # failed with "already_exists" and "Resource not accessible by
+      # integration ... update-a-release", publishing releases that carried
+      # binaries but no checksums at all. --clobber is idempotent, so a re-run
+      # finishes the release instead of dying on assets that already exist.
+      # ---------------------------------------------------------------------
       - name: Attach checksums to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            SHA256SUMS-*.txt
-            dist/*.pkg.tar.zst
-          fail_on_unmatched_files: false
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          shopt -s nullglob
+          # dist/*.pkg.tar.zst exists on the Linux leg of a tag run only.
+          files=(SHA256SUMS-*.txt dist/*.pkg.tar.zst)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No checksum files to attach."
+            exit 1
+          fi
+          gh release upload "$tag" "${files[@]}" --clobber
+          gh release view "$tag" --json assets \
+            --jq '"assets now: " + ([.assets[].name] | sort | join(", "))'
 
       # ---------------------------------------------------------------------
       # Signing is wired but was never *verified* — prove it on every release
