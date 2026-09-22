@@ -371,9 +371,14 @@ jobs:
           tag="$GITHUB_REF_NAME"
           # The desktop workflow owns the release notes. Both workflows start
           # at the tag push, so this one may get here first — create the
-          # release in that case, and let the desktop leg refresh the notes.
+          # release in that case and let the desktop leg fill the notes in.
+          # An existing release is left alone: this token can create releases
+          # and upload assets but `update-a-release` (a PATCH) is refused with
+          # "Resource not accessible by integration", so editing one would fail
+          # here and take the APK down with it.
           gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --title "E2E Chat $tag" --generate-notes
+            || gh release create "$tag" --title "E2E Chat $tag" --generate-notes \
+            || echo "note: could not create $tag (assuming it exists); uploading anyway"
           # Listed explicitly, not left to gh to glob: an unmatched pattern is
           # an error there, while the APK and its checksum are both produced by
           # this job and must both reach the release.
@@ -384,5 +389,6 @@ jobs:
             exit 1
           fi
           gh release upload "$tag" "${files[@]}" --clobber
+          # A log line only: never allowed to fail the step after the upload.
           gh release view "$tag" --json assets \
-            --jq '"assets now: " + ([.assets[].name] | sort | join(", "))'
+            --jq '"assets now: " + ([.assets[].name] | sort | join(", "))' || true

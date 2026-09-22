@@ -50,6 +50,12 @@ test.describe('release publishing', () => {
       // ...and it needs write access, or it fails as silently as before.
       expect(wf, name).toContain('contents: write');
       expect(wf, name).toContain('GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}');
+      // Creating a release and uploading to it work with this token; PATCHing
+      // one (gh release edit, or softprops updating) does not — it comes back
+      // "Resource not accessible by integration" and would fail the step that
+      // carries the APK / installers, so it must never be attempted.
+      expect(wf, name).not.toContain('gh release edit');
+      expect(wf, name).toContain('gh release view');
     }
   });
 

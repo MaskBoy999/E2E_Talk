@@ -226,11 +226,18 @@ jobs:
           To update later, download the new installer from this page again.
           NOTES
           )
-          # Create the release if it is missing, otherwise refresh it: the
-          # other leg may have created it a moment ago, and tauri-action may
-          # have left it without these notes.
-          gh release create "$tag" --title "E2E Chat $tag" --notes "$notes" \
-            || gh release edit "$tag" --title "E2E Chat $tag" --notes "$notes"
+          # Notes are set on the CREATE path only, and an existing release is
+          # never PATCHed. This token can create a release and upload assets
+          # to it, but `update-a-release` comes back "Resource not accessible
+          # by integration" — the wall softprops died on across v0.2.22 and
+          # v0.2.24, and what a `create || edit` pair reduced to as well (the
+          # create always fails on an existing release, so the edit always
+          # ran). In practice tauri-action has already created the release
+          # with these notes from its `releaseBody` before this step starts,
+          # so the create path is the fallback, not the norm.
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "E2E Chat $tag" --notes "$notes" \
+            || echo "note: could not create $tag (assuming it exists); uploading anyway"
 
           # Exactly the bundles this leg produced. On Windows the AppImage/deb
           # globs simply match nothing (nullglob drops them); the legs never
@@ -245,9 +252,23 @@ jobs:
             echo "::error::No installers to publish — the bundle step produced nothing."
             exit 1
           fi
-          gh release upload "$tag" "${files[@]}" --clobber
+          # Job logs need auth even on a public repo, so a bare failure here
+          # would be invisible to anyone not signed in as the owner. Capture
+          # gh's own message and re-emit it as an annotation — the same trick
+          # the Arch step and android.yml use.
+          set +e
+          gh release upload "$tag" "${files[@]}" --clobber 2>"$RUNNER_TEMP/publish.err"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            BLOCK="Publishing to $tag failed (gh release upload, exit $rc):%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/publish.err" | sed ':a;N;$!ba;s/\n/%0A/g')"
+            printf '::error::%s\n' "$BLOCK"
+            exit "$rc"
+          fi
+          # A log line only — never allowed to fail the step here, which would
+          # skip the Arch and checksum steps that follow it.
           gh release view "$tag" --json assets \
-            --jq '"published: " + ([.assets[].name] | sort | join(", "))'
+            --jq '"published: " + ([.assets[].name] | sort | join(", "))' || true
 
       # ---------------------------------------------------------------------
       # Arch Linux: build a real pacman package for this tag — no AUR account
@@ -398,7 +419,7 @@ jobs:
           fi
           gh release upload "$tag" "${files[@]}" --clobber
           gh release view "$tag" --json assets \
-            --jq '"assets now: " + ([.assets[].name] | sort | join(", "))'
+            --jq '"assets now: " + ([.assets[].name] | sort | join(", "))' || true
 
       # ---------------------------------------------------------------------
       # Signing is wired but was never *verified* — prove it on every release
