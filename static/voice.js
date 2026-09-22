@@ -6102,6 +6102,24 @@
         if (had) notifyWaitingChanged();
     }
 
+    // Buzz with a pattern in `navigator.vibrate` shape ([buzz, pause, buzz, …]).
+    //
+    // `window.boxHaptic` (installed by box-shell.js) is the real destination
+    // inside the Android app: Chromium **disabled the Vibration API on Android in
+    // v79** and left the interface in place, so `navigator.vibrate` there is
+    // defined, returns true, and does nothing — which is why every cue, the
+    // "Test pattern" buttons included, worked in a browser and was dead on the
+    // phone. Everywhere else this falls back to the web API, so a browser and the
+    // desktop box behave exactly as they always have. A page without box-shell.js
+    // is also fine.
+    function vibrate(pattern) {
+        if (typeof window.boxHaptic === 'function') {
+            try { if (window.boxHaptic(pattern)) return; } catch (_) {}
+        }
+        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
+        try { navigator.vibrate(pattern); } catch (_) {}
+    }
+
     // Build a navigator.vibrate pattern from a { pulse, gap, pulses } config:
     // [pulse, gap, pulse, gap, …, pulse] — `pulses` buzzes separated by `gap`
     // pauses. Clamped to sane bounds regardless of what the sliders or
@@ -6149,12 +6167,11 @@
     // longer ring-like pattern so it's felt as "someone is calling" (vs the
     // short double-buzz of the ring→waiting cue). Uses the tuned pattern from
     // Settings → Voice → Haptics. Gated by Settings → Voice → Haptics →
-    // "Vibrate on incoming calls". navigator.vibrate is a no-op on
-    // browsers/devices without a vibrator, so the API check is enough.
+    // "Vibrate on incoming calls". Hardware without a vibrator is the bridge's
+    // business, not this function's, so there is no capability check to make.
     function vibrateIncomingRingCue() {
         if (S.settings && S.settings.hapticIncoming === false) return;
-        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
-        try { navigator.vibrate(buildHapticPattern(getHapticPattern('ring'))); } catch (_) {}
+        vibrate(buildHapticPattern(getHapticPattern('ring')));
     }
 
     // Repeating haptic ticker for a PROLONGED unanswered ring: instead of one
@@ -6331,12 +6348,11 @@
 
     // Brief haptic cue (mobile) when an incoming ring flips to the waiting
     // state — the green→red badge transition — so it's felt as well as seen.
-    // Respects Settings → Voice → Haptics; navigator.vibrate is a no-op on
-    // browsers/devices without a vibrator, so the API check is enough.
+    // Respects Settings → Voice → Haptics; hardware without a vibrator is the
+    // bridge's business, not this function's.
     function vibrateWaitingCue() {
         if (S.settings && S.settings.hapticWaiting === false) return;
-        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
-        try { navigator.vibrate(buildHapticPattern(getHapticPattern('waiting'))); } catch (_) {}
+        vibrate(buildHapticPattern(getHapticPattern('waiting')));
     }
 
     // Haptic cue (mobile) for notifications — 'notifInbox' (a mention/reply
@@ -6346,16 +6362,14 @@
     function vibrateNotifCue(kind) {
         if (kind === 'notifInbox' && S.settings && S.settings.hapticNotifInbox === false) return;
         if (kind === 'notifDm' && S.settings && S.settings.hapticNotifDm === false) return;
-        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
-        try { navigator.vibrate(buildHapticPattern(getHapticPattern(kind))); } catch (_) {}
+        vibrate(buildHapticPattern(getHapticPattern(kind)));
     }
 
     // "Test pattern" buttons in Settings → Voice → Haptics: buzz immediately
     // with the configured pattern, bypassing the enable toggles so power users
     // can tune intensity/duration while the cue is disabled.
     function testHapticPattern(kind) {
-        if (typeof navigator === 'undefined' || !navigator.vibrate) return;
-        try { navigator.vibrate(buildHapticPattern(getHapticPattern(kind))); } catch (_) {}
+        vibrate(buildHapticPattern(getHapticPattern(kind)));
     }
 
     // Reset a haptic pattern back to its default ({ pulse, gap, pulses } from

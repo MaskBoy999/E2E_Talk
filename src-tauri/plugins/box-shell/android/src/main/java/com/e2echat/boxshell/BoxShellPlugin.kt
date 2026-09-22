@@ -1,7 +1,12 @@
 package com.e2echat.boxshell
 
 import android.app.Activity
+import android.app.NotificationManager
+import android.content.Context
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.Window
 import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
@@ -27,6 +32,17 @@ class BackHandlerArgs {
     var active: Boolean = true
 }
 
+@InvokeArg
+class VibrateArgs {
+    /**
+     * Alternating buzz/pause durations in milliseconds, exactly the shape
+     * `navigator.vibrate` takes: `[buzz, pause, buzz, …]`. The first entry is
+     * always a buzz. An empty array — or one that is all zeros — stops whatever
+     * is vibrating, which is what `navigator.vibrate(0)` means.
+     */
+    var pattern: List<Int> = emptyList()
+}
+
 /**
  * The Android shell half of the box.
  *
@@ -38,9 +54,26 @@ class BackHandlerArgs {
  * or a transient swipe that timed out, and the page cannot see all of those.
  * Re-applying is idempotent, so it is safe to do whenever the activity comes
  * back to the front.
+ *
+ * It also carries the two device duties the WebView cannot perform for itself:
+ * `vibrate` (Chromium dropped the Vibration API on Android, so every haptic cue
+ * in the app was silently dead inside the box whatever the settings said) and
+ * `clearNotifications` (the shade must be empty on return, minus an ongoing
+ * call).
  */
 @TauriPlugin
 class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
+
+    companion object {
+        /**
+         * The ongoing "In call" notification, owned by the call-service plugin
+         * (`CallForegroundService.NOTIFICATION_ID`). It has to survive
+         * [clearNotifications]: while a call is up, that notification *is* the
+         * call's presence in the shade and the way back into it. Keep the two
+         * numbers in step if the call notification id ever moves.
+         */
+        private const val ONGOING_CALL_NOTIFICATION_ID = 4711
+    }
 
     /** Whether the page currently wants the system bars hidden. */
     private var immersive = false
@@ -108,6 +141,87 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             activity.finishAndRemoveTask()
         }
+    }
+
+    /**
+     * Buzz the phone's real vibrator with a `navigator.vibrate`-shaped pattern.
+     *
+     * This command exists because the page cannot reach the hardware itself:
+     * Chromium **disabled the Vibration API on Android in v79**, and left the
+     * *interface* in place. So `navigator.vibrate` is defined, is not blocked,
+     * returns `true` while the page is visible, and does nothing at all — every
+     * cue (incoming call, ring→waiting, notification, and the "Test pattern"
+     * buttons, which are exactly where a user goes to check) looked correct in a
+     * browser and was dead inside the app.
+     *
+     * `VibrationEffect.createWaveform` takes the same alternating buzz/pause
+     * array the page already builds, so a configured pattern plays as ONE
+     * hardware waveform — no JS timers stringing pulses together, and no drift if
+     * the WebView freezes mid-pattern (which is precisely when a call cue
+     * matters).
+     */
+    @Command
+    fun vibrate(invoke: Invoke) {
+        val args = invoke.parseArgs(VibrateArgs::class.java)
+        val timings = args.pattern.map { it.coerceAtLeast(0).toLong() }.toLongArray()
+        val vibrator = vibrator()
+        // No vibrator (an emulator, a tablet, a phone in a mode that reports
+        // none) is not an error: the cue was best-effort to begin with.
+        if (vibrator == null || !vibrator.hasVibrator()) {
+            invoke.resolve()
+            return
+        }
+        try {
+            if (timings.isEmpty() || timings.all { it == 0L }) {
+                vibrator.cancel()
+            } else {
+                vibrator.vibrate(VibrationEffect.createWaveform(timings, -1))
+            }
+            invoke.resolve()
+        } catch (e: Exception) {
+            // A refused vibration must never take the page down with it.
+            invoke.reject(e.message ?: "vibrate failed")
+        }
+    }
+
+    /**
+     * Dismiss every notification this app posted, except the ongoing call.
+     *
+     * Coming back to the app means whatever was waiting has now been seen, so
+     * the shade should be empty — the notifications that used to sit there for
+     * good were ones the user had already read, and nothing could clear them
+     * (the notification plugin's shim posts a plain object with no `close()`).
+     * The in-call notification is deliberately left alone: while a call is up it
+     * *is* the call's presence in the shade and the way back to it.
+     */
+    @Command
+    fun clearNotifications(invoke: Invoke) {
+        try {
+            val manager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.activeNotifications?.forEach { status ->
+                if (status.id != ONGOING_CALL_NOTIFICATION_ID) manager.cancel(status.id)
+            }
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject(e.message ?: "clearNotifications failed")
+        }
+    }
+
+    /**
+     * The device vibrator, through the manager that replaced the service in
+     * Android 12 (API 31); the older service lookup is kept for API 29/30, which
+     * this app still supports (`bundle.android.minSdkVersion` is 29).
+     */
+    private fun vibrator(): Vibrator? = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = activity.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+            manager?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            activity.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+    } catch (e: Exception) {
+        null
     }
 
     private fun window(): Window? = activity.window

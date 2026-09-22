@@ -1,10 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Merged into the app manifest at build time. Deliberately empty of permissions:
-  hiding the system bars and intercepting Back need none. It exists so the plugin
-  is a normal Android library module with a manifest of its own (the same shape
-  as the call-service plugin), and so any future shell permission has somewhere
-  committed to live — editing `src-tauri/gen/android/` would not survive
-  `tauri android init`.
+  Merged into the app manifest at build time. It exists so the plugin is a normal
+  Android library module with a manifest of its own (the same shape as the
+  call-service plugin), and so the permissions it needs have somewhere committed
+  to live — editing `src-tauri/gen/android/` would not survive `tauri android
+  init`.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      The phone's vibrator, for this plugin's `vibrate` command. The ask is
+      ordinary ("vibrate") but the *reason* is not: the WebView cannot reach the
+      hardware itself, because Chromium **disabled the Vibration API on Android
+      in v79** and left the interface in place — `navigator.vibrate` is defined,
+      returns true while the page is visible, and does nothing, which is exactly
+      how every haptic cue in this app came to work in a browser and be dead in
+      the Android app. VIBRATE is an install-time permission: nothing to prompt
+      for at runtime.
+    -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+</manifest>

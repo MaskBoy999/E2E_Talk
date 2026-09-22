@@ -1,5 +1,5 @@
 [default]
-description = """\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n"""
+description = """\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n"""
 # NOTE: the identifiers are spelled exactly as `build.rs`'s tauri-plugin build
 # script generates them (`allow-` + the Kotlin command name, camelCase and all).
 permissions = [
@@ -7,4 +7,6 @@ permissions = [
     "allow-exitImmersive",
     "allow-setBackHandler",
     "allow-exit",
+    "allow-vibrate",
+    "allow-clearNotifications",
 ]

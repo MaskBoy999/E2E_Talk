@@ -20,6 +20,20 @@
 //!    `OnBackPressedCallback` and emits `box:back` to the page, which closes
 //!    the topmost open layer — or, when nothing is open, calls `exit`.
 //!
+//! 3. **Haptics.** Every cue in the app (incoming call, ring→waiting,
+//!    notification, and the Settings "Test pattern" buttons) used to be
+//!    `navigator.vibrate(...)` — which Chromium **disabled on Android in v79**
+//!    while leaving the interface in place. The call was defined, unblocked,
+//!    returned `true` while the page was visible, and did nothing, so every
+//!    haptic worked in a browser and was silently dead inside the app. The
+//!    `vibrate` command plays the same pattern on the real vibrator through
+//!    `VibrationEffect.createWaveform` — one hardware waveform, no JS timers.
+//! 4. **Notification hygiene.** Notifications already read used to stay in the
+//!    shade forever (the notification plugin's shim posts a plain object with no
+//!    `close()`), so `clearNotifications` empties the shade when the app comes
+//!    back to the front — minus the ongoing call, which stays for as long as the
+//!    call does.
+//!
 //! The commands are Kotlin (`android/src/main/java/com/e2echat/boxshell/`), so
 //! this crate exists to register that class with Tauri. The registration call is
 //! not optional: a plugin whose commands live in Kotlin that never calls

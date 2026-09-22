@@ -533,7 +533,7 @@
                 st.ghost.style.left = (st.lastX - 70) + 'px';
                 st.ghost.style.top = (st.lastY - 16) + 'px';
                 document.body.appendChild(st.ghost);
-                if (navigator.vibrate) { try { navigator.vibrate(30); } catch (_) {} }
+                if (window.boxBuzz) window.boxBuzz(30);
             }, LONG_PRESS_MS);
         }, { passive: false });
         // Suppress browser context menu during long-press.

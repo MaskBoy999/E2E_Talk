@@ -101,7 +101,7 @@
                 s.ghost.style.left = (s.lx - 20) + 'px';
                 s.ghost.style.top = (s.ly - 20) + 'px';
                 document.body.appendChild(s.ghost);
-                if (navigator.vibrate) try { navigator.vibrate(30); } catch (_) {}
+                if (window.boxBuzz) window.boxBuzz(30);
             }, LONG_PRESS);
         }, { passive: false });
         // Suppress browser context menu during long-press on channel/category items

@@ -10667,6 +10667,17 @@ function notifText(kind, o) {
     }
 }
 
+// Is this the Android app (rather than a browser or the desktop box)? It is the
+// box if the Tauri bridge is present *and* the webview is Android — desktop has
+// the bridge but no Android shell.
+function isAndroidBox() {
+    try {
+        var tauri = window.__TAURI__;
+        return !!(tauri && tauri.core && typeof tauri.core.invoke === 'function')
+            && /Android/i.test(navigator.userAgent || '');
+    } catch (_) { return false; }
+}
+
 function showBrowserNotification(title, body, onClick) {
     // No box-specific branch needed: inside the box the notification plugin's
     // init script has already replaced `window.Notification` with a shim that
@@ -10677,6 +10688,14 @@ function showBrowserNotification(title, body, onClick) {
     // and the rejected promise went unhandled. On Android the shim is also the
     // only option: the WebView has no Web Notification API at all.
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    // The Android app only posts *background* notifications: while it is open the
+    // user is looking at it, and the badge, the toast and the sound have already
+    // said everything a shade notification would say. One posted anyway outlives
+    // the visit — the notification plugin's shim posts a plain object with no
+    // `close()` — so the shade filled up with messages the user had just read.
+    // Desktop keeps using the per-user "only when not in the app" preference
+    // instead, which is what gates playNotificationSound().
+    if (isAndroidBox() && !document.hidden) return;
     try {
         // The app's own icon (generated from the single source of truth by
         // `npm run icon`) — not /favicon.ico, which never existed, so every
@@ -10688,14 +10707,7 @@ function showBrowserNotification(title, body, onClick) {
         // The Android drawable is the app mark in silhouette, because Android
         // masks a small icon down to its alpha — the full-colour icon there
         // came out as a shapeless white blob.
-        var notifIcon = (function () {
-            try {
-                var tauri = window.__TAURI__;
-                var androidBox = !!(tauri && tauri.core && tauri.core.invoke)
-                    && /Android/i.test(navigator.userAgent || '');
-                return androidBox ? 'ic_notification' : '/icons/icon-192.png';
-            } catch (_) { return '/icons/icon-192.png'; }
-        })();
+        var notifIcon = isAndroidBox() ? 'ic_notification' : '/icons/icon-192.png';
         var notif = new Notification(title, { body, icon: notifIcon });
         if (onClick) {
             var cb = onClick;
@@ -14995,7 +15007,7 @@ function renderServerList() {
                 // Ghost goes at the finger's CURRENT position, not where the
                 // press started — that is stale by the time the timer fires.
                 st.ghost = makeTouchGhost(handleEl || el, st.lastX, st.lastY);
-                if (navigator.vibrate) navigator.vibrate(30);
+                if (window.boxBuzz) window.boxBuzz(30);
             }, LONG_PRESS_MS);
         }, { passive: false });
         // Suppress the browser's native context menu on mobile when a
@@ -19160,7 +19172,7 @@ function renderDmSidebar() {
                     el.classList.add('dragging');
                     beginDmDrag(el);
                     st.ghost = makeTouchGhost(el, st.lastX, st.lastY);
-                    if (navigator.vibrate) navigator.vibrate(30);                }, LONG_PRESS_MS);
+                    if (window.boxBuzz) window.boxBuzz(30);                }, LONG_PRESS_MS);
             }, { passive: false });
             // Suppress browser context menu during long-press on DM items
             el.addEventListener('contextmenu', function (e) {

@@ -82,11 +82,75 @@ Nothing to add — Android WebView (API 29+, which is why `bundle.android.minSdk
 is 29) supports `navigator.mediaDevices.getDisplayMedia()`, and `static/voice.js`
 already uses it. The system picker offers "Share entire screen" / "Share one app".
 
-## 3. Push notifications (FCM)
+## 3. Notifications, haptics, and staying alive
 
-Needs a Firebase project (`google-services.json`) plus server-side sending. See the
-master plan §A3.5. Not wired yet — this is the one feature that cannot work
-without external credentials.
+### 3a. Haptics — wired through the plugin, not the WebView
+
+Every cue in the app (incoming call, ring→waiting, notification, and the
+Settings → "Test pattern" buttons) goes through `window.boxHaptic`
+(`static/box-shell.js`), which calls this plugin's `vibrate` command on the box
+and `navigator.vibrate` everywhere else.
+
+That indirection is the whole fix, not a style choice: **Chromium disabled the
+Vibration API on Android in v79** and left the interface in place.
+`navigator.vibrate` in the box is defined, is not blocked, returns `true` while
+the page is visible — and does nothing. So every haptic worked in a browser and
+was silently dead in the app, including the Test buttons, which are exactly where
+a user goes to check. `VibrationEffect.createWaveform` now plays the configured
+pulse/gap/pulse pattern on the real vibrator as one hardware waveform, and the
+`VIBRATE` permission ships in the plugin manifest (install-time; no prompt).
+
+### 3b. Notification hygiene
+
+* While the app is **in front**, it posts no system notification at all: the
+  badge, toast and sound have already said what a shade notification would, and
+  one posted anyway outlives the visit (the notification plugin's shim posts a
+  plain object with no `close()`).
+* Coming **back to the app** empties the shade (`clearNotifications`), so
+  notifications that were read do not pile up. The ongoing "In call"
+  notification is deliberately kept — while a call is up, it *is* the call's
+  presence in the shade and the way back into it.
+
+### 3c. What "the app was closed" can and cannot do (research)
+
+**Calls with the screen off — done.** `call-service` keeps the process (and so
+the WebRTC connection and the mic) alive for the duration of a call. Note the
+direction of that: a call cannot *start* while the app is gone, because the app
+is what knows the call exists.
+
+**"Tell me about a message while the app is closed" — impossible without push.**
+The socket lives in the WebView. Once Android kills the process (it decides, not
+the app — a removed task is enough), the socket dies with it, and nothing can
+wake the app to say a message arrived. Nothing inside the app can get around
+that:
+
+* **A permanent foreground service** is the only way to keep the process (and so
+  the socket) alive with the app "closed". It costs a notification the user
+  cannot dismiss, continuous battery use, and — since Android 12 — it can only be
+  *started* while the app is visible, so it must be an explicit, revocable user
+  setting and needs a boot receiver to come back. Android 14+ also requires one
+  of the platform's approved service types with its matching permission, and
+  Google Play asks for the use case to be declared; "keep my chat socket open"
+  has no approved type. OEM battery managers (Xiaomi, Huawei, Samsung, Oppo)
+  kill it anyway unless the user exempts the app. This is why chat apps do not do
+  it.
+* **Push (FCM)** is the sanctioned answer: the server tells Google, Google wakes
+  the app even if it is dead, the app posts the notification. No persistent
+  service, no battery cost, survives a force-stop. It needs the one thing this
+  project cannot make for itself — a Firebase project (`google-services.json`)
+  plus a server-side sender. That is work on both sides (a push plugin in the
+  app, a token registry and send path in `server/`), untestable without those
+  credentials, and tracked in the master plan §A3.5.
+
+Until then the app does what it can: it reconnects when opened and surfaces what
+was missed (`showMissedActivityNotification`), and a call that arrives while the
+app is alive-but-backgrounded rings through the foreground service.
+
+The credential-free middle ground, if it is ever wanted: an opt-in "stay
+connected" toggle starting a `dataSync`-typed foreground service for as long as
+the user leaves it on — accepting the permanent notification and the battery cost
+in exchange for message notifications while the app is closed. Still subject to
+Play's use-case declaration.
 
 ## 3b. In-app server address change — nothing to wire
 

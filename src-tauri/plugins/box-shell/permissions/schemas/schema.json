@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the clearNotifications command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clearNotifications",
+          "markdownDescription": "Enables the clearNotifications command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clearNotifications command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clearNotifications",
+          "markdownDescription": "Denies the clearNotifications command without any pre-configured scope."
+        },
+        {
           "description": "Enables the enterImmersive command without any pre-configured scope.",
           "type": "string",
           "const": "allow-enterImmersive",
@@ -343,10 +355,22 @@
           "markdownDescription": "Denies the setBackHandler command without any pre-configured scope."
         },
         {
-          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`",
+          "description": "Enables the vibrate command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-vibrate",
+          "markdownDescription": "Enables the vibrate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the vibrate command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-vibrate",
+          "markdownDescription": "Denies the vibrate command without any pre-configured scope."
+        },
+        {
+          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`"
+          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`"
         }
       ]
     }
