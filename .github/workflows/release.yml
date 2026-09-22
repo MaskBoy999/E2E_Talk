@@ -45,10 +45,6 @@ jobs:
     # are surfaced as env vars and the gates below test `env.*`.
     env:
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-      # Same trick, same reason: a step `if:` can read job env but not
-      # `secrets`, so the AUR key is surfaced here. Unset → the AUR publish
-      # step below is skipped and the release is unaffected.
-      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -110,11 +106,11 @@ jobs:
           $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
           $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
           [IO.File]::WriteAllBytes($pfx, $bytes)
-          $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
           $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
-          $conf = Join-Path $env:GITHUB_WORKSPACE 'ci-signing.conf.json'
+          $conf = Join-Path $GITHUB_WORKSPACE 'ci-signing.conf.json'
           $json = if (Test-Path $conf) { Get-Content $conf -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
-          if (-not $json.PSObject.Properties['bundle']) {
+          if (-not $json.PSObject.Properties.Contains('bundle')) {
             $json | Add-Member -NotePropertyName bundle -NotePropertyValue ([pscustomobject]@{})
           }
           $json.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{
@@ -140,7 +136,7 @@ jobs:
             **Install:** download the file for your platform below and run it.
             - Windows: `.msi` or `.exe` (NSIS)
             - Linux: `.AppImage` or `.deb`
-            - Arch Linux: `yay -S e2e-chat-bin` (AUR)
+            - Arch Linux: `.pkg.tar.zst` — download it and run `sudo pacman -U <file>`
             - Android: `.apk` (attached by the Android workflow)
 
             Verify your download against `SHA256SUMS-<platform>.txt`.
@@ -187,8 +183,75 @@ jobs:
           if-no-files-found: error
 
       # ---------------------------------------------------------------------
+      # Arch Linux: build a real pacman package for this tag — no AUR account
+      # involved (GitHub has no Arch runner, so the build runs inside the
+      # official archlinux container, the standard pattern for Arch packaging
+      # in CI). packaging/aur/PKGBUILD.template is rendered for this tag, then
+      # makepkg fetches the .deb we just published — the identical download an
+      # Arch user performs, which doubles as proof the published asset exists
+      # — and repacks it.
+      #
+      # The artifact is then read back with pacman itself: `pacman -Qp` must
+      # report a name/version matching the tag (the v0.2.19 lesson — version
+      # drift here installs as a phantom re-update of the previous release)
+      # and the file list must be real. Anything odd fails the release instead
+      # of shipping. Tag pushes only, Linux leg only (where the .deb lives).
+      #
+      # BEFORE THIS: the workflow pushed a PKGBUILD to the AUR on every tag.
+      # There is no AUR account, so that step could only ever skip — and a
+      # reintroduced push would fail every release. tests/arch-packaging.spec.ts
+      # asserts the AUR push never comes back.
+      # ---------------------------------------------------------------------
+      - name: Build Arch package (pacman)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkgver="${GITHUB_REF_NAME#v}"
+          deb="$(find src-tauri/target -type f -name '*.deb' -print -quit)"
+          # makepkg verifies its download against this hash. The checksum list
+          # generated below covers the same bytes, so the two agree by
+          # construction; computing it here keeps the steps independent (the
+          # list does not exist yet at this point in the job).
+          sha="$(sha256sum "$deb" | cut -d' ' -f1)"
+          out="$RUNNER_TEMP/arch-render"
+          node tools/aur-render.mjs --pkgver "$pkgver" --sha256 "$sha" --outdir "$out"
+          echo "--- PKGBUILD ---"
+          cat "$out/PKGBUILD"
+
+          mkdir -p dist
+          docker run --rm \
+            -v "$out":/pkgbuild:ro \
+            -v "$PWD/dist":/dist \
+            -e PKGVER="$pkgver" \
+            archlinux:base-devel bash -ec '
+              # makepkg refuses to run as root — build as an unprivileged user
+              # (sudo ships in the base-devel group this image is built from).
+              useradd -m builder
+              echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+              cp /pkgbuild/PKGBUILD /pkgbuild/e2e-chat-bin.install /home/builder/
+              chown -R builder:builder /home/builder
+              # makepkg downloads the .deb with the curl binary, which is not
+              # part of the image (pacman links libcurl, not the tool).
+              pacman -Sy --noconfirm --needed curl
+              sudo -u builder makepkg --force --noconfirm
+              cp /home/builder/*.pkg.tar.zst /dist/
+
+              info="$(pacman -Qp /dist/*.pkg.tar.zst)"
+              echo "pacman reads back: $info"
+              case "$info" in
+                "e2e-chat-bin $PKGVER-"*) ;;
+                *) echo "::error::built package [$info] does not match tag v$PKGVER"; exit 1 ;;
+              esac
+              echo "--- package contents ---"
+              pacman -Qlp /dist/*.pkg.tar.zst | sed -n "1,40p"
+            '
+          ls -la dist/
+
+      # ---------------------------------------------------------------------
       # Checksums: one file per platform so a partial download only ever
-      # invalidates that platform's list.
+      # invalidates that platform's list. Includes the Arch package, so it is
+      # covered by the same verification line the release notes advertise.
       # ---------------------------------------------------------------------
       - name: Generate checksums
         if: startsWith(github.ref, 'refs/tags/')
@@ -201,6 +264,14 @@ jobs:
             echo "$h  $(basename "$f")" >> "$out"
           done < <(find src-tauri/target -type f \
             \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' \) -print0)
+          # The Arch package lives outside target/ (and only exists on the
+          # Linux leg of a tag run) — append it when present.
+          if [ -d dist ]; then
+            while IFS= read -r -d '' f; do
+              h=$(sha256sum "$f" | cut -d' ' -f1)
+              echo "$h  $(basename "$f")" >> "$out"
+            done < <(find dist -type f -name '*.pkg.tar.zst' -print0)
+          fi
           echo "--- $out"
           cat "$out"
 
@@ -208,86 +279,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: SHA256SUMS-*.txt
+          files: |
+            SHA256SUMS-*.txt
+            dist/*.pkg.tar.zst
           fail_on_unmatched_files: false
-
-      # ---------------------------------------------------------------------
-      # Arch Linux: render this tag's AUR package from the .deb just published
-      # and push it to the Arch User Repository, so pacman users install with
-      # `yay -S e2e-chat-bin` instead of hand-wrapping a .deb. The recipe is
-      # packaging/aur/PKGBUILD.template; packaging/aur/README.md covers the
-      # one-time AUR account + AUR_SSH_KEY setup.
-      #
-      # Tag pushes only (this is a release action), Linux leg only (that is
-      # where the .deb lives), and gated on the secret exactly like the
-      # Windows certificate above. A failing AUR push fails this job AFTER the
-      # release and its checksums are already public — the release is fine, the
-      # red job is the signal to fix the key.
-      # ---------------------------------------------------------------------
-      - name: Publish PKGBUILD to the AUR
-        if: startsWith(github.ref, 'refs/tags/') && matrix.platform == 'ubuntu-22.04' && env.AUR_SSH_KEY != ''
-        shell: bash
-        env:
-          AUR_PACKAGE: e2e-chat-bin
-        run: |
-          set -euo pipefail
-
-          # Pin the package to exactly what we published: take the hash from
-          # the checksum list users verify rather than re-summing a file that
-          # could have changed, and abort if the .deb is not in that list —
-          # the AUR must never carry a hash this release did not attest to.
-          #
-          # The list was written from the ON-DISK basename, which is
-          # "E2E Chat_…_amd64.deb" (space), while the GitHub asset — and thus
-          # the PKGBUILD's download URL — is "E2E.Chat_…" (dot; GitHub
-          # normalises spaces on upload, both verified 200/404 against the
-          # v0.2.21 release). Either way the name contains spaces, so awk must
-          # reassemble fields 2..NF: `$2 == f` would match nothing and abort
-          # every publish.
-          deb="$(find src-tauri/target -type f -name '*.deb' -print -quit)"
-          base="$(basename "$deb")"
-          sha="$(awk -v f="$base" '{ n=$2; for (i=3; i<=NF; i++) n=n " " $i; if (n == f) print $1 }' SHA256SUMS-linux-x64.txt)"
-          if [ -z "$sha" ]; then
-            echo "::error::'$base' is missing from SHA256SUMS-linux-x64.txt — refusing to publish an unverifiable PKGBUILD to the AUR."
-            exit 1
-          fi
-
-          out="$RUNNER_TEMP/aur-render"
-          node tools/aur-render.mjs --pkgver "${GITHUB_REF_NAME#v}" --sha256 "$sha" --outdir "$out"
-          echo "--- PKGBUILD ---"
-          cat "$out/PKGBUILD"
-          echo "--- .SRCINFO ---"
-          cat "$out/.SRCINFO"
-
-          # AUR pushes go over SSH from a key registered on the account.
-          # accept-new pins the host key on first use (TOFU) instead of
-          # disabling the check; %b forgives a key pasted with literal \n
-          # instead of real line breaks. The key itself is never echoed.
-          key="$RUNNER_TEMP/aur_key"
-          printf '%b\n' "$AUR_SSH_KEY" > "$key"
-          chmod 600 "$key"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-
-          # Cloning a package name that does not exist yet yields an empty
-          # repo (documented AUR behaviour) — the first push creates the
-          # package, so there is no separate bootstrap step.
-          repo="$RUNNER_TEMP/aur-repo"
-          git -c init.defaultBranch=master clone "ssh://aur@aur.archlinux.org/$AUR_PACKAGE.git" "$repo"
-
-          # The AUR tree must contain exactly what we render: clear anything
-          # stale (e.g. leftovers after a rename), then copy the three files.
-          find "$repo" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp "$out/PKGBUILD" "$out/.SRCINFO" "packaging/aur/$AUR_PACKAGE.install" "$repo/"
-
-          git -C "$repo" config user.name "MaskBoy999"
-          git -C "$repo" config user.email "MaskBoy999@users.noreply.github.com"
-          git -C "$repo" add -A
-          if git -C "$repo" diff --cached --quiet; then
-            echo "AUR package already at ${GITHUB_REF_NAME#v} — nothing to push."
-            exit 0
-          fi
-          git -C "$repo" commit -m "Update to ${GITHUB_REF_NAME#v}"
-          git -C "$repo" push origin HEAD
 
       # ---------------------------------------------------------------------
       # Signing is wired but was never *verified* — prove it on every release

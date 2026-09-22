@@ -1,77 +1,73 @@
-# AUR packaging — `e2e-chat-bin`
+# Arch packaging — `e2e-chat-bin`
 
-The Arch Linux package. It is a **binary package** (`-bin` suffix, required by
-the [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines)
-for prebuilt deliverables): it downloads the `E2E.Chat_<version>_amd64.deb`
-that every release already publishes, unwraps the `ar` container with bsdtar
-(Arch has no dpkg) and unpacks `data.tar.*` into `$pkgdir`, so pacman ends up
-owning every installed file. Arch users then install with:
+Arch users get a real pacman package on **every GitHub release**: download
+`e2e-chat-bin-<version>-1-x86_64.pkg.tar.zst` from the release page and run
 
-```sh
-yay -S e2e-chat-bin      # or paru -S e2e-chat-bin
-```
+    sudo pacman -U e2e-chat-bin-<version>-1-x86_64.pkg.tar.zst
 
-## How it is maintained
+To update later, `pacman -U` the new file the same way. No AUR account, no
+signing key, no `pacman.conf` edits: GitHub has no Arch runner, so
+`release.yml` builds the package inside the official `archlinux:base-devel`
+container — the standard pattern for Arch packaging in CI — from the same
+`PKGBUILD.template` an AUR publish would use.
 
-- `PKGBUILD.template` is the source of truth in this repo. Do **not** edit the
-  AUR copy by hand: the next `v*` tag re-renders it and pushes, overwriting
-  manual changes. If only the *packaging* changes for an already-released
-  version, bump `pkgrel` in the template so the AUR sees a real revision.
-- On every tag push, `release.yml` (Linux leg) runs
-  `tools/aur-render.mjs`, which fills `@PKGVER@`/`@SHA256@`, derives the
-  `.SRCINFO` the AUR insists on from the rendered PKGBUILD, and pushes both to
-  `ssh://aur@aur.archlinux.org/e2e-chat-bin.git`. The sha256 comes from
-  `SHA256SUMS-linux-x64.txt` — the file users verify — and a `.deb` missing
-  from that list aborts the publish.
-- Cloning a package name that does not exist yet returns an empty repo (an
-  explicitly documented AUR behaviour), so the **first push creates the
-  package** — no manual bootstrap step.
+## How a release builds it
 
-## One-time setup
+1. The Linux leg publishes the `.deb` with the release (as before).
+2. `tools/aur-render.mjs` renders `PKGBUILD.template` for the tag: `pkgver`
+   from the tag, `sha256sums` from the `.deb` the job just built.
+3. In the container, `makepkg` downloads that `.deb` from its **release URL** —
+   the identical fetch an Arch user performs, so the step doubles as proof the
+   published asset exists — verifies the hash, and repacks it
+   (`bsdtar` unwraps the `ar` container; Arch has no dpkg).
+4. CI reads the artifact back with **pacman itself**: `pacman -Qp` must report
+   `e2e-chat-bin <tag>-1`, and `pacman -Qlp` prints the file list into the job
+   log. Version drift (the v0.2.19 phantom-re-update lesson) fails the release
+   instead of shipping.
+5. The package joins `SHA256SUMS-linux-x64.txt` and is attached to the
+   release next to `.deb` / `.rpm` / `.AppImage`.
 
-1. Create an account at <https://aur.archlinux.org> and confirm the e-mail.
-2. Create a **dedicated** key (the ArchWiki recommends one key per purpose so
-   it can be revoked selectively):
+`tests/arch-packaging.spec.ts` pins all of this — plus the render output — on
+any OS, in milliseconds.
 
-   ```sh
-   ssh-keygen -t ed25519 -f ~/.ssh/aur-e2e-chat -C "e2e-chat AUR publishing"
-   ```
+## Why not the AUR
 
-3. Paste the **public** key (`~/.ssh/aur-e2e-chat.pub`) into *My Account →
-   SSH Public Keys* on the AUR.
-4. Store the **private** key as the repository secret `AUR_SSH_KEY`
-   (*Settings → Secrets and variables → Actions*). Paste the whole key
-   including the `-----BEGIN/END ...-----` lines. A key pasted with literal
-   `\n` instead of real line breaks also works.
-5. Push the next `v*` tag. Without the secret the AUR step is skipped and the
-   release is unaffected; with it, the package appears at
-   <https://aur.archlinux.org/packages/e2e-chat-bin>.
+The AUR route needs an account this project does not have, so the earlier
+"push a PKGBUILD on every tag" step could only ever skip, and a reintroduced
+push would fail every release on the missing key. The template deliberately
+stays AUR-shaped and the renderer still emits `.SRCINFO`, so if an account
+ever exists: re-add one workflow step, flip the `not.toContain` guards in the
+spec, done.
 
-If a push fails after the release is already published, the release itself is
-fine — fix the key/secret and re-run the failed job.
+## Testing locally
 
-## Testing locally (on an Arch machine)
+With Docker (mirrors CI exactly):
 
-```sh
-node tools/aur-render.mjs \
-  --pkgver 0.2.21 \
-  --sha256 "$(sha256sum E2E.Chat_0.2.21_amd64.deb | cut -d' ' -f1)" \
-  --outdir /tmp/aur
-cd /tmp/aur && makepkg -si     # builds, installs, lets you launch the app
-```
+    node tools/aur-render.mjs --pkgver 0.2.22 --sha256 <64-hex> --outdir /tmp/arch
+    docker run --rm -v /tmp/arch:/pkgbuild:ro archlinux:base-devel bash -ec '
+      useradd -m b; echo "b ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/b
+      cp /pkgbuild/* /home/b/; chown -R b /home/b
+      pacman -Sy --noconfirm --needed curl
+      sudo -u b makepkg --force --noconfirm
+      pacman -Qp /home/b/*.pkg.tar.zst'
 
-`tests/aur-packaging.spec.ts` runs the same render on any OS (with a fake
-version/checksum) and asserts the PKGBUILD ↔ `.SRCINFO` pair stays consistent,
-so CI catches template edits that would otherwise only fail at push time.
+Without Docker, the extraction half still checks out on any OS — Windows' built-in
+`tar.exe` (bsdtar) reads the `.deb` exactly like `package()` does:
+
+    tar -xf E2E.Chat_0.2.22_amd64.deb    # ar container → data.tar.* + control.tar.*
+    tar -tf data.tar.*                   # the files pacman would own
 
 ## Scope and known gaps
 
-- `arch=('x86_64')` only: the release builds an amd64 `.deb`. An aarch64
+- `arch=('x86_64')` only: the release builds an amd64 `.deb`; an aarch64
   package needs an arm64 desktop build first.
 - The template's `# Maintainer:` line is a placeholder (GitHub noreply) —
-  change it in `PKGBUILD.template` to your AUR identity if you want it to
-  show properly on the package page.
-- `license=('ISC')` matches `package.json`, and the repo carries the
-  matching `LICENSE` file at its root (the AUR submission guidelines ask
-  upstream for one). `tests/aur-packaging.spec.ts` keeps the SPDX id, the
-  file text and the copyright line in agreement.
+  edit `PKGBUILD.template` if the AUR route ever opens.
+- `license=('ISC')` matches `package.json`, and the repo carries the matching
+  `LICENSE` file at its root (the AUR submission guidelines ask upstream for
+  one). `tests/arch-packaging.spec.ts` keeps the SPDX id, the file text and
+  the copyright line in agreement.
+- **Beyond `pacman -U`:** hosting these assets as a pacman *repository* (a
+  `repo-add` database users add to `pacman.conf`) would give `pacman -Sy`
+  updates, but needs a signing key users import once. Possible later on
+  GitHub Pages; `pacman -U` is the smallest thing that works today.

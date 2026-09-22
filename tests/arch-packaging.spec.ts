@@ -4,13 +4,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// The AUR package is rendered by tools/aur-render.mjs from
-// packaging/aur/PKGBUILD.template. The dangerous failures are silent ones:
-// a .SRCINFO that no longer matches its PKGBUILD (the AUR rejects the push),
-// a source URL that no longer names the asset Tauri actually publishes (every
-// Arch user hits a 404), or a workflow gate wired so the step either never
-// runs or runs without the secret. All three are checkable without Arch, so
-// they are checked here — on any OS, in milliseconds, with a fake version.
+// The Arch package is built in CI from packaging/aur/PKGBUILD.template
+// (rendered by tools/aur-render.mjs) inside an archlinux container, and
+// attached to the release for `pacman -U`. The dangerous failures are silent
+// ones: a source URL that no longer names the asset Tauri actually publishes
+// (every Arch user hits a 404), a .SRCINFO that drifts from its PKGBUILD, or
+// a workflow gate wired wrong — and especially any push to the AUR, which
+// needs an account this project does not have and would fail every release.
+// All checkable without Arch, so they are checked here — on any OS, in
+// milliseconds, with a fake version.
 
 const ROOT = process.cwd();
 const FAKE_VER = '9.9.9';
@@ -27,7 +29,7 @@ function render(extraArgs: string[] = []) {
   return { out, res };
 }
 
-test.describe('AUR packaging', () => {
+test.describe('Arch packaging', () => {
   test('renders a PKGBUILD pinned to this release and the real .deb name', () => {
     const { out, res } = render();
     try {
@@ -118,31 +120,35 @@ test.describe('AUR packaging', () => {
     }
   });
 
-  test('the release workflow publishes the AUR package on tag pushes only', () => {
+  test('the release workflow builds the pacman package on tag pushes, never the AUR', () => {
     const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
 
-    const start = wf.indexOf('- name: Publish PKGBUILD to the AUR');
-    expect(start, 'AUR publish step missing from release.yml').toBeGreaterThan(-1);
+    const start = wf.indexOf('- name: Build Arch package (pacman)');
+    expect(start, 'Arch build step missing from release.yml').toBeGreaterThan(-1);
     const next = wf.indexOf('- name:', start + 10);
     const block = wf.slice(start, next === -1 ? undefined : next);
 
-    // Tag pushes only, Linux leg only (that is where the .deb lives), and
-    // skipped until the secret exists — a step `if:` cannot read `secrets`,
-    // so the key must be surfaced as job env first (the WINDOWS_CERTIFICATE
-    // trick).
+    // Tag pushes only, Linux leg only (that is where the .deb lives), and the
+    // build must happen in an Arch container — GitHub has no Arch runner —
+    // with makepkg producing the artifact and pacman itself reading it back.
     expect(block).toContain("startsWith(github.ref, 'refs/tags/')");
     expect(block).toContain('ubuntu-22.04');
-    expect(block).toContain("env.AUR_SSH_KEY != ''");
-    expect(wf).toContain('AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}');
-    // The hash comes from the checksum file users verify, not a fresh sum.
-    expect(block).toContain('SHA256SUMS-linux-x64.txt');
-    // …and the lookup tolerates the fact that the checksum file names the deb
-    // with a SPACE ("E2E Chat_…", written from the on-disk basename) while the
-    // asset/PKGBUILD URL uses dots — `$2 == f` alone matches nothing and would
-    // abort every publish.
-    expect(block).toMatch(/i=3; i<=NF/);
-    // And the release notes tell Arch users how to install.
-    expect(wf).toContain('yay -S e2e-chat-bin');
+    expect(block).toContain('archlinux:base-devel');
+    expect(block).toContain('makepkg');
+    expect(block).toContain('pacman -Qp'); // CI reads the artifact back…
+    expect(block).toContain('PKGVER'); // …and asserts it matches the tag
+
+    // No AUR account exists: nothing may push there — a reintroduced push
+    // step would fail every release on the missing key.
+    expect(wf).not.toContain('aur.archlinux.org');
+    expect(wf).not.toContain('AUR_SSH_KEY');
+    expect(wf).not.toContain('yay -S');
+
+    // The package joins the checksum list users verify, is attached to the
+    // release, and the release notes name the install command.
+    expect(wf).toContain("-name '*.pkg.tar.zst'");
+    expect(wf).toContain('dist/*.pkg.tar.zst');
+    expect(wf).toContain('pacman -U');
   });
 
   test('the repo ships the LICENSE file the AUR guidelines require', () => {

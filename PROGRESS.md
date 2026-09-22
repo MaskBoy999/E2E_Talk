@@ -8056,7 +8056,7 @@ author's own name — the AUR's "upstream must ship a license" requirement is
 met, and the spec asserts package.json's SPDX id, the file's text and the
 copyright line stay in agreement.
 
-**Verified:** `tests/aur-packaging.spec.ts` renders a package with a fake
+**Verified:** `tests/arch-packaging.spec.ts` renders a package with a fake
 version/checksum and asserts the PKGBUILD pins the real asset name, the
 .SRCINFO mirrors it field-for-field with no `$` or placeholder residue, bad
 input exits non-zero, and the workflow step is wired tag-only + secret-gated
@@ -8066,5 +8066,54 @@ mechanics that could sink a push: `-bin` naming and first-push-creates-repo.
 **Files:** `packaging/aur/PKGBUILD.template`,
 `packaging/aur/e2e-chat-bin.install`, `packaging/aur/README.md`,
 `tools/aur-render.mjs`, `.github/workflows/release.yml`,
-`tests/aur-packaging.spec.ts`, `.gitignore`
+`tests/arch-packaging.spec.ts` (renamed from `aur-packaging` by §151),
+`.gitignore`
+
+---
+
+### 151. Arch Linux ships as a pacman package on the release page (v0.2.22)
+
+**Why:** §150's AUR push could never run — there is no AUR account to push
+with, so on every tag the step would silently skip and Arch users would get
+nothing. The account-less way to release for Arch is the one the community
+uses when GitHub has no Arch runner: build the `.pkg.tar.zst` in CI inside the
+official `archlinux:base-devel` container and attach it to the release —
+users install with `sudo pacman -U <file>`: no account, no key, no
+`pacman.conf` edits.
+
+**What:**
+* Same recipe, new consumer: `release.yml` renders `PKGBUILD.template` for the
+  tag and runs `makepkg` in the container. makepkg fetches the `.deb` from its
+  **release URL** — the identical download an Arch user performs — so the step
+  doubles as proof the published asset exists (the dot-normalised
+  `E2E.Chat_<ver>_amd64.deb` name, verified 200 against v0.2.21).
+* **pacman validates its own artifact**: `pacman -Qp` must report
+  `e2e-chat-bin <tag>-1` and `pacman -Qlp` prints the file list into the job
+  log. Version drift — the v0.2.19 phantom-re-update bug — now fails the
+  release instead of shipping, on the Arch artifact too.
+* The package joins `SHA256SUMS-linux-x64.txt` (the file the release notes
+  tell users to verify) and is attached next to .deb/.rpm/AppImage; the notes
+  now say `pacman -U` instead of the AUR line.
+* The AUR push step and `AUR_SSH_KEY` are **deleted** — with no account it
+  could only ever skip, and a reintroduced push would fail every release on
+  the missing key. The spec was renamed `tests/aur-packaging.spec.ts` →
+  `tests/arch-packaging.spec.ts` and now asserts the build step is wired
+  (container, makepkg, pacman read-back, tag+Linux gates, checksums, release
+  notes) **and** that `aur.archlinux.org` / `AUR_SSH_KEY` / `yay` never creep
+  back. The template stays AUR-shaped (the renderer still emits `.SRCINFO`),
+  so an account appearing later is a one-step flip.
+* Version bumped to 0.2.22 — tag, installer names and package version must
+  agree (the rule §…v0.2.19→v0.2.20 taught; this release exercises it on four
+  artifacts at once: msi/exe, deb/rpm/AppImage, apk, pkg.tar.zst).
+
+**Verified locally** (this machine has no Docker/WSL for a full makepkg):
+rendered the template against the real published v0.2.21 `.deb` checksum and
+ran the exact `package()` extraction chain with Windows bsdtar (ar → data.tar
+→ file list, binary + .desktop + icons present); workflow YAML parses; spec
+5/5 green. The container half runs in CI, where it is the authoritative
+build — watched end-to-end on the v0.2.22 tag.
+
+**Files:** `.github/workflows/release.yml`, `packaging/aur/README.md`,
+`tests/arch-packaging.spec.ts`, `src-tauri/tauri.conf.json`,
+`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
 
