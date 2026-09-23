@@ -18,4 +18,13 @@
       for at runtime.
     -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!--
+      The system's "ignore battery optimizations" dialog (the plugin's
+      `batteryRequest` command, 6.1/FEATURE_PLAN.md). Doze suspends the app's
+      network + timers shortly after the screen goes off, which kills an
+      ongoing voice call minutes in and looks to the user like the app broke.
+      The permission only allows *asking* — Android shows its own dialog and
+      the user decides; nothing is granted silently.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 </manifest>

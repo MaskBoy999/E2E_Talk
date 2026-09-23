@@ -14,11 +14,15 @@ mod cert_probe;
 mod config;
 #[cfg(windows)]
 mod win_webview;
+// Desktop toast with an OS-enforced expiration (F3): the notification plugin
+// has no close on desktop, so `box:notify` bypasses it on Windows.
+#[cfg(desktop)]
+mod toast;
 
 use std::sync::Mutex;
 
 use tauri::ipc::CapabilityBuilder;
-use tauri::{Listener, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -43,6 +47,95 @@ const SETUP_PAGE: &str = "box-setup.html";
 /// capability grants it (see `run()`, and `grant_remote_ipc` for what that
 /// origin does get).
 const CHANGE_SERVER_EVENT: &str = "box:change-server";
+
+/// Event the page raises to ask for a **desktop** toast (audit fix F3,
+/// `FEATURE_PLAN.md`). An event rather than an app command for the same reason
+/// as [`CHANGE_SERVER_EVENT`]: Tauri refuses app commands to remote origins,
+/// while `core:event:default` is granted. The Rust side shows the toast via
+/// `toast.rs`, which gives it a fixed tag (replace, don't queue) and an
+/// expiration so Windows removes it from the Action Center database instead of
+/// accumulating OS-held copies of notification text.
+#[cfg(desktop)]
+const NOTIFY_EVENT: &str = "box:notify";
+
+/// Event the page raises when its call/unread state changes, so the desktop
+/// tray can reflect it (feature 4.6, `FEATURE_PLAN.md`). An event for the same
+/// reason as [`CHANGE_SERVER_EVENT`]. The payload is deliberately tiny —
+/// booleans and one count — because the tray is an OS surface: it may carry
+/// metadata the server already holds (counts, "muted") and never a channel
+/// name, a partner name or a nickname (rule R1).
+#[cfg(desktop)]
+const TRAY_STATE_EVENT: &str = "box:tray-state";
+
+/// Id of the tray icon, so the state listener can find it again from an event
+/// handler (`tray_by_id`).
+#[cfg(desktop)]
+const TRAY_ID: &str = "e2e-tray";
+
+/// Event the shell raises when the push-to-talk hotkey is pressed or released:
+/// `{down: bool}` (feature 4.1, `FEATURE_PLAN.md`). Key STATE only — the page
+/// turns it into the same gate the in-app hold button uses.
+#[cfg(desktop)]
+const PTT_EVENT: &str = "box:ptt";
+
+/// Event the page raises to say which accelerator (if any) push-to-talk uses:
+/// `{enabled, accelerator}`. The page owns the setting; the shell just obeys it,
+/// and `enabled: false` removes the registration so a global key is never held
+/// while push-to-talk is off.
+#[cfg(desktop)]
+const PTT_SHORTCUT_EVENT: &str = "box:ptt-shortcut";
+
+/// Fallback accelerator when the user enables push-to-talk and leaves the field
+/// blank. A chord rather than a bare key on purpose: a global shortcut swallows
+/// the key system-wide, so it must not collide with ordinary typing.
+#[cfg(desktop)]
+const DEFAULT_PTT_SHORTCUT: &str = "Ctrl+Shift+Space";
+
+/// Payload of [`PTT_EVENT`].
+#[cfg(desktop)]
+#[derive(Clone, serde::Serialize)]
+struct PttPayload {
+    down: bool,
+}
+
+/// The pieces of the tray that change at runtime. Tauri hands out neither the
+/// tooltip nor a menu item by id after construction, so the status line is kept
+/// here for [`TRAY_STATE_EVENT`] to update (4.6).
+#[cfg(desktop)]
+#[derive(Default)]
+pub struct TrayUi {
+    status: std::sync::Mutex<Option<MenuItem<tauri::Wry>>>,
+}
+
+/// Tooltip and status line for the tray: `(tooltip, status_line)`.
+///
+/// Pure, so the wording is unit-tested. Everything here is server-known
+/// metadata — a call flag, the local mute flags, and an unread count. Nothing
+/// is ever interpolated from a name (rule R1).
+#[cfg(desktop)]
+fn tray_status(in_call: bool, muted: bool, deafened: bool, unread: u32) -> (String, String) {
+    let mut parts: Vec<String> = Vec::new();
+    if in_call {
+        parts.push(
+            if deafened {
+                "In call · deafened".to_string()
+            } else if muted {
+                "In call · muted".to_string()
+            } else {
+                "In call".to_string()
+            },
+        );
+    }
+    if unread > 0 {
+        parts.push(format!("{unread} unread"));
+    }
+    if parts.is_empty() {
+        ("E2E Chat".to_string(), "Not in a call".to_string())
+    } else {
+        let summary = parts.join(" · ");
+        (format!("E2E Chat — {summary}"), summary)
+    }
+}
 
 /// Shared state so window events and commands can read the live config.
 #[derive(Default)]
@@ -229,6 +322,54 @@ mod tests {
         assert!(require_pin(true, false, "https://100.1.2.3:3443").is_ok());
         assert!(require_pin(false, true, "https://100.1.2.3:3443").is_ok());
         assert!(require_pin(true, true, "https://100.1.2.3:3443").is_ok());
+    }
+
+    /// 4.6: the tray's wording. The tray is an OS surface shown to whoever is
+    /// standing at the machine, so it may only ever carry server-known
+    /// metadata: a call flag, local mute flags and a count. This pins the
+    /// wording AND the rule (nothing name-shaped gets interpolated).
+    #[cfg(desktop)]
+    #[test]
+    fn tray_shows_state_and_counts_but_never_a_name() {
+        let (tip, line) = tray_status(false, false, false, 0);
+        assert_eq!(tip, "E2E Chat");
+        assert_eq!(line, "Not in a call");
+
+        let (tip, line) = tray_status(true, false, false, 0);
+        assert_eq!(line, "In call");
+        assert_eq!(tip, "E2E Chat — In call");
+
+        // Mute wins the wording when deafen is off, deafen wins otherwise.
+        assert_eq!(tray_status(true, true, false, 0).1, "In call · muted");
+        assert_eq!(tray_status(true, true, true, 0).1, "In call · deafened");
+
+        // Unread is a count, call or no call.
+        assert_eq!(tray_status(false, false, false, 3).1, "3 unread");
+        assert_eq!(tray_status(true, false, false, 3).1, "In call · 3 unread");
+
+        // The rule itself: no `@`, no name-ish punctuation, ever.
+        for st in [tray_status(true, true, false, 0).1, tray_status(false, false, false, 12).1] {
+            assert!(!st.contains('@'), "{st}");
+            assert!(!st.contains('"'), "{st}");
+        }
+    }
+
+    /// 4.1: the shortcut the Settings field advertises as the default has to be
+    /// one the shell can actually register, and a typo has to be rejected
+    /// rather than silently registering nothing.
+    #[cfg(desktop)]
+    #[test]
+    fn the_default_ptt_shortcut_parses_and_nonsense_does_not() {
+        assert!(
+            DEFAULT_PTT_SHORTCUT
+                .parse::<tauri_plugin_global_shortcut::Shortcut>()
+                .is_ok(),
+            "the documented default must be registerable"
+        );
+        assert!(
+            "not a key".parse::<tauri_plugin_global_shortcut::Shortcut>().is_err(),
+            "a typo must be refused, not silently ignored"
+        );
     }
 
     /// Regression guard for the "Save & Launch closes the app" bug.
@@ -1019,12 +1160,25 @@ fn quit_app(app: tauri::AppHandle) {
 #[cfg(desktop)]
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show E2E Chat", true, None::<&str>)?;
+    // 4.6: a disabled line that tracks call state and unread count. The tooltip
+    // says the same thing, but a tooltip is easy to miss (and some shells do
+    // not draw it at all), so the menu carries it too.
+    let status = MenuItem::with_id(app, "status", "Not in a call", false, None::<&str>)?;
     let change = MenuItem::with_id(app, "change", "Change Server Address…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
+    let separator2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &change, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&status, &separator, &show, &change, &separator2, &quit],
+    )?;
 
-    let mut builder = TrayIconBuilder::new()
+    // Hand the status line to the state listener (see TRAY_STATE_EVENT).
+    if let Ok(mut slot) = app.state::<TrayUi>().status.lock() {
+        *slot = Some(status.clone());
+    }
+
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("E2E Chat")
@@ -1110,6 +1264,23 @@ pub fn run() {
         MacosLauncher::LaunchAgent,
         None,
     ));
+
+    // 4.1 (FEATURE_PLAN.md): the global push-to-talk hotkey. Registered from
+    // Rust only, so no capability/ACL entry is involved (the ACL gates IPC from
+    // the webview, and nothing here is callable from it). The handler carries
+    // key state and nothing else — no channel, no partner, no content.
+    #[cfg(desktop)]
+    let builder = builder.plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(|app, _shortcut, event| {
+                use tauri_plugin_global_shortcut::ShortcutState;
+                let down = event.state == ShortcutState::Pressed;
+                if let Err(e) = app.emit(PTT_EVENT, PttPayload { down }) {
+                    eprintln!("{PTT_EVENT}: could not reach the page: {e}");
+                }
+            })
+            .build(),
+    );
 
     let builder = builder
         .manage(AppState::default())
@@ -1206,6 +1377,110 @@ pub fn run() {
                 });
             }
 
+            // F3: the page's desktop-toast requests. Payload is the same shape
+            // `showBrowserNotification` emits: {title, body, ttl}.
+            #[cfg(desktop)]
+            {
+                #[derive(serde::Deserialize)]
+                struct ToastPayload {
+                    title: String,
+                    #[serde(default)]
+                    body: String,
+                    #[serde(default = "default_toast_ttl")]
+                    ttl: u64,
+                }
+
+                fn default_toast_ttl() -> u64 {
+                    10
+                }
+
+                let for_toast = handle.clone();
+                handle.listen(NOTIFY_EVENT, move |event| {
+                    match serde_json::from_str::<ToastPayload>(event.payload()) {
+                        Ok(p) => {
+                            if let Err(e) = toast::show(&for_toast, &p.title, &p.body, p.ttl) {
+                                eprintln!("{NOTIFY_EVENT}: desktop toast failed: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("{NOTIFY_EVENT}: bad payload: {e}"),
+                    }
+                });
+            }
+
+            // 4.6: the tray's call/unread state. Same event-channel reason as
+            // the toast above; an unknown payload is ignored (the tray simply
+            // keeps its last text rather than showing something invented).
+            #[cfg(desktop)]
+            {
+                #[derive(serde::Deserialize, Default)]
+                #[serde(default)]
+                struct TrayState {
+                    in_call: bool,
+                    muted: bool,
+                    deafened: bool,
+                    unread: u32,
+                }
+
+                let for_tray = handle.clone();
+                handle.listen(TRAY_STATE_EVENT, move |event| {
+                    let st = serde_json::from_str::<TrayState>(event.payload()).unwrap_or_default();
+                    let (tooltip, status) = tray_status(st.in_call, st.muted, st.deafened, st.unread);
+                    if let Some(tray) = for_tray.tray_by_id(TRAY_ID) {
+                        let _ = tray.set_tooltip(Some(&tooltip));
+                    }
+                    if let Ok(slot) = for_tray.state::<TrayUi>().status.lock() {
+                        if let Some(item) = slot.as_ref() {
+                            let _ = item.set_text(status);
+                        }
+                    }
+                });
+            }
+
+            // 4.1: which key is push-to-talk, as decided by the page's
+            // settings. Re-registering always unregisters first, so a changed
+            // accelerator can never leave the old key held.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+                #[derive(serde::Deserialize, Default)]
+                #[serde(default)]
+                struct PttShortcut {
+                    enabled: bool,
+                    accelerator: String,
+                }
+
+                let for_ptt = handle.clone();
+                handle.listen(PTT_SHORTCUT_EVENT, move |event| {
+                    let cfg =
+                        serde_json::from_str::<PttShortcut>(event.payload()).unwrap_or_default();
+                    let shortcuts = for_ptt.global_shortcut();
+                    let _ = shortcuts.unregister_all();
+                    if !cfg.enabled {
+                        return;
+                    }
+                    let accelerator = if cfg.accelerator.trim().is_empty() {
+                        DEFAULT_PTT_SHORTCUT.to_string()
+                    } else {
+                        cfg.accelerator.trim().to_string()
+                    };
+                    match accelerator.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                        Ok(sc) => {
+                            if let Err(e) = shortcuts.register(sc) {
+                                eprintln!(
+                                    "{PTT_SHORTCUT_EVENT}: could not register {accelerator}: {e}"
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "{PTT_SHORTCUT_EVENT}: '{accelerator}' is not a usable key: {e}"
+                        ),
+                    }
+                });
+            }
+
+            #[cfg(desktop)]
+            handle.manage(TrayUi::default());
             #[cfg(desktop)]
             build_tray(&handle)?;
             Ok(())

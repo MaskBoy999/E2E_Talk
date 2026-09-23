@@ -8401,3 +8401,68 @@ test can reach). Regression-checked: `box-shell`/`box-device`/`screen-share-nati
 `src-tauri/plugins/call-service/build.rs`, `static/voice.js`, `static/style.css`,
 `static/index.html`, `tests/{box-pip-ringer,android-plugin-startup,box-device,call-indicators,call-indicators-live,soundboard-mute-disable}.spec.ts`
 
+## Session: notification-privacy audit (F1–F3), call comfort, voice activation, tray + PTT — v0.2.28
+
+A feature-plan audit (`FEATURE_PLAN.md`, `FEATURE_RESEARCH.md`) found three live
+violations of the rule that only server-known metadata may reach an OS surface,
+plus a menu of features. This session closed the violations first and then built
+from the ✅ half of the menu.
+
+**The three leaks.** (F1) The ongoing Android call card showed the *decrypted*
+E2EE channel name for a call's whole lifetime — the Signal/FBI notification-DB
+pattern, on the shade, the lock screen and Android's notification history. The
+label is now derived from the room **type** only (`Voice call` / `Direct call`),
+and `_boxCallService` ignores the name it is handed rather than trusting callers.
+(F2) The native ring ignored the "hide message content" preference and was
+`VISIBILITY_PUBLIC`, so a locked phone named the caller; the page now sends
+`hideIdentity` and Kotlin posts a name-free card at visibility PRIVATE (with its
+own channel, because a channel's lockscreen visibility is fixed at creation).
+(F3) Desktop auto-close was a no-op — the plugin registers no close on desktop —
+so toasts accumulated in the Windows Action Center database; desktop toasts now
+go through `src-tauri/src/toast.rs` (WinRT, fixed tag so a new toast *replaces*
+the old, plus an `ExpirationTime` so Windows removes it), and Android cards are
+cancelled by an explicit id after their time is up.
+
+**Features.** 1.1 call-notification actions (Mute/Unmute · Deafen/Undeafen ·
+Hang up) via a manifest receiver that forwards verb names to the page; 1.4 audio
+focus (`GAIN_TRANSIENT`, abandoned on teardown); 6.1 battery-exemption prompt
+(asked once per 30 days, never when already exempt); 6.2 keep-screen-on; 5.2
+per-channel `FLAG_SECURE` with a channel-menu toggle; 1.6 voice activation
+("only transmit while you speak" rides the existing RNNoise energy gate, plus
+hold-to-talk that gates the outbound track instead of muting); 1.8 per-peer
+ping/rtt/jitter in the diagnostics panel (from the nominated candidate pair and
+RTCP receiver reports — no probe traffic); 2.6 the phone's ringer/DND now governs
+our own WebAudio chime, not just the system notification; 3.2 the screen-share
+picker asks for the Android 14+ user-choice config so a single app can be shared;
+4.6 the desktop tray mirrors call state and unread counts; 4.1 a global
+push-to-talk hotkey that runs the same gate as the in-app button; 7.1 TURN REST
+credentials minted per session (`TURN_SECRET`) with the static pair still
+supported, and 7.2 a documented coturn recipe (`COTURN.md`).
+
+**Every feature here is metadata-only by construction**, and the payload shapes
+are pinned by tests rather than by intent: the call-service label, the
+hide-preview flag, the toast payload, the tray event (`in_call`/`muted`/
+`deafened`/`unread` and nothing else), the PTT event (a boolean and one
+accelerator) and the notification chime.
+
+**Verified locally.** `cargo check` + `cargo test` for the box (10, including
+new tray-wording and shortcut-parsing tests), `cargo test` for the server (9,
+including TURN credential vectors), a full `cargo build --release` and a launch
+of the built exe (opens, stays up, no stderr), and the Android side compiled
+earlier than CI: `:tauri-plugin-call-service:compileReleaseKotlin`,
+`:tauri-plugin-box-shell:compileReleaseKotlin`,
+`:app:compileUniversalReleaseKotlin`, the merged Universal release manifest, and
+`:app:minifyUniversalReleaseWithR8` — the mapping file shows every
+`com.e2echat.callservice.*` class (including the new `CallActionReceiver`)
+unrenamed. Tests: 50 across `notification-privacy` (8, incl. the three native
+paths), `call-comfort` (5), `secure-capture` (4), `voice-turn` (2),
+`android-plugin-startup` (16), `voice-activation` (4), `quiet-hours` (2),
+`voice-diag` (3), `tray-parity` (3), `ptt-hotkey` (3) — all green.
+
+**Files:** `src-tauri/src/{lib.rs,toast.rs}`, `src-tauri/Cargo.toml`,
+`src-tauri/plugins/{call-service,box-shell}/android/**`,
+`src-tauri/plugins/{call-service,box-shell}/{build.rs,permissions/**}`,
+`server/src/{config.rs,handlers.rs}`, `static/{voice.js,chat.js,index.html,sw.js}`,
+`COTURN.md`, `FEATURE_PLAN.md`, `FEATURE_RESEARCH.md`,
+`tests/{notification-privacy,call-comfort,secure-capture,voice-turn,android-plugin-startup,voice-activation,quiet-hours,voice-diag,tray-parity,ptt-hotkey}.spec.ts`
+

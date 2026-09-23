@@ -13,6 +13,9 @@ not in the foreground.
 permissions = [
     "allow-start",
     "allow-updateMedia",
+    # 1.1: the page syncing mute/deafen into the ongoing notification's
+    # action labels (Mute/Unmute, Deafen/Undeafen).
+    "allow-updateCallState",
     "allow-stop",
     "allow-incoming-call",
     "allow-cancel-incoming",

@@ -144,7 +144,12 @@ test.describe('notifications never carry end-to-end encrypted data', () => {
         });
         await register(page, unique('notificon'));
 
-        await page.evaluate(() => (window as any).showBrowserNotification('E2E Chat', 'New message'));
+        await page.evaluate(() => {
+            // The Android box only posts while BACKGROUNDED (chat.js gate) —
+            // Playwright reports the page visible, so stand in for the OS here.
+            Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+            (window as any).showBrowserNotification('E2E Chat', 'New message');
+        });
 
         const seen = await page.evaluate(() => (window as any).__notifications);
         expect(seen.length).toBeGreaterThan(0);
@@ -152,5 +157,183 @@ test.describe('notifications never carry end-to-end encrypted data', () => {
         // Android masks a small icon to its alpha, so the full-colour launcher
         // icon there came out as a shapeless white blob.
         expect(seen[seen.length - 1].options.icon).toBe('ic_notification');
+    });
+
+    // ── F1–F3: the NATIVE surfaces (FEATURE_PLAN.md §1) ──────────────────
+    // notifText() polices the web funnel; these tests pin the paths that go
+    // around it: the Android call-service plugin and the desktop box's toast.
+
+    function mockAndroidBox(page: Page) {
+        return page.addInitScript(() => {
+            Object.defineProperty(navigator, 'userAgent', {
+                get: () => 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0 Mobile Safari/537.36',
+                configurable: true,
+            });
+            const invokes: any[] = [];
+            (window as any).__invokes = invokes;
+            (window as any).__TAURI__ = {
+                core: {
+                    invoke: (cmd: string, args: any) => { invokes.push({ cmd, args }); return Promise.resolve(null); },
+                },
+                event: { emit: () => Promise.resolve() },
+            };
+            class FakeNotification {
+                static permission = 'granted';
+                static requestPermission = () => Promise.resolve('granted');
+                onclick: (() => void) | null = null;
+                constructor(public title: string, public options: any) {}
+                close() {}
+            }
+            (window as any).Notification = FakeNotification;
+        });
+    }
+
+    test('F1: the native call-service label comes from the room TYPE — never a channel name', async ({ page }) => {
+        await mockAndroidBox(page);
+        await register(page, unique('f1label'));
+
+        const result = await page.evaluate(() => {
+            const w = window as any;
+            const vm = w.VoiceManager;
+            const S = vm._debug.state;
+            // S.channelName is a DECRYPTED E2EE channel name in the real app.
+            S.roomType = 'server';
+            S.channelName = 'DecryptedSecretChannel';
+            w.__invokes.length = 0;
+            vm.boxCallService('start');
+            const serverLabel = (w.__invokes.find((i: any) => i.cmd === 'plugin:call-service|start') || {}).args?.channelName;
+
+            S.roomType = 'dm';
+            w.__invokes.length = 0;
+            vm.boxCallService('updateMedia');
+            const dmLabel = (w.__invokes.find((i: any) => i.cmd === 'plugin:call-service|updateMedia') || {}).args?.channelName;
+
+            S.roomType = null;
+            S.channelName = '';
+            return { serverLabel, dmLabel, everything: JSON.stringify(w.__invokes) };
+        });
+
+        expect(result.serverLabel).toBe('Voice call');
+        expect(result.dmLabel).toBe('Direct call');
+        // The decrypted name must not appear anywhere in what went to native.
+        expect(result.everything).not.toContain('DecryptedSecretChannel');
+    });
+
+    test('F2: the native ring carries the hide-preview flag, in both states', async ({ page }) => {
+        await mockAndroidBox(page);
+        await register(page, unique('f2ring'));
+
+        const result = await page.evaluate(async () => {
+            const w = window as any;
+            const vm = w.VoiceManager;
+            // Backgrounded: only then does showIncomingCall post natively.
+            Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+            const call = { callerId: 'u-1', callerUsername: 'bob', dmChannelId: 'dm-f2' };
+            const lastIncoming = () => {
+                const hits = w.__invokes.filter((i: any) => i.cmd === 'plugin:call-service|incomingCall');
+                return hits.length ? hits[hits.length - 1].args : {};
+            };
+
+            w.localStorage.removeItem('notifHidePreview');
+            w.__invokes.length = 0;
+            vm.showIncomingCall(call);
+            const visibleArgs = lastIncoming();
+            vm.hideIncomingCall();
+
+            w.localStorage.setItem('notifHidePreview', 'true');
+            w.__invokes.length = 0;
+            vm.showIncomingCall(call);
+            const hiddenArgs = lastIncoming();
+            vm.hideIncomingCall();
+
+            w.localStorage.removeItem('notifHidePreview');
+            // document.hidden override is page-local; nothing to restore.
+            await new Promise((r) => setTimeout(r, 50));
+            return { visibleArgs, hiddenArgs };
+        });
+
+        // Visible mode: the named ring still goes out (plaintext @username is
+        // server-known metadata) but the flag must say so explicitly…
+        expect(result.visibleArgs.hideIdentity).toBe(false);
+        expect(result.visibleArgs.callerName).toBe('bob');
+        // …and with "hide message content" on, native must be told to post a
+        // name-free, lock-screen-private card.
+        expect(result.hiddenArgs.hideIdentity).toBe(true);
+    });
+
+    test('F3 desktop: the box asks Rust for an expiring toast instead of the shim', async ({ page }) => {
+        await page.addInitScript(() => {
+            const emitted: any[] = [];
+            (window as any).__emitted = emitted;
+            (window as any).__posted = [];
+            (window as any).__TAURI__ = {
+                core: { invoke: () => Promise.resolve(null) },
+                event: { emit: (name: string, payload: any) => { emitted.push({ name, payload }); return Promise.resolve(); } },
+            };
+            class FakeNotification {
+                static permission = 'granted';
+                static requestPermission = () => Promise.resolve('granted');
+                onclick: (() => void) | null = null;
+                constructor(title: string, options: any) { (window as any).__posted.push({ title, options }); }
+                close() {}
+            }
+            (window as any).Notification = FakeNotification;
+            // Desktop box: Tauri bridge present, UA NOT Android (default).
+        });
+        await register(page, unique('f3desk'));
+
+        await page.evaluate(() => {
+            const w = window as any;
+            w.__emitted.length = 0;
+            w.__posted.length = 0;
+            w.showBrowserNotification('Mentioned by @bob', 'You were mentioned in a channel');
+        });
+
+        const { emitted, posted } = await page.evaluate(() => ({
+            emitted: (window as any).__emitted,
+            posted: (window as any).__posted,
+        }));
+
+        // Through the event channel — Rust then shows a tagged, expiring toast
+        // (tauri-plugin-notification has NO close on desktop; shim cards used
+        // to sit in the Windows Action Center database indefinitely).
+        expect(emitted.length).toBe(1);
+        expect(emitted[0].name).toBe('box:notify');
+        expect(emitted[0].payload.title).toBe('Mentioned by @bob');
+        expect(emitted[0].payload.ttl).toBe(10);
+        // …and NOT through the shim (which can never be closed).
+        expect(posted.length).toBe(0);
+    });
+
+    test('F3 Android: every posted card is cancelled by id once its time is up', async ({ page }) => {
+        await mockAndroidBox(page);
+        await register(page, unique('f3cancel'));
+
+        const result = await page.evaluate(async () => {
+            const w = window as any;
+            const posted: any[] = [];
+            const Orig = w.Notification;
+            // Capture opts: this FakeNotification has no usable close(), the
+            // exact shape of the plugin shim — cancellation must go by id.
+            w.Notification = class extends Orig {
+                constructor(title: string, options: any) { posted.push({ title, options }); super(title, options); }
+            };
+            Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+            w.showBrowserNotification.closeMs = 40;
+            w.__invokes.length = 0;
+            w.showBrowserNotification('E2E Chat', 'New direct message');
+            await new Promise((r) => setTimeout(r, 300));
+            w.Notification = Orig;
+            return { posted, invokes: w.__invokes.slice() };
+        });
+
+        expect(result.posted.length).toBe(1);
+        const id = result.posted[0].options.id;
+        expect(typeof id).toBe('number');
+        // The card got an explicit id…
+        const cancel = result.invokes.find((i: any) => i.cmd === 'plugin:notification|cancel');
+        expect(cancel, 'the card must be cancelled from the shade/history').toBeTruthy();
+        // …and the cancel names exactly that id.
+        expect(cancel.args.notifications).toEqual([id]);
     });
 });

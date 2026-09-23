@@ -10,6 +10,11 @@ real vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so
 `navigator.vibrate` is present and silently does nothing inside the app), and
 dismiss every notification except an ongoing call's (`clearNotifications`).
 
+Plus call comfort: keep the screen on for the length of a call
+(`keepScreenOn`), and ask the system — once, in Android's own dialog — to
+exempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),
+which is what stops Doze from quietly ending an ongoing call.
+
 #### This default permission set includes the following:
 
 - `allow-enterImmersive`
@@ -18,6 +23,10 @@ dismiss every notification except an ongoing call's (`clearNotifications`).
 - `allow-exit`
 - `allow-vibrate`
 - `allow-clearNotifications`
+- `allow-keepScreenOn`
+- `allow-batteryStatus`
+- `allow-batteryRequest`
+- `allow-setSecureMode`
 
 ## Permission Table
 
@@ -27,6 +36,58 @@ dismiss every notification except an ongoing call's (`clearNotifications`).
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`box-shell:allow-batteryRequest`
+
+</td>
+<td>
+
+Enables the batteryRequest command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-batteryRequest`
+
+</td>
+<td>
+
+Denies the batteryRequest command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-batteryStatus`
+
+</td>
+<td>
+
+Enables the batteryStatus command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-batteryStatus`
+
+</td>
+<td>
+
+Denies the batteryStatus command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -135,6 +196,32 @@ Denies the exitImmersive command without any pre-configured scope.
 <tr>
 <td>
 
+`box-shell:allow-keepScreenOn`
+
+</td>
+<td>
+
+Enables the keepScreenOn command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-keepScreenOn`
+
+</td>
+<td>
+
+Denies the keepScreenOn command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `box-shell:allow-setBackHandler`
 
 </td>
@@ -154,6 +241,32 @@ Enables the setBackHandler command without any pre-configured scope.
 <td>
 
 Denies the setBackHandler command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-setSecureMode`
+
+</td>
+<td>
+
+Enables the setSecureMode command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-setSecureMode`
+
+</td>
+<td>
+
+Denies the setSecureMode command without any pre-configured scope.
 
 </td>
 </tr>

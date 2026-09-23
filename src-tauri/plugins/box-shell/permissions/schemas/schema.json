@@ -295,6 +295,30 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the batteryRequest command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-batteryRequest",
+          "markdownDescription": "Enables the batteryRequest command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the batteryRequest command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-batteryRequest",
+          "markdownDescription": "Denies the batteryRequest command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the batteryStatus command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-batteryStatus",
+          "markdownDescription": "Enables the batteryStatus command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the batteryStatus command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-batteryStatus",
+          "markdownDescription": "Denies the batteryStatus command without any pre-configured scope."
+        },
+        {
           "description": "Enables the clearNotifications command without any pre-configured scope.",
           "type": "string",
           "const": "allow-clearNotifications",
@@ -343,6 +367,18 @@
           "markdownDescription": "Denies the exitImmersive command without any pre-configured scope."
         },
         {
+          "description": "Enables the keepScreenOn command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-keepScreenOn",
+          "markdownDescription": "Enables the keepScreenOn command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the keepScreenOn command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-keepScreenOn",
+          "markdownDescription": "Denies the keepScreenOn command without any pre-configured scope."
+        },
+        {
           "description": "Enables the setBackHandler command without any pre-configured scope.",
           "type": "string",
           "const": "allow-setBackHandler",
@@ -353,6 +389,18 @@
           "type": "string",
           "const": "deny-setBackHandler",
           "markdownDescription": "Denies the setBackHandler command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the setSecureMode command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-setSecureMode",
+          "markdownDescription": "Enables the setSecureMode command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the setSecureMode command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-setSecureMode",
+          "markdownDescription": "Denies the setSecureMode command without any pre-configured scope."
         },
         {
           "description": "Enables the vibrate command without any pre-configured scope.",
@@ -367,10 +415,10 @@
           "markdownDescription": "Denies the vibrate command without any pre-configured scope."
         },
         {
-          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`",
+          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-setSecureMode`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`"
+          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-setSecureMode`"
         }
       ]
     }

@@ -100,5 +100,11 @@
         <receiver
             android:name="com.e2echat.callservice.IncomingCallActionReceiver"
             android:exported="false" />
+        <!-- 1.1: Mute / Deafen / Hang up on the ongoing call notification.
+             Same delivery rules as the ring receiver: exported=false, and the
+             action travels as an id/verb only (no user-visible text, no E2EE). -->
+        <receiver
+            android:name="com.e2echat.callservice.CallActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

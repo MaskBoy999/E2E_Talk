@@ -74,6 +74,15 @@
             micVolume: 100,
             speakerVolume: 100,
             noiseSuppressionMode: 'rnnoise', // 'off' | 'browser' | 'rnnoise'
+            // 1.6 (FEATURE_PLAN.md) — voice activation. `speakOnly` forces the
+            // energy gate in the RNNoise chain so the mic transmits silence
+            // (not your room) below the speech threshold; `holdToTalk` keeps the
+            // outgoing track disabled until the mic button is held.
+            speakOnly: false,
+            holdToTalk: false,
+            // 4.1: the desktop global hotkey's accelerator. Blank means the
+            // shell's documented default (Ctrl+Shift+Space).
+            pttShortcut: '',
             echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
             // Audio quality (Settings → Voice → Audio Quality). Send = the
             // capture sample rate / Opus bitrate for the mic; receive = the
@@ -267,8 +276,31 @@
         // Android ringer-mode / DND awareness (exposed for tests): what the phone
         // will let the app do out loud — see _boxReadAudioProfile.
         readAudioProfile: _boxReadAudioProfile,
+        // Native call-service label plumbing (exposed for the F1 privacy test:
+        // the notification label must never carry a channel name).
+        boxCallService: _boxCallService,
+        // Call comfort plumbing (exposed for tests, 6.1/6.2).
+        boxKeepScreenOn: _boxKeepScreenOn,
+        boxBatteryPrompt: _boxBatteryPrompt,
+        boxCallState: _boxCallState,
+        // Voice activation (1.6) — exposed so the privacy/behaviour tests can
+        // assert the gate and the NS-mode choice without a live call.
+        pttGateOpen: pttGateOpen,
+        // Tray parity (4.6) — the three booleans the desktop tray needs, read
+        // cheaply (getState() deep-copies the whole state and this is called on
+        // every badge update).
+        trayCallState: function () {
+            return { inCall: !!S.connected, muted: !!S.muted, deafened: !!S.deafened };
+        },
+        setPttOpen: setPttOpen,
+        effectiveNsMode: effectiveNsMode,
+        setSpeakOnly: setSpeakOnly,
+        setHoldToTalk: setHoldToTalk,
         soundAllowed: _soundAllowed,
         hapticAllowed: _hapticAllowed,
+        // DND-aware notification chime (2.6) — async because it re-reads the
+        // phone's ringer state before answering.
+        notificationSoundAllowed: notificationSoundAllowed,
         ringHapticPatternForNotification: _ringHapticPatternForNotification,
         setAudioProfile: function (p) {
             // Test hook: the ringer state without a native bridge.
@@ -554,6 +586,11 @@
         bindPopupControls();
         bindDmPanelControls();
         bindMiniBarControls();
+        bindTalkHold();
+        // 4.1: the global hotkey's press/release listener, and the setting it
+        // obeys (a saved "hold to talk + key" is registered on every launch).
+        _boxPttListen();
+        _boxPttShortcut();
         bindVolumeMenu();
         bindCamOptMenu();
         bindIncomingCallControls();
@@ -669,6 +706,12 @@
         if (ns) ns.value = S.settings.noiseSuppressionMode || 'rnnoise';
         var ec = document.getElementById('voice-echo-cancellation');
         if (ec) ec.checked = !!S.settings.echoCancellation;
+        var vso = document.getElementById('voice-speak-only');
+        if (vso) vso.checked = !!S.settings.speakOnly;
+        var vht = document.getElementById('voice-hold-to-talk');
+        if (vht) vht.checked = !!S.settings.holdToTalk;
+        var vps = document.getElementById('voice-ptt-shortcut');
+        if (vps) vps.value = S.settings.pttShortcut || '';
         var saq = document.getElementById('voice-send-audio-quality');
         if (saq) saq.value = S.settings.sendAudioQuality || 'medium';
         var raq = document.getElementById('voice-recv-audio-quality');
@@ -1093,8 +1136,15 @@
         if (!/Android/i.test(navigator.userAgent || '')) return Promise.resolve();
         var args = {};
         if (action === 'start' || action === 'updateMedia') {
+            // F1 (FEATURE_PLAN.md): the label handed to native is derived ONLY
+            // from the room type — never from `channelName`, which callers pass
+            // as a DECRYPTED E2EE channel name. The Android shade and the OS
+            // notification history sit outside the encryption boundary (the
+            // FBI/Signal-preview case), so no E2EE string may ever reach them.
+            // The parameter stays in the signature for older callers and is
+            // deliberately ignored here.
             args = {
-                channelName: channelName || 'Voice call',
+                channelName: S.roomType === 'dm' ? 'Direct call' : 'Voice call',
                 mediaTypes: _boxCallMediaTypes()
             };
         }
@@ -1116,6 +1166,102 @@
         return types;
     }
 
+    // 1.1 (FEATURE_PLAN.md) — keep the ongoing notification's action labels
+    // in sync with reality: Kotlin shows "Mute"/"Unmute" and "Deafen"/
+    // "Undeafen" from the state sent here. Called on every local state
+    // change, on the server-forced sync paths, and on join. Ids and booleans
+    // only — no names, so nothing E2EE crosses the notification surface.
+    // No-op outside the box (the native plugin is Android-only).
+    // 4.6 (FEATURE_PLAN.md): the desktop tray mirrors the call half of its
+    // state from here; chat.js owns the unread half, because that is where
+    // unread lives. Cheap and idempotent — Rust just rewrites the same two
+    // strings, and there is no tray at all on a phone.
+    // 4.1 (FEATURE_PLAN.md): the desktop shell's global push-to-talk hotkey.
+    // Two halves — the page tells the shell which key to hold (setting-driven),
+    // and the shell tells the page when that key goes down/up. Both are
+    // desktop-only: a phone has no global keys, and its own hold button is
+    // already thumb-reachable. Only an accelerator string and a boolean cross.
+    function _boxPttShortcut() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.event || typeof tauri.event.emit !== 'function') return;
+        if (/Android/i.test(navigator.userAgent || '')) return;
+        try {
+            tauri.event.emit('box:ptt-shortcut', {
+                enabled: !!S.settings.holdToTalk,
+                accelerator: S.settings.pttShortcut || '',
+            });
+        } catch (_) {}
+    }
+
+    // The hotkey's own leg: the shell says the key went down or up, and it runs
+    // the same gate as the in-app hold button — holding the key and holding the
+    // button are literally the same path, including the server-mute rule.
+    function _boxPttListen() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.event || typeof tauri.event.listen !== 'function') return;
+        try {
+            tauri.event.listen('box:ptt', function (e) {
+                setPttOpen(!!(e && e.payload && e.payload.down));
+            });
+        } catch (_) {}
+    }
+
+    function _boxTrayState() {
+        if (typeof updateBoxTrayState === 'function') {
+            try { updateBoxTrayState(); } catch (_) {}
+        }
+    }
+
+    function _boxCallState() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || !tauri.core.invoke) return Promise.resolve();
+        if (!/Android/i.test(navigator.userAgent || '')) return Promise.resolve();
+        return tauri.core.invoke('plugin:call-service|updateCallState', {
+            muted: !!S.muted,
+            deafened: !!S.deafened,
+            mediaTypes: _boxCallMediaTypes()
+        }).catch(function (e) {
+            console.warn('[box] call-service updateCallState failed:', e);
+        });
+    }
+
+    // 6.2 (FEATURE_PLAN.md) — keep the screen on for the length of a call.
+    // FLAG_KEEP_SCREEN_ON via the box-shell plugin: the OS owns the flag, so
+    // there is no WakeLock for the app to leak, and it dies with the window.
+    // A call with the screen off in a pocket is exactly when a phone locks,
+    // dims and (with Doze, see _boxBatteryPrompt) goes quiet mid-conversation.
+    function _boxKeepScreenOn(active) {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || !tauri.core.invoke) return;
+        if (!/Android/i.test(navigator.userAgent || '')) return;
+        tauri.core.invoke('plugin:box-shell|keepScreenOn', { active: !!active })
+            .catch(function (e) { console.warn('[box] keepScreenOn failed:', e); });
+    }
+
+    // 6.1 (FEATURE_PLAN.md) — Doze is the #1 way an Android voice app dies in
+    // the background, and it reads exactly like a bug ("the call went quiet").
+    // Ask the system for the battery-optimization exemption at most once per
+    // 30 days per install: the OS owns the dialog and the user owns the
+    // choice — the app never flips the setting itself. `batteryStatus` first,
+    // so a phone that already exempts us (or has no optimizer at all) never
+    // sees a pointless prompt.
+    function _boxBatteryPrompt() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || !tauri.core.invoke) return;
+        if (!/Android/i.test(navigator.userAgent || '')) return;
+        try {
+            var last = parseInt(localStorage.getItem('batteryAskedAt') || '0', 10) || 0;
+            if (Date.now() - last < 30 * 24 * 60 * 60 * 1000) return;
+            localStorage.setItem('batteryAskedAt', String(Date.now()));
+        } catch (_) { return; }
+        tauri.core.invoke('plugin:box-shell|batteryStatus')
+            .then(function (s) {
+                if (s && s.ignoring) return null;
+                return tauri.core.invoke('plugin:box-shell|batteryRequest');
+            })
+            .catch(function (e) { console.warn('[box] battery prompt failed:', e); });
+    }
+
     // Call after anything that changes camera/screen state mid-call: the set of
     // foreground-service types has to follow the media, or sharing the screen
     // (or turning the camera on) would work only while the app stayed open —
@@ -1129,7 +1275,9 @@
     // update and the picker together is a race the picker can win.
     function _boxSyncCallServiceTypes() {
         if (!S.connected) return Promise.resolve();
-        return _boxCallService('updateMedia', S.channelName || (S.roomType === 'dm' ? 'Direct call' : 'Voice call')) || Promise.resolve();
+        // F1: the label is sanitized inside _boxCallService — S.channelName is
+        // decrypted E2EE data and must never reach the Android notification.
+        return _boxCallService('updateMedia') || Promise.resolve();
     }
 
     // Re-acquire the microphone after the app was backgrounded.
@@ -1206,6 +1354,13 @@
             args = {
                 callerName: (call && call.callerUsername) || 'Someone',
                 dmChannelId: (call && call.dmChannelId) || '',
+                // F2 (FEATURE_PLAN.md): the native ring honours the same
+                // "hide message content" preference as the web funnel
+                // (notifContentHidden). When set, Kotlin posts a name-free
+                // card at lock-screen visibility PRIVATE instead of naming the
+                // caller on the lock screen and in Android's notification
+                // history.
+                hideIdentity: (typeof notifContentHidden === 'function') ? !!notifContentHidden() : false,
                 // The phone's own notification is what buzzes while the app is in
                 // the background, and a notification channel's vibration pattern
                 // is FIXED when the channel is created (Android: "you can't change
@@ -1272,6 +1427,21 @@
         return p.mode !== 'silent' && p.mode !== 'vibrate';
     }
 
+    /**
+     * 2.6 (FEATURE_PLAN.md): may the app play its own notification cue right
+     * now? Android already governs the *system* notification (its channel, the
+     * ringer mode and DND are applied by SystemUI), and the call ring consults
+     * the profile before it rings — but the message chime is WebAudio, which
+     * SystemUI knows nothing about, so a silenced phone used to chime anyway.
+     *
+     * The profile is re-read first: the ringer can change while we sit
+     * backgrounded, which is exactly when this cue fires. Off-box (browser,
+     * desktop) there is no profile to consult and the answer is "allow".
+     */
+    function notificationSoundAllowed() {
+        return _boxReadAudioProfile().then(function () { return _soundAllowed(); });
+    }
+
     // May we buzz? Only a fully silenced phone (or DND) says no.
     function _hapticAllowed() {
         var p = S.audioProfile;
@@ -1310,6 +1480,41 @@
             return true;
         } catch (e) {
             console.warn('[box] decline from the notification failed:', e);
+            return false;
+        }
+    };
+
+    // Notification actions on the *ongoing* call notification (1.1): the Kotlin
+    // CallActionReceiver forwards Mute / Deafen / Hang up taps here through
+    // evaluateJavascript, which works while the app is backgrounded. Each
+    // action runs exactly the in-app button, so state — and the notification's
+    // own labels via updateCallState — stay single-sourced. Verb names only:
+    // nothing user-visible or E2EE crosses this path.
+    window.__e2eCallAction = function (action) {
+        try {
+            if (!S.connected) return false;
+            if (action === 'mute') toggleMute();
+            else if (action === 'deafen') toggleDeafen();
+            else if (action === 'hangup') leaveVoice();
+            else return false;
+            return true;
+        } catch (e) {
+            console.warn('[box] call action from the notification failed:', e);
+            return false;
+        }
+    };
+
+    // "Answer" tapped on the incoming-call ring (1.1) — same guards as the
+    // decline hook: a tap on a stale notification must not accept a call the
+    // user is no longer receiving.
+    window.__e2eAcceptIncomingCall = function (dmChannelId) {
+        try {
+            if (!S.incomingCall) return false;
+            if (dmChannelId && S.incomingCall.dmChannelId && dmChannelId !== S.incomingCall.dmChannelId) return false;
+            acceptDmCall();
+            return true;
+        } catch (e) {
+            console.warn('[box] answer from the notification failed:', e);
             return false;
         }
     };
@@ -1376,6 +1581,12 @@
         // Any path out of a room (leave, hangup, kick, replace) ends the call,
         // so release the foreground service here rather than only in leaveVoice.
         _boxCallService('stop');
+        // 6.2: the screen may sleep again once no call is up.
+        _boxKeepScreenOn(false);
+        // 1.6: no call, no held talk button.
+        S.pttOpen = false;
+        // 4.6: the tray must stop claiming there is a call.
+        _boxTrayState();
         // A native (Android) PiP window must not outlive the call it was showing:
         // release it *before* the room's streams and tiles are torn down, or the
         // window would be left displaying a frozen last frame.
@@ -1542,6 +1753,13 @@
     // ------------------------------------------------------------------
     function effectiveNsMode() {
         var mode = S.settings.noiseSuppressionMode || 'rnnoise';
+        // 1.6: "only transmit while you speak" rides the energy gate that
+        // already exists in the RNNoise chain (RNNoise → gate → compressor),
+        // so nothing new runs on the audio thread — the same worklet, the same
+        // 16 ms RMS detector and the same 200 ms release ramp are reused, just
+        // selected regardless of which suppression flavour the user picked.
+        // 'browser'/'off' have no worklet to gate and are left alone.
+        if (S.settings.speakOnly && (mode === 'rnnoise' || mode === 'rnnoise-gate')) mode = 'rnnoise-gate';
         var needsWorklet = (mode === 'rnnoise' || mode === 'rnnoise-gate');
         if (needsWorklet && !(window.AudioWorkletNode && window.AudioContext)) {
             // No AudioWorklet support — fall back to the browser's built-in NS.
@@ -3002,6 +3220,10 @@
                 setSenderPriority(sat);
             }
         }
+        // 1.6: a track added for a NEW peer starts enabled — apply the
+        // hold-to-talk gate to it too, or a late joiner would hear the mic
+        // while the button is up.
+        applyPttGate();
     }
 
     function addLocalTracksToAllPeers() {
@@ -4086,7 +4308,20 @@
         S.deafened = S.forceDeafened;
         S.connected = true;
         // Keep the call alive if the phone screen goes off.
-        _boxCallService('start', S.channelName || (S.roomType === 'dm' ? 'Direct call' : 'Voice call'));
+        // F1: the label is sanitized inside _boxCallService — S.channelName (a
+        // decrypted E2EE name) must never reach the Android notification.
+        _boxCallService('start');
+        // Initial labels for the just-started service (later changes flow
+        // through sendVoiceState / the sync paths below).
+        _boxCallState();
+        // 6.1/6.2 call comfort: hold the screen on for the call, and ask for
+        // the battery-optimization exemption (once per 30 days) so Doze can't
+        // end it minutes in.
+        _boxKeepScreenOn(true);
+        _boxBatteryPrompt();
+        // 1.6: hold-to-talk starts closed — the user must press to be heard.
+        S.pttOpen = false;
+        applyPttGate();
         if (S.roomType === 'dm') {
             S.dmCallActive = true;
             S.incomingCall = null;
@@ -4407,6 +4642,9 @@
             S.muted = !!member.muted;
             S.deafened = !!member.deafened;
             updateSelfUI();
+            // The server echoed our own state (or force-mute/deafen landed):
+            // the notification labels must follow it too.
+            _boxCallState();
             }
         if (mediaChanged) {
             // The state broadcast may have arrived AFTER the video tracks
@@ -4665,6 +4903,7 @@
             S.muted = !!data.muted || S.forceMuted;
             var _wasDeafened = S.deafened;
             S.deafened = !!data.deafened;
+            _boxCallState();
             // Server mute/deafen control: a transition into deafen silences the
             // soundboard, and undeafening resumes suppressed clips mid-way.
             if (S.deafened && !_wasDeafened) {
@@ -5373,6 +5612,64 @@
         sendVoiceState();
         updateSelfUI();
         playSound(S.muted ? 'mute' : 'unmute');
+        _boxCallState();
+    }
+
+    // --- Hold-to-talk (1.6, FEATURE_PLAN.md) ---------------------------
+    //
+    // Push-to-talk is a GATE, not a mute. The mic keeps running (no
+    // getUserMedia round-trip per press — that costs 150-300 ms and eats the
+    // first syllable) and only the OUTGOING track is disabled while the button
+    // is up, so peers receive digital silence. `track.enabled = false` is the
+    // platform's own mechanism: WebRTC stops sending the signal (and, with
+    // DTX, the packets) without touching local monitoring, the speaking
+    // detector's analyser, or the E2EE send transform.
+    function _pttOutboundTrack() {
+        if (S.localStreams.processedMic) {
+            var pt = S.localStreams.processedMic.getAudioTracks()[0];
+            if (pt) return pt;
+        }
+        if (S.localStreams.mic) return S.localStreams.mic.getAudioTracks()[0] || null;
+        return null;
+    }
+
+    /** May the mic transmit right now? Pure, so the gate and its tests agree. */
+    function pttGateOpen() {
+        if (!S.settings.holdToTalk) return true;
+        return !!S.pttOpen;
+    }
+
+    /** Push the gate onto the live outbound track. Safe to call any time. */
+    function applyPttGate() {
+        var t = _pttOutboundTrack();
+        if (!t) return;
+        try { t.enabled = pttGateOpen(); } catch (_) {}
+    }
+
+    /**
+     * Hold-to-talk press/release. Server-mute wins (an admin mute cannot be
+     * undone by holding a button — same rule as toggleMute), and nothing
+     * happens at all unless the user turned hold-to-talk on.
+     */
+    function setPttOpen(on) {
+        if (!S.settings.holdToTalk) return;
+        if (on && S.forceMuted) {
+            showToast('You are server-muted and cannot unmute.');
+            return;
+        }
+        if (!!S.pttOpen === !!on) return;
+        S.pttOpen = !!on;
+        applyPttGate();
+        updateSelfUI();
+        renderBar();
+        // The speaking glow has to follow what peers can actually hear: a
+        // closed gate that still reports "speaking" would light up remote
+        // member chips with no audio behind them.
+        if (!on && S.speaking) {
+            S.speaking = false;
+            sendVoiceState();
+            updateSpeakingUI();
+        }
     }
 
     // --- Picture-in-Picture ---
@@ -6053,6 +6350,7 @@
         sendVoiceState();
         updateSelfUI();
         playSound(S.deafened ? 'deafen' : 'undeafen');
+        _boxCallState();
     }
 
     function toggleCamera() {
@@ -6378,7 +6676,9 @@
                 }
                 var rms = Math.sqrt(sum / buf.length);
                 var now = Date.now();
-                var speaking = rms > 0.02 && !S.muted && !S.deafened;
+                // 1.6: with hold-to-talk on, a closed gate means the peers
+                // hear nothing — the glow must not claim otherwise.
+                var speaking = rms > 0.02 && !S.muted && !S.deafened && pttGateOpen();
                 if (speaking !== S.speaking && now - S._lastSpeakSent > 120) {
                     S.speaking = speaking;
                     S._lastSpeakSent = now;
@@ -7053,6 +7353,34 @@
         if (bar) bar.style.display = 'none';
     }
 
+    // 1.6: hold-to-talk binds press/release on every mic button (bar, popup,
+    // DM panel, mini bar) so one gesture works in all four call surfaces — no
+    // new markup to keep in sync. When hold-to-talk is off these handlers do
+    // nothing and the plain click path (bindClick → toggleMute) is unchanged.
+    function bindTalkHold() {
+        ['voice-bar-mute', 'voice-popup-mute', 'dm-call-mute', 'dm-mini-bar-mute'].forEach(function (id) {
+            var b = el(id);
+            if (!b) return;
+            var down = function (e) {
+                if (!S.settings.holdToTalk) return;
+                e.preventDefault();
+                setPttOpen(true);
+            };
+            var up = function () {
+                if (!S.settings.holdToTalk) return;
+                setPttOpen(false);
+            };
+            b.addEventListener('pointerdown', down);
+            b.addEventListener('pointerup', up);
+            b.addEventListener('pointercancel', up);
+            b.addEventListener('pointerleave', up);
+            // The press/release above must not ALSO fire the click → toggleMute.
+            b.addEventListener('click', function (e) {
+                if (S.settings.holdToTalk) { e.preventDefault(); e.stopPropagation(); }
+            }, true);
+        });
+    }
+
     function bindBarControls() {
         var bar = el('voice-bar');
         if (!bar) return;
@@ -7076,10 +7404,14 @@
     function renderBar() {
         var micBtn = el('voice-bar-mute');
         if (micBtn) {
-            micBtn.innerHTML = S.muted ? icon('mic-off') : icon('mic');
-            micBtn.classList.toggle('active', S.muted);
+            // 1.6: the icon follows the gate too (see updateSelfUI).
+            var micLive = pttGateOpen() && !S.muted;
+            micBtn.innerHTML = micLive ? icon('mic') : icon('mic-off');
+            micBtn.classList.toggle('active', !micLive);
             micBtn.classList.toggle('locked', S.forceMuted);
-            micBtn.title = S.forceMuted ? 'Server muted' : (S.muted ? 'Unmute' : 'Mute');
+            micBtn.title = S.forceMuted ? 'Server muted'
+                : (S.settings.holdToTalk ? (S.pttOpen ? 'Talking — release to stop' : 'Hold to talk')
+                    : (S.muted ? 'Unmute' : 'Mute'));
         }
         var deafBtn = el('voice-bar-deafen');
         if (deafBtn) {
@@ -7194,6 +7526,12 @@
         }
         var sec = document.getElementById('voice-echo-cancellation');
         if (sec) sec.addEventListener('change', function (e) { setEchoCancellation(e.target.checked); });
+        var vso = document.getElementById('voice-speak-only');
+        if (vso) vso.addEventListener('change', function (e) { setSpeakOnly(e.target.checked); });
+        var vht = document.getElementById('voice-hold-to-talk');
+        if (vht) vht.addEventListener('change', function (e) { setHoldToTalk(e.target.checked); });
+        var vps = document.getElementById('voice-ptt-shortcut');
+        if (vps) vps.addEventListener('change', function (e) { setPttShortcut(e.target.value); });
         var saq = document.getElementById('voice-send-audio-quality');
         if (saq) saq.addEventListener('change', function (e) {
             S.settings.sendAudioQuality = e.target.value;
@@ -9948,12 +10286,22 @@
     // Self UI
     // ------------------------------------------------------------------
     function updateSelfUI() {
+        // 4.6: every self-state change (mute/deafen/join) funnels through here,
+        // which makes this the one place the tray needs to be told about.
+        _boxTrayState();
+        // 1.6: with hold-to-talk on, the mic buttons show the GATE state, not
+        // the mute state — closed (= you are not transmitting) looks like a
+        // muted mic, and holding the button lights it up like an open one.
+        var micLive = pttGateOpen() && !S.muted;
         ['voice-bar-mute', 'voice-popup-mute', 'dm-call-mute', 'dm-mini-bar-mute'].forEach(function (id) {
             var b = el(id);
             if (!b) return;
-            b.innerHTML = S.muted ? icon('mic-off') : icon('mic');
-            b.classList.toggle('active', S.muted);
+            b.innerHTML = micLive ? icon('mic') : icon('mic-off');
+            b.classList.toggle('active', !micLive);
             b.classList.toggle('locked', S.forceMuted);
+            if (S.settings.holdToTalk) {
+                b.title = S.forceMuted ? 'Server muted' : (S.pttOpen ? 'Talking — release to stop' : 'Hold to talk');
+            }
         });
         ['voice-bar-deafen', 'voice-popup-deafen', 'dm-call-deafen', 'dm-mini-bar-deafen'].forEach(function (id) {
             var b = el(id);
@@ -10148,6 +10496,37 @@
         saveSettings();
         updateSettingsLabels();
         restartMicForSettings();
+    }
+
+    // 1.6: "only transmit while you speak". The gate lives in the RNNoise
+    // chain, which is chosen when the mic (re)starts — hence the restart.
+    function setSpeakOnly(on) {
+        S.settings.speakOnly = !!on;
+        saveSettings();
+        updateSettingsLabels();
+        restartMicForSettings();
+    }
+
+    // 1.6: hold-to-talk. Turning it on closes the gate immediately (a mic
+    // nobody is holding down must not be live), turning it off re-opens it.
+    function setHoldToTalk(on) {
+        S.settings.holdToTalk = !!on;
+        S.pttOpen = false;
+        saveSettings();
+        applyPttGate();
+        updateSelfUI();
+        renderBar();
+        updateSettingsLabels();
+        // 4.1: the global key exists only while push-to-talk does.
+        _boxPttShortcut();
+    }
+
+    // 4.1: the accelerator the desktop global hotkey holds. Only the string is
+    // stored — the shell parses it and logs a bad one itself.
+    function setPttShortcut(acc) {
+        S.settings.pttShortcut = String(acc || '').trim();
+        saveSettings();
+        _boxPttShortcut();
     }
 
     // ---- Video quality settings (Settings → Voice → Video Quality) ----
@@ -11836,6 +12215,13 @@
             m.packets = rtpAgg.packets || 0;
             m.loss = rtpAgg.loss || 0;
             m.bytes = rtpAgg.bytes || 0;
+            // 1.8 (FEATURE_PLAN.md): latency. rttMs is the round trip of our
+            // OUTBOUND stream (straight from the peer's RTCP receiver report —
+            // no probe traffic of our own), jitterMs the interarrival jitter of
+            // the INBOUND one. Together with loss these are the numbers that
+            // answer "why does it sound bad".
+            if (typeof rtpAgg.rttMs === 'number') m.rttMs = rtpAgg.rttMs;
+            if (typeof rtpAgg.jitterMs === 'number') m.jitterMs = rtpAgg.jitterMs;
         }
         return m;
     }
@@ -11859,6 +12245,14 @@
                 var outAgg = {}, inAgg = {};
                 try {
                     stats.forEach(function (r) {
+                        // Connection-level ping first: candidate-pair reports
+                        // carry no `kind`, so they have to be read BEFORE the
+                        // kind guard below or they are silently dropped (1.8).
+                        if (r.type === 'candidate-pair' && r.state === 'succeeded' && typeof r.currentRoundTripTime === 'number') {
+                            // Several pairs can succeed; the nominated one is the
+                            // live path, so it wins.
+                            if (entry.pingMs === undefined || r.nominated) entry.pingMs = r.currentRoundTripTime * 1000;
+                        }
                         var k = r.kind || r.mediaType;
                         if (!k) return;
                         if (r.type === 'outbound-rtp') {
@@ -11868,6 +12262,15 @@
                             outAgg[k].packets += r.packetsSent || 0;
                             outAgg[k].loss += r.packetsLost || 0;
                             outAgg[k].bytes += r.bytesSent || 0;
+                        } else if (r.type === 'remote-inbound-rtp') {
+                            // The peer's RTCP receiver report about OUR outbound
+                            // stream: this is where a ping comes from without us
+                            // inventing probe traffic (1.8).
+                            (outAgg[k] = outAgg[k] || { count: 0, frames: 0, packets: 0, loss: 0, bytes: 0 });
+                            if (typeof r.roundTripTime === 'number') {
+                                var rttMs = r.roundTripTime * 1000;
+                                outAgg[k].rttMs = (typeof outAgg[k].rttMs === 'number') ? Math.max(outAgg[k].rttMs, rttMs) : rttMs;
+                            }
                         } else if (r.type === 'inbound-rtp') {
                             (inAgg[k] = inAgg[k] || { count: 0, frames: 0, packets: 0, loss: 0, bytes: 0 });
                             inAgg[k].count++;
@@ -11875,6 +12278,10 @@
                             inAgg[k].packets += r.packetsReceived || 0;
                             inAgg[k].loss += r.packetsLost || 0;
                             inAgg[k].bytes += r.bytesReceived || 0;
+                            if (typeof r.jitter === 'number') {
+                                var jMs = r.jitter * 1000;
+                                inAgg[k].jitterMs = (typeof inAgg[k].jitterMs === 'number') ? Math.max(inAgg[k].jitterMs, jMs) : jMs;
+                            }
                         }
                     });
                 } catch (_) {}
@@ -11973,17 +12380,17 @@
     }
 
     function diagPeerHtml(p) {
-        var html = '<div style="margin-top:4px">▸ <b>' + esc(shortUid(p.uid)) + '</b>  [' + esc(p.connectionState) + (p.signalingState ? ' / ' + esc(p.signalingState) : '') + (p.error ? ' / ' + esc(p.error) : '') + ']</div>';
+        var html = '<div style="margin-top:4px">▸ <b>' + esc(shortUid(p.uid)) + '</b>  [' + esc(p.connectionState) + (p.signalingState ? ' / ' + esc(p.signalingState) : '') + (p.error ? ' / ' + esc(p.error) : '') + (typeof p.pingMs === 'number' ? ' / ping ' + Math.round(p.pingMs) + ' ms' : '') + ']</div>';
         ['audio', 'video'].forEach(function (k) {
             var s = p.senders[k];
             var r = p.receivers[k];
             if (s) {
                 var warn = (k === 'video' && s.tracks > 0 && s.frames === 0) ? ' <span style="color:#f0b232">' + icon('warning') + ' no frames encoded (they see you black?)</span>' : '';
-                html += '<div style="padding-left:12px">send ' + k + (s.tracks > 1 ? ' ×' + s.tracks : '') + ': frames ' + s.frames + ' · pkts ' + s.packets + ' · loss ' + s.loss + ' · ' + fmtBytes(s.bytes) + ' · [E2EE ' + (s.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (s.trackStates.length ? ' · ' + s.trackStates.join(',') : '') + warn + '</div>';
+                html += '<div style="padding-left:12px">send ' + k + (s.tracks > 1 ? ' ×' + s.tracks : '') + ': frames ' + s.frames + ' · pkts ' + s.packets + ' · loss ' + s.loss + (typeof s.rttMs === 'number' ? ' · rtt ' + Math.round(s.rttMs) + ' ms' : '') + ' · ' + fmtBytes(s.bytes) + ' · [E2EE ' + (s.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (s.trackStates.length ? ' · ' + s.trackStates.join(',') : '') + warn + '</div>';
             }
             if (r) {
                 var warn2 = (k === 'video' && r.tracks > 0 && r.frames === 0) ? ' <span style="color:#f0b232">' + icon('warning') + ' no frames decoded (black feed)</span>' : '';
-                html += '<div style="padding-left:12px">recv ' + k + (r.tracks > 1 ? ' ×' + r.tracks : '') + ': frames ' + r.frames + ' · pkts ' + r.packets + ' · loss ' + r.loss + ' · ' + fmtBytes(r.bytes) + ' · [E2EE ' + (r.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (r.trackStates.length ? ' · ' + r.trackStates.join(',') : '') + warn2 + '</div>';
+                html += '<div style="padding-left:12px">recv ' + k + (r.tracks > 1 ? ' ×' + r.tracks : '') + ': frames ' + r.frames + ' · pkts ' + r.packets + ' · loss ' + r.loss + (typeof r.jitterMs === 'number' ? ' · jitter ' + Math.round(r.jitterMs) + ' ms' : '') + ' · ' + fmtBytes(r.bytes) + ' · [E2EE ' + (r.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (r.trackStates.length ? ' · ' + r.trackStates.join(',') : '') + warn2 + '</div>';
             }
         });
         var reasons = diagReasons(p);

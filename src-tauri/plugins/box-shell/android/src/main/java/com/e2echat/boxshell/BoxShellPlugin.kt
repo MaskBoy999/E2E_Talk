@@ -3,10 +3,14 @@ package com.e2echat.boxshell
 import android.app.Activity
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.view.Window
 import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
@@ -30,6 +34,24 @@ class BackHandlerArgs {
      * (the setup/address screen, for instance).
      */
     var active: Boolean = true
+}
+
+/**
+ * Arguments for [`BoxShellPlugin.keepScreenOn`] (6.2, FEATURE_PLAN.md):
+ * whether the screen must stay on right now.
+ */
+@InvokeArg
+class KeepScreenOnArgs {
+    var active: Boolean = false
+}
+
+/**
+ * Arguments for [`BoxShellPlugin.setSecureMode`] (5.2, FEATURE_PLAN.md):
+ * whether the window must refuse screenshots/recordings right now.
+ */
+@InvokeArg
+class SecureModeArgs {
+    var active: Boolean = false
 }
 
 @InvokeArg
@@ -181,6 +203,95 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             // A refused vibration must never take the page down with it.
             invoke.reject(e.message ?: "vibrate failed")
+        }
+    }
+
+    /**
+     * Keep the screen on (or let it sleep again) — 6.2, FEATURE_PLAN.md.
+     *
+     * The page calls this with `true` when a call starts and `false` when it
+     * ends: a voice call with the screen off in a pocket is exactly when a
+     * phone locks, dims and (with Doze, see `batteryRequest`) goes quiet.
+     * `FLAG_KEEP_SCREEN_ON` is the platform's own mechanism — no WakeLock for
+     * the app to leak, and the flag dies with the window it is set on.
+     */
+    @Command
+    fun keepScreenOn(invoke: Invoke) {
+        val args = invoke.parseArgs(KeepScreenOnArgs::class.java)
+        activity.runOnUiThread {
+            val w = window()
+            if (args.active) {
+                w?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                w?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+        invoke.resolve()
+    }
+
+    /**
+     * Block screenshots and screen recordings of whatever is on screen —
+     * 5.2, FEATURE_PLAN.md (`FLAG_SECURE`).
+     *
+     * "No screenshots" is the point of this app in some channels, and a
+     * screenshot bypasses every layer below the display: the pixels are
+     * decrypted by definition. Deliberately PER-CHANNEL, driven by the page:
+     * a global FLAG_SECURE would also block the user's own screenshots
+     * everywhere (and Assist) — the trap FEATURE_PLAN.md §10 calls out. No
+     * permission involved; the flag lives on the window and dies with it.
+     */
+    @Command
+    fun setSecureMode(invoke: Invoke) {
+        val args = invoke.parseArgs(SecureModeArgs::class.java)
+        activity.runOnUiThread {
+            val w = window()
+            if (args.active) {
+                w?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                w?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+        invoke.resolve()
+    }
+
+    /**
+     * Whether the app already ignores battery optimizations — 6.1,
+     * FEATURE_PLAN.md. Returns `{ignoring:true}` when there is nothing to ask
+     * for (no PowerManager, or an OEM build that reports no optimization at
+     * all), so the page never opens a pointless system dialog.
+     */
+    @Command
+    fun batteryStatus(invoke: Invoke) {
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val out = JSObject()
+        out.put("ignoring", pm?.isIgnoringBatteryOptimizations(activity.packageName) ?: true)
+        invoke.resolve(out)
+    }
+
+    /**
+     * Open the system "let this app ignore battery optimizations" dialog —
+     * 6.1, FEATURE_PLAN.md.
+     *
+     * Doze is the number-one way an Android voice app dies in the background,
+     * and it reads exactly like a bug ("the call went quiet after a while").
+     * The direct `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` intent is the
+     * only reliable route — there is no settings screen for the app to deep-
+     * link to — and the *user* makes the choice in Android's own dialog; the
+     * app never flips the setting itself. The manifest declares
+     * REQUEST_IGNORE_BATTERY_OPTIMIZATIONS for this intent.
+     */
+    @Command
+    fun batteryRequest(invoke: Invoke) {
+        try {
+            val intent = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:${activity.packageName}")
+            )
+            activity.startActivity(intent)
+            invoke.resolve()
+        } catch (e: Exception) {
+            // An OEM that refuses the intent is a lost prompt, not a crash.
+            invoke.reject(e.message ?: "batteryRequest failed")
         }
     }
 

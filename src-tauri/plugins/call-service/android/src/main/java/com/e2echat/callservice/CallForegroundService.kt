@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -35,6 +38,17 @@ class CallForegroundService : Service() {
         const val ACTION_STOP = "com.e2echat.callservice.action.STOP"
         const val ACTION_UPDATE = "com.e2echat.callservice.action.UPDATE"
         const val EXTRA_CHANNEL_NAME = "channelName"
+
+        // 1.1 (FEATURE_PLAN.md): the current mute/deafen flags, so the ongoing
+        // notification's action labels can say "Unmute" while muted. Sent only
+        // on state updates; absent means keep the previous state.
+        const val EXTRA_MUTED = "muted"
+        const val EXTRA_DEAFENED = "deafened"
+
+        /** Action taps handled by [CallActionReceiver], not by the service. */
+        const val ACTION_MUTE = "com.e2echat.callservice.action.MUTE"
+        const val ACTION_DEAFEN = "com.e2echat.callservice.action.DEAFEN"
+        const val ACTION_HANGUP = "com.e2echat.callservice.action.HANGUP"
 
         /** Media the call is carrying: "audio" (always), "camera", "screen". */
         const val EXTRA_MEDIA_TYPES = "mediaTypes"
@@ -69,6 +83,63 @@ class CallForegroundService : Service() {
     /** The type mask currently applied, so an update can tell whether it changed. */
     private var appliedMask = 0
 
+    /** Current self state — drives the notification's action labels (1.1). */
+    private var muted = false
+    private var deafened = false
+
+    // ── Audio focus (1.4, FEATURE_PLAN.md) ────────────────────────────────
+    // Held for the length of the call so the user's music pauses when the
+    // call starts and comes back on hang-up, instead of the app talking over
+    // whatever is playing. GAIN_TRANSIENT (not GAIN) is what tells Android to
+    // hand playback back to the previous owner after abandonAudioFocus().
+    // Kept as fields so the abandon targets the exact request/listener pair.
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { /* the call never yields mid-ring: nothing to do on loss */ }
+    private var focusRequest: AudioFocusRequest? = null
+    private var focusHeld = false
+
+    private fun requestAudioFocus() {
+        if (focusHeld) return
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        focusHeld = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener(focusListener)
+                .build()
+            focusRequest = req
+            am.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } else {
+            @Suppress("DEPRECATION")
+            am.requestAudioFocus(
+                focusListener,
+                AudioManager.STREAM_VOICE_CALL,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+            ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        if (!focusHeld) return
+        focusHeld = false
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            focusRequest?.let { am.abandonAudioFocusRequest(it) }
+            focusRequest = null
+        } else {
+            @Suppress("DEPRECATION")
+            am.abandonAudioFocus(focusListener)
+        }
+    }
+
+    override fun onDestroy() {
+        abandonAudioFocus()
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -78,14 +149,25 @@ class CallForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        val channelName = intent?.getStringExtra(EXTRA_CHANNEL_NAME) ?: "Voice call"
+        // F1 (FEATURE_PLAN.md): EXTRA_CHANNEL_NAME is still accepted — an
+        // older cached page sends it — but it is NEVER displayed. It used to
+        // carry a decrypted E2EE channel name into the ongoing notification,
+        // i.e. into the Android shade and notification history, which sit
+        // outside the encryption boundary (the FBI/Signal-preview case).
+        // The notification text is now a constant.
         val mediaTypes = intent?.getStringArrayListExtra(EXTRA_MEDIA_TYPES) ?: arrayListOf("audio")
+
+        // 1.1: state updates carry the current flags so the action labels match
+        // reality. Absent (plain start/media update) keeps the last known state.
+        if (intent?.hasExtra(EXTRA_MUTED) == true) muted = intent.getBooleanExtra(EXTRA_MUTED, false)
+        if (intent?.hasExtra(EXTRA_DEAFENED) == true) deafened = intent.getBooleanExtra(EXTRA_DEAFENED, false)
 
         // An update that arrives before the service was ever foregrounded (a
         // camera/screen toggle racing the connect) is just a start — and an
         // update whose mask is unchanged costs nothing but a re-post.
+        requestAudioFocus()
         ensureChannel()
-        val notification = buildNotification(channelName)
+        val notification = buildNotification()
         applyTypes(mediaTypes, notification)
         // If Android kills us under memory pressure, come back rather than
         // silently dropping audio mid-call.
@@ -160,7 +242,7 @@ class CallForegroundService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(channelName: String): Notification {
+    private fun buildNotification(): Notification {
         // Tapping the notification reopens the app (single-activity app).
         val launch = packageManager.getLaunchIntentForPackage(packageName)
         val contentIntent = launch?.let {
@@ -174,7 +256,8 @@ class CallForegroundService : Service() {
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("E2E Chat")
-            .setContentText("In call — $channelName")
+            // F1: constant text — never a channel name (see onStartCommand).
+            .setContentText("In a call")
             // Silhouette, not the launcher icon — see IncomingCallNotifier:
             // a small icon is an alpha mask, so the full-colour app icon came
             // out as a white blob in the status bar.
@@ -184,7 +267,27 @@ class CallForegroundService : Service() {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_LOW)
 
+        // 1.1 (FEATURE_PLAN.md): control the call from the shade. The tap goes
+        // to CallActionReceiver (verb names only — nothing user-visible or E2EE
+        // travels through that path), the page applies it, and sends
+        // updateCallState so the labels flip on the next post. Icon 0, same as
+        // the ring's actions: SystemUI does not render small icons on compact
+        // notification actions anyway.
+        builder
+            .addAction(0, if (muted) "Unmute" else "Mute", actionPendingIntent(ACTION_MUTE, 21))
+            .addAction(0, if (deafened) "Undeafen" else "Deafen", actionPendingIntent(ACTION_DEAFEN, 22))
+            .addAction(0, "Hang up", actionPendingIntent(ACTION_HANGUP, 23))
+
         if (contentIntent != null) builder.setContentIntent(contentIntent)
         return builder.build()
     }
+
+    /** Immutable broadcast PendingIntent for one notification action tap. */
+    private fun actionPendingIntent(action: String, requestCode: Int): PendingIntent =
+        PendingIntent.getBroadcast(
+            this,
+            requestCode,
+            Intent(this, CallActionReceiver::class.java).setAction(action),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 }

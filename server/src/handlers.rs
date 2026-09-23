@@ -4488,11 +4488,21 @@ pub async fn get_user_id(
 /// clients so WebRTC calls can traverse strict NATs (STUN-only fails there).
 /// Returns `{ "urls": [...], "username": ..., "credential": ... }` — or
 /// `{ "urls": [] }` when no TURN is configured (client stays STUN-only).
+///
+/// Two credential modes (7.1, FEATURE_PLAN.md):
+/// * `TURN_SECRET` set → **TURN REST** (coturn `use-auth-secret`): a
+///   per-request credential `username = <expiry>:<user-id>`,
+///   `credential = base64(HMAC-SHA1(secret, username))`. It stops working on
+///   its own at the expiry — no rotation, and one leaked credential carries
+///   only the short window it was minted for, instead of the whole relay
+///   until the shared password is changed.
+/// * Only `TURN_USERNAME`/`TURN_PASSWORD` → the legacy static pair, unchanged
+///   (fine for a home lab).
 pub async fn get_turn_config(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let _user_id = match extract_user(&headers, &state) {
+    let user_id = match extract_user(&headers, &state) {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
@@ -4500,13 +4510,67 @@ pub async fn get_turn_config(
     let mut body = serde_json::json!({
         "urls": state.config.turn_urls,
     });
-    if let Some(u) = &state.config.turn_username {
-        body["username"] = serde_json::Value::String(u.clone());
-    }
-    if let Some(p) = &state.config.turn_password {
-        body["credential"] = serde_json::Value::String(p.clone());
+    if let Some(secret) = &state.config.turn_secret {
+        let expiry = chrono::Utc::now().timestamp() + state.config.turn_ttl_secs as i64;
+        let username = format!("{expiry}:{user_id}");
+        let credential = turn_rest_credential(secret, &username);
+        body["username"] = serde_json::Value::String(username);
+        body["credential"] = serde_json::Value::String(credential);
+    } else {
+        if let Some(u) = &state.config.turn_username {
+            body["username"] = serde_json::Value::String(u.clone());
+        }
+        if let Some(p) = &state.config.turn_password {
+            body["credential"] = serde_json::Value::String(p.clone());
+        }
     }
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// coturn `use-auth-secret` (TURN REST) credential: base64(HMAC-SHA1(secret,
+/// username)). coturn recomputes exactly this over the `username` our client
+/// presents in its Allocate, so any deviation here means every call behind a
+/// strict NAT silently fails to connect.
+pub(crate) fn turn_rest_credential(secret: &str, username: &str) -> String {
+    use hmac::{Hmac, Mac};
+    type HmacSha1 = Hmac<sha1::Sha1>;
+    // HMAC accepts any key length, so `new_from_slice` cannot fail.
+    let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).expect("HMAC key length");
+    mac.update(username.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+}
+
+#[cfg(test)]
+mod turn_credential_tests {
+    use super::turn_rest_credential;
+
+    /// RFC 2202 test case 2 (HMAC-SHA1, key = "Jefe", data = "what do ya
+    /// want for nothing?") — pins the exact MAC coturn recomputes on every
+    /// Allocate; a wrong algorithm here silently breaks every relayed call.
+    #[test]
+    fn matches_rfc2202_vector() {
+        let c = turn_rest_credential("Jefe", "what do ya want for nothing?");
+        // base64(0xeffcdf6ae5eb2fa2d27416d5f184df9c259a7c79) — the RFC 2202
+        // case-2 digest; cross-checked against `openssl dgst -sha1 -hmac Jefe`.
+        assert_eq!(c, "7/zfauXrL6LSdBbV8YTfnCWafHk=");
+    }
+
+    /// The username the endpoint mints is `<expiry-unix>:<user-id>` — the
+    /// shape coturn's `use-auth-secret` mode understands (expiry embedded in
+    /// the username itself, so validity needs no server-side state).
+    #[test]
+    fn credential_tracks_username_and_secret() {
+        let user = "1760000000:4f7a-uuid";
+        let a = turn_rest_credential("secret-a", user);
+        let b = turn_rest_credential("secret-b", user);
+        let c = turn_rest_credential("secret-a", "1760000999:4f7a-uuid");
+        assert_ne!(a, b, "different secrets must differ");
+        assert_ne!(a, c, "different expiries must differ");
+        // Standard base64 of a 20-byte HMAC-SHA1 = 28 chars (one '=' pad).
+        assert_eq!(a.len(), 28);
+        assert!(a.ends_with('='));
+        assert!(a.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '+' || ch == '/' || ch == '='));
+    }
 }
 
 // --- Server Keys (E2EE) ---

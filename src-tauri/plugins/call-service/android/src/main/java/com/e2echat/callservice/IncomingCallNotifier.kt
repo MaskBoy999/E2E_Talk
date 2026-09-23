@@ -63,11 +63,30 @@ object IncomingCallNotifier {
     private const val PREF_CHANNEL_ID = "channel_id"
 
     const val ACTION_DECLINE = "com.e2echat.callservice.action.DECLINE"
+    const val ACTION_ANSWER = "com.e2echat.callservice.action.ANSWER"
     const val EXTRA_DM_CHANNEL_ID = "dmChannelId"
 
-    /** Show (or refresh) the ring notification. */
-    fun show(context: Context, callerName: String, dmChannelId: String, vibratePattern: LongArray) {
-        val channelId = ensureChannel(context, vibratePattern)
+    /**
+     * Show (or refresh) the ring notification.
+     *
+     * `hideIdentity` (F2, FEATURE_PLAN.md) is the page's "hide message content
+     * in notifications" preference: when true the card names NOBODY (title
+     * only), the notification channel is locked to the private lock-screen
+     * visibility, and the notification itself is VISIBILITY_PRIVATE — so the
+     * caller's identity never lands on the lock screen or in Android's
+     * notification history (the durable OS-held copies the FBI recovered
+     * Signal previews from on iOS). When false the ring is unchanged: the
+     * caller is named with the plaintext @username, which is metadata the
+     * server already holds.
+     */
+    fun show(
+        context: Context,
+        callerName: String,
+        dmChannelId: String,
+        vibratePattern: LongArray,
+        hideIdentity: Boolean = false
+    ) {
+        val channelId = ensureChannel(context, vibratePattern, hideIdentity)
 
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
         val fullScreenIntent = PendingIntent.getActivity(
@@ -89,9 +108,27 @@ object IncomingCallNotifier {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val answerIntent = PendingIntent.getBroadcast(
+            context,
+            // Distinct code from Decline (1) so the two PendingIntents never collide.
+            2,
+            Intent(context, IncomingCallActionReceiver::class.java).apply {
+                action = ACTION_ANSWER
+                putExtra(EXTRA_DM_CHANNEL_ID, dmChannelId)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val builder = NotificationCompat.Builder(context, channelId)
             .setContentTitle("Incoming call")
-            .setContentText("$callerName is calling…")
+            .apply {
+                if (hideIdentity) {
+                    // F2: name-free — see the show() doc comment.
+                    setContentText("Tap to answer in E2E Chat")
+                } else {
+                    setContentText("$callerName is calling…")
+                }
+            }
             // The app's own mark, in silhouette — NOT applicationInfo.icon.
             // Android renders a small icon as an alpha mask, so handing it the
             // full-colour (and adaptive) launcher icon produced a shapeless
@@ -101,11 +138,17 @@ object IncomingCallNotifier {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)
             .setAutoCancel(false)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(fullScreenIntent)
             // The full-screen intent is what makes this ring over the lock
             // screen instead of waiting quietly in the shade.
             .setFullScreenIntent(fullScreenIntent, true)
+            // F2: private when hiding identity — never painted on a locked
+            // phone. Public otherwise (the @username is server-known metadata).
+            .setVisibility(
+                if (hideIdentity) NotificationCompat.VISIBILITY_PRIVATE
+                else NotificationCompat.VISIBILITY_PUBLIC
+            )
+            .addAction(0, "Answer", answerIntent)
             .addAction(0, "Decline", declineIntent)
 
         try {
@@ -129,15 +172,20 @@ object IncomingCallNotifier {
 
     /**
      * The channel the notification must be posted to, keyed by the user's
-     * vibration pattern. On a pattern change the old channel is deleted and a new
-     * one created — see the class comment for why a channel cannot simply be
-     * updated. Falls back to the plain prefix on anything unexpected, which is
-     * still a working (if default-vibrating) channel.
+     * vibration pattern AND the identity-visibility mode. On a pattern change
+     * the old channel is deleted and a new one created — see the class comment
+     * for why a channel cannot simply be updated. The hide-identity mode is
+     * part of the id for the same reason: a channel's lock-screen visibility
+     * is fixed at creation too, and toggling the preference (F2) must actually
+     * take effect, so the previous mode's channel is deleted like a previous
+     * pattern's. Falls back to the plain prefix on anything unexpected, which
+     * is still a working (if default-vibrating) channel.
      */
-    private fun ensureChannel(context: Context, vibratePattern: LongArray): String {
+    private fun ensureChannel(context: Context, vibratePattern: LongArray, hideIdentity: Boolean): String {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return CHANNEL_PREFIX
         val pattern = vibratePattern.filter { it > 0 }
-        val id = if (pattern.isEmpty()) "$CHANNEL_PREFIX-novibe" else "$CHANNEL_PREFIX-" + pattern.joinToString("-")
+        val patternPart = if (pattern.isEmpty()) "novibe" else pattern.joinToString("-")
+        val id = "$CHANNEL_PREFIX-$patternPart" + if (hideIdentity) "-priv" else ""
         try {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                 ?: return id
@@ -151,7 +199,12 @@ object IncomingCallNotifier {
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Rings when someone calls you"
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                // F2: the channel locks the lock-screen visibility for every
+                // notification posted on it, so the hide-identity mode must be
+                // baked in here (hence the mode suffix in the id above).
+                lockscreenVisibility =
+                    if (hideIdentity) Notification.VISIBILITY_PRIVATE
+                    else Notification.VISIBILITY_PUBLIC
                 if (pattern.isEmpty()) {
                     // Settings → Voice → Haptics turned the cue off: the ring is
                     // the notification's job, the buzz is not.
@@ -187,7 +240,7 @@ object IncomingCallNotifier {
 }
 
 /**
- * Handles the notification's **Decline** action.
+ * Handles the notification's **Decline** and **Answer** actions.
  *
  * This used to only dismiss the notification, which is why declining from the
  * shade looked like it worked while the caller kept ringing: nothing ever told
@@ -202,18 +255,35 @@ object IncomingCallNotifier {
  */
 class IncomingCallActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != IncomingCallNotifier.ACTION_DECLINE) return
+        val deliver: (String) -> Unit = { dmChannelId ->
+            when (intent.action) {
+                IncomingCallNotifier.ACTION_DECLINE ->
+                    CallServicePlugin.deliverIncomingCallDecline(dmChannelId)
+                // 1.1: answering straight from the shade — the page runs
+                // acceptDmCall exactly as the in-app button does.
+                IncomingCallNotifier.ACTION_ANSWER ->
+                    CallServicePlugin.deliverIncomingCallAnswer(dmChannelId)
+            }
+        }
+        when (intent.action) {
+            IncomingCallNotifier.ACTION_DECLINE,
+            IncomingCallNotifier.ACTION_ANSWER -> {}
+            else -> return
+        }
+        // End the ring first: for Decline it is the whole effect; for Answer the
+        // page tears the ring down too, but this makes sure the shade never keeps
+        // showing a ring after either tap (best-effort either way).
         try {
             IncomingCallNotifier.cancel(context)
         } catch (_: Exception) {
-            // Cancelling is best-effort; the decline below is the part that matters.
+            // Cancelling is best-effort; the delivery below is the part that matters.
         }
         try {
             val dmChannelId = intent.getStringExtra(IncomingCallNotifier.EXTRA_DM_CHANNEL_ID) ?: ""
-            CallServicePlugin.deliverIncomingCallDecline(dmChannelId)
+            deliver(dmChannelId)
         } catch (e: Exception) {
             // A BroadcastReceiver throwing kills the process on some OEMs.
-            Log.w("E2EIncomingCall", "could not deliver the decline: ${e.message}")
+            Log.w("E2EIncomingCall", "could not deliver the ring action: ${e.message}")
         }
     }
 }

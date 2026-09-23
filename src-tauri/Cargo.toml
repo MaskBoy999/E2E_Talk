@@ -1,6 +1,6 @@
 [package]
 name = "e2e-chat-app"
-version = "0.2.27"
+version = "0.2.28"
 description = "E2E Chat — native desktop shell for the encrypted chat app"
 authors = ["E2E Chat"]
 edition = "2021"
@@ -37,6 +37,9 @@ url = "2"
 # spawning a duplicate app (two tray icons, racing config writers).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
+# Desktop-only: the global push-to-talk hotkey (feature 4.1). Used from Rust
+# only, so no capability/ACL entry is involved — see PTT_EVENT in src/lib.rs.
+tauri-plugin-global-shortcut = "2"
 
 # Windows-only: the WebView2 certificate and permission hooks (src/win_webview.rs).
 # Both versions are the ones tauri/wry already build, so this adds no compilation
@@ -44,6 +47,12 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows-core = "0.61"
+# WinRT toast for src/toast.rs (F3): tauri-plugin-notification has NO close on
+# desktop, so toasts it posts live in the Windows Action Center database until
+# cleared. The features are the same subset tauri-winrt-notification builds, so
+# this adds no compilation beyond naming the interfaces (windows 0.61 is
+# already in the tree via wry/tauri).
+windows = { version = "0.61", features = ["Data_Xml_Dom", "UI_Notifications", "Foundation"] }
 
 [profile.release]
 codegen-units = 1

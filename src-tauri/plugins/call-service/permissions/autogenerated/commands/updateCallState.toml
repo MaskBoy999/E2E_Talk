@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-updateCallState"
+description = "Enables the updateCallState command without any pre-configured scope."
+commands.allow = ["updateCallState"]
+
+[[permission]]
+identifier = "deny-updateCallState"
+description = "Denies the updateCallState command without any pre-configured scope."
+commands.deny = ["updateCallState"]

@@ -10272,6 +10272,25 @@ function stopNotifVisualizer() {
 
 function playNotificationSound(force) {
     if (!force && localStorage.getItem('notif_background_only') === 'true' && !document.hidden) return;
+    // 2.6 (FEATURE_PLAN.md): the phone's own ringer mode / do-not-disturb state
+    // governs OUR chime too. Android suppresses the *system* notification by
+    // itself, but this cue is WebAudio — SystemUI knows nothing about it, so a
+    // silenced phone still chimed. The profile is re-read before answering (the
+    // ringer can change while we sit backgrounded, which is exactly when this
+    // fires); off-box there is no profile and the helper resolves immediately.
+    // `force` is the Settings "Test sound" button — the user asking to hear it —
+    // and the pure-tone path below stays synchronous for it.
+    var vm = window.VoiceManager;
+    if (!force && vm && typeof vm.notificationSoundAllowed === 'function') {
+        vm.notificationSoundAllowed().then(function (ok) {
+            if (ok) _playNotificationSoundNow();
+        }).catch(function () { _playNotificationSoundNow(); });
+        return;
+    }
+    _playNotificationSoundNow();
+}
+
+function _playNotificationSoundNow() {
     stopNotificationSound();
     var customSoundUrl = _notifCachedUrl || localStorage.getItem('notification_sound_url');
     if (customSoundUrl) {
@@ -10678,6 +10697,12 @@ function isAndroidBox() {
     } catch (_) { return false; }
 }
 
+// Monotonic id for notifications posted through the Android plugin shim
+// (F3): an explicit id is what makes `plugin:notification|cancel` able to
+// remove the card later — the shim's object has no close(). Starts in a range
+// that cannot collide with the call-service notifier's fixed ids (4711/4712).
+var _notifSerial = 0;
+
 function showBrowserNotification(title, body, onClick) {
     // No box-specific branch needed: inside the box the notification plugin's
     // init script has already replaced `window.Notification` with a shim that
@@ -10696,6 +10721,36 @@ function showBrowserNotification(title, body, onClick) {
     // Desktop keeps using the per-user "only when not in the app" preference
     // instead, which is what gates playNotificationSound().
     if (isAndroidBox() && !document.hidden) return;
+
+    var _bridge = window.__TAURI__;
+    var _hasBridge = !!(_bridge && _bridge.core && typeof _bridge.core.invoke === 'function');
+    var _android = isAndroidBox();
+
+    // F3 (FEATURE_PLAN.md) — DESKTOP box: ask Rust for the toast over the
+    // event channel instead of the plugin's shim. tauri-plugin-notification
+    // registers only `notify` on desktop — there is no close/cancel command
+    // at all — so shim toasts piled up in the Windows Action Center database
+    // until the user cleared them: durable OS-held copies of notification
+    // text, exactly the retention class the FBI recovered decrypted Signal
+    // previews from on iOS. The Rust side (`box:notify` → src-toast.rs) shows
+    // the same toast with a fixed tag (replaces, never queues) and an
+    // expiration, so Windows itself expires it out of Action Center. It is an
+    // event — not a command — for the same reason `box:change-server` is:
+    // Tauri refuses app commands to remote origins.
+    if (_hasBridge && !_android && _bridge.event && typeof _bridge.event.emit === 'function') {
+        try {
+            _bridge.event.emit('box:notify', { title: title, body: body, ttl: 10 });
+        } catch (e) {
+            console.warn('box:notify failed:', e);
+        }
+        return;
+    }
+
+    // ANDROID box: post through the shim with an EXPLICIT id so it can be
+    // cancelled below — the shim object has no close(), so without this the
+    // shade (and Android's notification history) accumulated every card the
+    // user had already read.
+    var notifId = (_android && _hasBridge) ? (0x2E000000 + (++_notifSerial)) : 0;
     try {
         // The app's own icon (generated from the single source of truth by
         // `npm run icon`) — not /favicon.ico, which never existed, so every
@@ -10707,8 +10762,10 @@ function showBrowserNotification(title, body, onClick) {
         // The Android drawable is the app mark in silhouette, because Android
         // masks a small icon down to its alpha — the full-colour icon there
         // came out as a shapeless white blob.
-        var notifIcon = isAndroidBox() ? 'ic_notification' : '/icons/icon-192.png';
-        var notif = new Notification(title, { body, icon: notifIcon });
+        var notifIcon = _android ? 'ic_notification' : '/icons/icon-192.png';
+        var opts = { body: body, icon: notifIcon };
+        if (notifId) opts.id = notifId;
+        var notif = new Notification(title, opts);
         if (onClick) {
             var cb = onClick;
             notif.onclick = function () {
@@ -10717,9 +10774,23 @@ function showBrowserNotification(title, body, onClick) {
                 if (this && this.close) this.close();
             };
         }
-        // The plugin shim's notification is a plain object with no close(), so
-        // guard it — otherwise this timer throws on every single notification.
-        setTimeout(function () { if (notif && notif.close) notif.close(); }, 10000);
+        // Retention (F3): remove the OS-held copy shortly after it posts.
+        //  - Android: cancel by id — the shim's object has no close(), and the
+        //    guard below would otherwise throw on every single notification.
+        //  - Browser: real Web Notification close(), which also clears it from
+        //    the OS notification centre.
+        //  - Desktop box never reaches here (box:notify branch above); an
+        //    older cached page without the event bridge degrades to the shim,
+        //    where cancel is simply not registered and the catch is a no-op.
+        var closeAfter = (typeof showBrowserNotification.closeMs === 'number')
+            ? showBrowserNotification.closeMs : 10000;
+        setTimeout(function () {
+            if (notifId && _hasBridge) {
+                _bridge.core.invoke('plugin:notification|cancel', { notifications: [notifId] })
+                    .catch(function () { /* not registered on this platform: fine */ });
+            }
+            if (notif && notif.close) notif.close();
+        }, closeAfter);
     } catch (e) {
         console.warn('Notification failed:', e);
     }
@@ -11310,6 +11381,40 @@ function updateServerBadges() {
     });
 }
 
+// ── 4.6: tray parity (desktop) ──────────────────────────────────────────
+// The desktop tray shows call state and the unread count, and nothing else:
+// only booleans and one integer cross to Rust (see `tray_status` in
+// src-tauri/src/lib.rs). No channel name, no partner name, no nickname — the
+// tray is an OS surface, so it follows the same rule as notifications (R1).
+// Emitted as an event because Tauri refuses app commands to the remote origin,
+// exactly like `box:notify` and `box:change-server`.
+function updateBoxTrayState() {
+    var tauri = window.__TAURI__;
+    if (!tauri || !tauri.event || typeof tauri.event.emit !== 'function') return;
+    // A phone has no tray — skip the IPC entirely there.
+    if (/Android/i.test(navigator.userAgent || '')) return;
+    var cs = null;
+    try {
+        cs = (window.VoiceManager && VoiceManager.trayCallState) ? VoiceManager.trayCallState() : null;
+    } catch (_) { cs = null; }
+    var unread = 0;
+    try {
+        Object.keys(unreadMentionsByChannel || {}).forEach(function (cid) {
+            var info = unreadMentionsByChannel[cid];
+            unread += (info && info.count) || 0;
+        });
+        Object.keys(unreadDms || {}).forEach(function (dmId) { unread += unreadDms[dmId] || 0; });
+    } catch (_) {}
+    try {
+        tauri.event.emit('box:tray-state', {
+            in_call: !!(cs && cs.inCall),
+            muted: !!(cs && cs.muted),
+            deafened: !!(cs && cs.deafened),
+            unread: unread,
+        });
+    } catch (_) {}
+}
+
 function updateChannelBadges() {
     document.querySelectorAll('.channel-item').forEach(function (el) {
         var cid = el.dataset.id;
@@ -11329,6 +11434,8 @@ function updateChannelBadges() {
     if (typeof window.updateCategoryIndicators === 'function') {
         window.updateCategoryIndicators();
     }
+    // 4.6: the unread half of the tray state is computed from these maps.
+    updateBoxTrayState();
 }
 
 // --- Channel Context Menu (Right-click to mute) ---
@@ -11420,6 +11527,42 @@ function showDmStripContextMenu(e) {
     setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
 }
 
+// ── Per-channel screenshot blocking (5.2, FEATURE_PLAN.md) ─────────────
+// The on-device copy of "no screenshots in here": `FLAG_SECURE` via the
+// box-shell plugin. Stored as a plain id list — the ids are metadata the
+// server already holds, and the SET is device-local preference (like mutes).
+function secureChannelIds() {
+    try {
+        var v = JSON.parse(localStorage.getItem('secureChannels') || '[]');
+        return Array.isArray(v) ? v : [];
+    } catch (_) { return []; }
+}
+
+function isSecureChannel(channelId) {
+    return !!channelId && secureChannelIds().indexOf(channelId) !== -1;
+}
+
+function setSecureChannel(channelId, on) {
+    var list = secureChannelIds().filter(function (id) { return id !== channelId; });
+    if (on) list.push(channelId);
+    try { localStorage.setItem('secureChannels', JSON.stringify(list)); } catch (_) {}
+    // Re-apply for whatever is being viewed right now.
+    applySecureCapture(viewMode === 'servers');
+}
+
+// `inChannelView` says whether a text-channel view is on screen: FLAG_SECURE
+// is window-wide, so the flag follows the VIEWED channel. Everything here is
+// a no-op outside the Android box (a desktop screenshot is the user's own
+// OS capture of their own screen — same exposure as the app being visible).
+function applySecureCapture(inChannelView) {
+    var tauri = window.__TAURI__;
+    if (!tauri || !tauri.core || typeof tauri.core.invoke !== 'function') return;
+    if (!/Android/i.test(navigator.userAgent || '')) return;
+    var active = !!inChannelView && isSecureChannel(currentChannelId);
+    tauri.core.invoke('plugin:box-shell|setSecureMode', { active: active })
+        .catch(function (err) { console.warn('[box] setSecureMode failed:', err); });
+}
+
 function showChannelContextMenu(e, channelId, channelName) {
     // Remove any existing context menu
     var existing = document.querySelector('.channel-context-menu');
@@ -11442,6 +11585,23 @@ function showChannelContextMenu(e, channelId, channelName) {
         menu.remove();
     });
     menu.appendChild(chItem);
+
+    // 5.2 (FEATURE_PLAN.md) — per-channel screenshot blocking (FLAG_SECURE).
+    // For the server where "no screenshots" is the point: the pixels on
+    // screen are decrypted by definition, so a screenshot bypasses everything
+    // below the display. Per-channel, never global — a global flag would also
+    // block the user's own screenshots everywhere.
+    var isSecureChannelNow = isSecureChannel(channelId);
+    var secItem = document.createElement('div');
+    secItem.className = 'context-menu-item';
+    secItem.textContent = isSecureChannelNow
+        ? 'Allow screenshots in #' + channelName
+        : 'Block screenshots in #' + channelName;
+    secItem.addEventListener('click', function () {
+        setSecureChannel(channelId, !isSecureChannelNow);
+        menu.remove();
+    });
+    menu.appendChild(secItem);
 
     // Server mute toggle
     if (currentServerId) {
@@ -15879,6 +16039,8 @@ function markChannelRead(channelId) {    // Mark channel as read: clear unread 
 async function selectChannel(channelId, channelName, element) {    markChannelRead(channelId);
 
     currentChannelId = channelId;
+    // 5.2: entering a channel applies its screenshot policy (no-op on desktop).
+    applySecureCapture(true);
 
     document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
     element.classList.add('active');
@@ -19387,6 +19549,8 @@ function renderDmSidebar() {
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
     currentDmChannelId = dmChannelId;
+    // 5.2: a DM view is never a server channel — release any channel policy.
+    applySecureCapture(false);
     // Save last active DM channel so it can be restored after page refresh
     try { localStorage.setItem('last_dm_channel_id', dmChannelId); } catch (_) {}
     // Look up the user's display name
@@ -21781,6 +21945,9 @@ async function loadFriendRequestBadge() {
 }
 
 function updateDmStripBadge() {
+    // 4.6: DM unread feeds the tray too (this runs even when the strip badge
+    // itself is not in the DOM, which is why it comes before the guard).
+    updateBoxTrayState();
     const badge = document.getElementById('dm-strip-badge');
     if (!badge) return;
     const hasNotifications = Object.keys(unreadDms).length > 0 || pendingFriendRequests > 0;

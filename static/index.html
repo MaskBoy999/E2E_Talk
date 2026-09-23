@@ -1131,6 +1131,22 @@
                     <div id="ns-description" style="font-size:12px;color:var(--text-secondary);margin-top:6px">RNNoise + Gate chains the neural model with a noise gate and compressor for the deepest on-device suppression.</div>
                 </div>
                 <div class="settings-group">
+                    <h4>Voice Activation</h4>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
+                        <input type="checkbox" id="voice-speak-only" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Only transmit while you speak
+                    </label>
+                    <p class="settings-hint">Runs the energy gate that is already part of the RNNoise chain: below the speech threshold your mic sends silence instead of your room. Keeps keyboards, TVs and other people off the call and uses less bandwidth. Needs an RNNoise mode — it does nothing with "Browser built-in" or "Off".</p>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:10px">
+                        <input type="checkbox" id="voice-hold-to-talk" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                        Hold to talk (push to talk)
+                    </label>
+                    <p class="settings-hint">Your mic stays closed until you hold a call's mic button, in any call view. Nothing is transmitted while the button is up, and the button lights up for as long as you hold it.</p>
+                    <label class="settings-checkbox-label" style="margin-top:10px;"><span style="font-size:12px;color:var(--text-muted)">Push-to-talk key (desktop box):</span></label>
+                    <input type="text" id="voice-ptt-shortcut" class="modal-input" placeholder="Ctrl+Shift+Space" autocomplete="off" style="margin-top:4px;max-width:200px;">
+                    <p class="settings-hint">A global key, so it talks to the same gate while the app sits in the background. Leave it blank for Ctrl+Shift+Space. It only registers while "Hold to talk" is on.</p>
+                </div>
+                <div class="settings-group">
                     <h4>Hear Yourself (Test Mic)</h4>
                     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
                         <button type="button" id="voice-hear-self-btn" class="btn btn-primary" style="min-width:120px"><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Start Test</button>
@@ -2397,12 +2413,12 @@
 
     <script src="ui-dialog.js?v=1"></script>
     <script src="secure-storage.js?v=3"></script>
-    <script src="voice.js?v=25"></script>
+    <script src="voice.js?v=30"></script>
     <script src="soundboard-pairing.js?v=12"></script>
     <script src="thread_categories_shortcuts.js?v=9"></script>
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=56"></script>
+    <script src="chat.js?v=60"></script>
     <!-- Android shell: immersive system bars, Back closing the top layer, the
          real-vibrator haptic bridge and notification clearing. Inert in a
          browser and on desktop (see the file's header). -->

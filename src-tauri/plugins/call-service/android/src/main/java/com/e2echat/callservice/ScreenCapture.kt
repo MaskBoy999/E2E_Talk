@@ -12,6 +12,7 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.ImageReader
 import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
@@ -212,7 +213,18 @@ class ScreenCapture(private val activity: Activity) {
             width = 2
             height = 2
         }
-        return mgr.createScreenCaptureIntent()
+        // 3.2 (FEATURE_PLAN.md): on Android 14+ ask for the *user choice*
+        // config. That is what makes the system picker offer "a single app"
+        // next to the whole screen — sharing one app instead of everything is
+        // strictly less exposure, and the picker itself is the permission. The
+        // plain intent (full screen for everyone) is all older releases
+        // understand, and `createConfigForDefaultDisplay()` would take the
+        // choice away rather than add it.
+        return if (Build.VERSION.SDK_INT >= 34) {
+            mgr.createScreenCaptureIntent(MediaProjectionConfig.createConfigForUserChoice())
+        } else {
+            mgr.createScreenCaptureIntent()
+        }
     }
 
     /** The user approved the picker: start mirroring into the reader. */

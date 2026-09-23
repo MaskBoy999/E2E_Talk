@@ -231,4 +231,51 @@ test.describe('call diagnostics (Settings → Voice → Advanced)', () => {
 
         await ctx2.close();
     });
+
+    test('per-peer ping / rtt / jitter are reported (1.8)', async ({ page }) => {
+        const ts = Date.now();
+        await mockMedia(page);
+        await registerUser(page, 'diagping_' + ts);
+        await openVoiceDiag(page);
+
+        // Feed the collector a synthetic getStats report. The three latency
+        // numbers come from three different report types, so this pins all of
+        // them: the connection ping from the nominated candidate pair (which
+        // carries no `kind` and is therefore easy to drop by accident), our
+        // outbound RTT from the peer's RTCP receiver report, and inbound
+        // jitter. Numbers only — the panel is in-app and names nothing.
+        await page.evaluate(() => {
+            const S = (window as any).VoiceManager._debug.state;
+            const stats = new Map<string, any>();
+            stats.set('CP1', { type: 'candidate-pair', state: 'succeeded', nominated: true, currentRoundTripTime: 0.042 });
+            stats.set('OUT1', { type: 'outbound-rtp', kind: 'audio', packetsSent: 100, bytesSent: 1000 });
+            stats.set('RIN1', { type: 'remote-inbound-rtp', kind: 'audio', roundTripTime: 0.038 });
+            stats.set('IN1', { type: 'inbound-rtp', kind: 'audio', packetsReceived: 90, packetsLost: 1, bytesReceived: 900, jitter: 0.012 });
+            S.connected = true;
+            S.peers = {
+                fake_peer_uid_1234: {
+                    connectionState: 'connected',
+                    signalingState: 'stable',
+                    getStats: () => Promise.resolve(stats),
+                    getSenders: () => [],
+                    getReceivers: () => [],
+                },
+            };
+        });
+
+        const diag = await page.evaluate(() => (window as any).VoiceManager.getPeerDiag());
+        expect(diag.length).toBe(1);
+        expect(diag[0].pingMs).toBeCloseTo(42, 5);
+        expect(diag[0].senders.audio.rttMs).toBeCloseTo(38, 5);
+        expect(diag[0].receivers.audio.jitterMs).toBeCloseTo(12, 5);
+        expect(diag[0].receivers.audio.loss).toBe(1);
+
+        // And the panel actually paints them.
+        await page.evaluate(() => (window as any).VoiceManager.refreshVoiceDiag());
+        const text = await page.locator('#voice-diag-list').innerText();
+        expect(text).toContain('ping 42 ms');
+        expect(text).toContain('rtt 38 ms');
+        expect(text).toContain('jitter 12 ms');
+        expect(text).not.toContain('fake_peer_uid_1234'); // shortUid truncates, never the raw id
+    });
 });

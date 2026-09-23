@@ -415,6 +415,18 @@
           "markdownDescription": "Denies the stopScreenCapture command without any pre-configured scope."
         },
         {
+          "description": "Enables the updateCallState command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-updateCallState",
+          "markdownDescription": "Enables the updateCallState command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the updateCallState command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-updateCallState",
+          "markdownDescription": "Denies the updateCallState command without any pre-configured scope."
+        },
+        {
           "description": "Enables the updateMedia command without any pre-configured scope.",
           "type": "string",
           "const": "allow-updateMedia",
@@ -427,10 +439,10 @@
           "markdownDescription": "Denies the updateMedia command without any pre-configured scope."
         },
         {
-          "description": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`\n- `allow-enterPip`\n- `allow-pipState`\n- `allow-exitPip`\n- `allow-getAudioProfile`",
+          "description": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-updateCallState`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`\n- `allow-enterPip`\n- `allow-pipState`\n- `allow-exitPip`\n- `allow-getAudioProfile`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`\n- `allow-enterPip`\n- `allow-pipState`\n- `allow-exitPip`\n- `allow-getAudioProfile`"
+          "markdownDescription": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-updateCallState`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`\n- `allow-enterPip`\n- `allow-pipState`\n- `allow-exitPip`\n- `allow-getAudioProfile`"
         }
       ]
     }

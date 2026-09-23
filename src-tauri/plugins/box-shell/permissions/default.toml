@@ -1,5 +1,5 @@
 [default]
-description = """\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n"""
+description = """\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n"""
 # NOTE: the identifiers are spelled exactly as `build.rs`'s tauri-plugin build
 # script generates them (`allow-` + the Kotlin command name, camelCase and all).
 permissions = [
@@ -9,4 +9,11 @@ permissions = [
     "allow-exit",
     "allow-vibrate",
     "allow-clearNotifications",
+    # Call comfort (FEATURE_PLAN.md 6.1/6.2): hold the screen on during a
+    # call, read/report the battery-optimization exemption.
+    "allow-keepScreenOn",
+    "allow-batteryStatus",
+    "allow-batteryRequest",
+    # Per-channel screenshot blocking (FEATURE_PLAN.md 5.2): FLAG_SECURE.
+    "allow-setSecureMode",
 ]

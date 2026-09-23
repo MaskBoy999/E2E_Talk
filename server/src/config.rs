@@ -35,6 +35,14 @@ pub struct Config {
     pub turn_urls: Vec<String>,
     pub turn_username: Option<String>,
     pub turn_password: Option<String>,
+    /// TURN REST shared secret (coturn `use-auth-secret`), env `TURN_SECRET`.
+    /// When set, `/api/voice/turn-config` mints a per-user, time-limited
+    /// credential (HMAC-SHA1 over the username — see `turn_rest_credential`)
+    /// instead of serving the static pair: a leaked credential dies with its
+    /// expiry instead of relaying anyone's traffic until rotation.
+    pub turn_secret: Option<String>,
+    /// Lifetime of a minted TURN credential in seconds, env `TURN_TTL`.
+    pub turn_ttl_secs: u64,
     /// How long a disconnected user's DM-call waiting marker may live before it
     /// is cleared (page refresh, tab close, network drop). A refresh re-joins
     /// within this window; anything longer is treated as "nobody is waiting".
@@ -164,6 +172,11 @@ impl Config {
                 .unwrap_or_default(),
             turn_username: load_optional_env("TURN_USERNAME"),
             turn_password: load_optional_env("TURN_PASSWORD"),
+            turn_secret: load_optional_env("TURN_SECRET"),
+            turn_ttl_secs: std::env::var("TURN_TTL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3600),
             voice_wait_grace_secs: std::env::var("VOICE_WAIT_GRACE_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())

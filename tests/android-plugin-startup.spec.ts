@@ -193,6 +193,24 @@ test.describe('Android plugin start-up safety', () => {
         ).toBe(true);
     });
 
+    test('the screen-share picker offers a single app on Android 14+ (3.2)', () => {
+        // A bare createScreenCaptureIntent() means "the whole screen" on every
+        // release. The *user choice* config is what makes the system picker
+        // offer a single app next to it, and sharing one app is strictly less
+        // exposure than sharing everything (FEATURE_PLAN.md 3.2). Pinned in
+        // source because the difference is invisible until a real phone.
+        expect(
+            /createScreenCaptureIntent\(MediaProjectionConfig\.createConfigForUserChoice\(\)\)/.test(SCREEN_KT),
+            'the capture intent must request the user-choice config'
+        ).toBe(true);
+        expect(
+            /MediaProjectionConfig\.createConfigForDefaultDisplay/.test(SCREEN_KT),
+            'the default-display config would take the choice away'
+        ).toBe(false);
+        // …and the new argument only exists on 34+, so it stays gated.
+        expect(/SDK_INT\s*>=\s*34/.test(SCREEN_KT)).toBe(true);
+    });
+
     test('androidx.activity is compileOnly, so the app version is not bumped', () => {
         // It is only needed for the ActivityResult *type*; the app always has
         // the artifact at runtime (Tauri's own PluginManager uses it). Declaring

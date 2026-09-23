@@ -1,6 +1,9 @@
 const COMMANDS: &[&str] = &[
     "start",
     "updateMedia",
+    // 1.1: refresh the ongoing notification's Mute/Deafen action labels from
+    // the page's real state (CallForegroundService re-posts with them).
+    "updateCallState",
     "stop",
     // Native screen capture (Android WebView has no getDisplayMedia) — see
     // android/src/main/java/com/e2echat/callservice/ScreenCapture.kt.

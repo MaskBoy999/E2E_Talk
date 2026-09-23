@@ -9,6 +9,7 @@ not in the foreground.
 
 - `allow-start`
 - `allow-updateMedia`
+- `allow-updateCallState`
 - `allow-stop`
 - `allow-incoming-call`
 - `allow-cancel-incoming`
@@ -284,6 +285,32 @@ Enables the stopScreenCapture command without any pre-configured scope.
 <td>
 
 Denies the stopScreenCapture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:allow-updateCallState`
+
+</td>
+<td>
+
+Enables the updateCallState command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-updateCallState`
+
+</td>
+<td>
+
+Denies the updateCallState command without any pre-configured scope.
 
 </td>
 </tr>

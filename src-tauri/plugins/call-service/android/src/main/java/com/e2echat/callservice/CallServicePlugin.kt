@@ -41,6 +41,28 @@ class IncomingCallArgs {
      * app's default ring pattern is used, so the ring still buzzes.
      */
     var vibratePattern: List<Int>? = null
+
+    /**
+     * F2 (FEATURE_PLAN.md): honour the page's "hide message content in
+     * notifications" preference (notifContentHidden). When true, the ring is
+     * posted WITHOUT the caller's name and at lock-screen visibility PRIVATE,
+     * so the identity never reaches the lock screen or Android's notification
+     * history — the durable OS-held copies the FBI recovered Signal previews
+     * from. Null/absent (older cached page) keeps the named ring.
+     */
+    var hideIdentity: Boolean? = null
+}
+
+/**
+ * `updateCallState` — the current mute/deafen flags (for the ongoing
+ * notification's action labels) plus the media types, which the service
+ * re-applies alongside the labels.
+ */
+@InvokeArg
+class UpdateCallStateArgs {
+    var muted: Boolean? = null
+    var deafened: Boolean? = null
+    var mediaTypes: List<String>? = null
 }
 
 /** `enterPip` — the tile's aspect ratio, so the PiP window has no black bars. */
@@ -130,6 +152,28 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 android.util.Log.w(SCREEN_TAG, "could not deliver the decline: ${e.message}")
             }
         }
+
+        /**
+         * Called from [CallActionReceiver] when the user taps Mute / Deafen /
+         * Hang up on the ongoing call notification (1.1). `action` is one of
+         * three fixed strings chosen by the receiver — never free-form input.
+         */
+        fun deliverCallAction(action: String) {
+            try {
+                instance?.get()?.sendCallActionToPage(action)
+            } catch (e: Exception) {
+                android.util.Log.w(SCREEN_TAG, "could not deliver the call action: ${e.message}")
+            }
+        }
+
+        /** Same hand-off, for "Answer" tapped on the incoming-call ring (1.1). */
+        fun deliverIncomingCallAnswer(dmChannelId: String) {
+            try {
+                instance?.get()?.sendAnswerToPage(dmChannelId)
+            } catch (e: Exception) {
+                android.util.Log.w(SCREEN_TAG, "could not deliver the answer: ${e.message}")
+            }
+        }
     }
 
     init {
@@ -180,6 +224,51 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /**
+     * Forward a notification action tap to the page
+     * (`window.__e2eCallAction("mute|deafen|hangup")`). Same delivery rules as
+     * [sendDeclineToPage]: runs on the UI thread without the app in the
+     * foreground, and a stale tap is filtered out by the page's own guards.
+     */
+    private fun sendCallActionToPage(action: String) {
+        val webView = webViewRef?.get() ?: return
+        val arg = jsStringLiteral(action)
+        try {
+            webView.post {
+                try {
+                    webView.evaluateJavascript(
+                        "window.__e2eCallAction && window.__e2eCallAction(" + arg + ")",
+                        null
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.w(SCREEN_TAG, "call action JS failed: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(SCREEN_TAG, "could not reach the page: ${e.message}")
+        }
+    }
+
+    /** Forward an "Answer" tap (`window.__e2eAcceptIncomingCall`). */
+    private fun sendAnswerToPage(dmChannelId: String) {
+        val webView = webViewRef?.get() ?: return
+        val arg = jsStringLiteral(dmChannelId)
+        try {
+            webView.post {
+                try {
+                    webView.evaluateJavascript(
+                        "window.__e2eAcceptIncomingCall && window.__e2eAcceptIncomingCall(" + arg + ")",
+                        null
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.w(SCREEN_TAG, "answer JS failed: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(SCREEN_TAG, "could not reach the page: ${e.message}")
+        }
+    }
+
     @Command
     fun start(invoke: Invoke) {
         val args = invoke.parseArgs(StartArgs::class.java)
@@ -206,6 +295,36 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             // call started, which Android forbids. The call still works while the
             // screen is on; report it so the JS side can log/toast it.
             invoke.reject("Could not start the call service: ${e.message}")
+        }
+    }
+
+    /**
+     * 1.1 (FEATURE_PLAN.md): refresh the ongoing call notification's action
+     * labels (Mute/Unmute, Deafen/Undeafen) from the page's real state, and
+     * re-apply the foreground-service types with it so a state refresh can
+     * never lower them. Sent on every local mute/deafen change and on join.
+     */
+    @Command
+    fun updateCallState(invoke: Invoke) {
+        val args = invoke.parseArgs(UpdateCallStateArgs::class.java)
+        val intent = Intent(activity, CallForegroundService::class.java).apply {
+            action = CallForegroundService.ACTION_UPDATE
+            putExtra(CallForegroundService.EXTRA_MUTED, args.muted == true)
+            putExtra(CallForegroundService.EXTRA_DEAFENED, args.deafened == true)
+            putStringArrayListExtra(
+                CallForegroundService.EXTRA_MEDIA_TYPES,
+                ArrayList(args.mediaTypes ?: listOf("audio"))
+            )
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(intent)
+            } else {
+                activity.startService(intent)
+            }
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Could not update the call state: ${e.message}")
         }
     }
 
@@ -349,7 +468,8 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 args.dmChannelId ?: "",
                 // `List<Int>` has no toLongArray() — every pattern is in ms, well
                 // inside Int, and VibrationEffect wants longs.
-                args.vibratePattern?.map { it.toLong() }?.toLongArray() ?: DEFAULT_RING_PATTERN
+                args.vibratePattern?.map { it.toLong() }?.toLongArray() ?: DEFAULT_RING_PATTERN,
+                args.hideIdentity == true
             )
             invoke.resolve()
         } catch (e: Exception) {
