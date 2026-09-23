@@ -309,6 +309,64 @@ test.describe('native (Android) picture-in-picture', () => {
         expect(state.wrap).toBe(false);
         expect(state.asked).toBe(true);
     });
+
+    test('a pipState false during the pin transition does not strand the app', async ({ page }) => {
+        // Regression: `enterPictureInPictureMode()` answers `true` as soon as
+        // the task is pinned on the system side, but the activity's own
+        // configuration — which `Pip.isActive` reads — only flips once the
+        // windowing transition has run, which on a real device can outlast
+        // several 400 ms poll ticks. One `inPip:false` from that lag used to
+        // tear the tile down AND stop the poll with it, so the window finished
+        // opening onto the raw app with no chance of recovery: exactly the
+        // "PiP opens a small portion of the app and is stuck" report.
+        const user = unique('apipg');
+        await installAndroidBridge(page, {
+            'plugin:call-service|enterPip': { inPip: true },
+            // The transition has not landed yet: every read says "not in PiP".
+            'plugin:call-service|pipState': { inPip: false },
+        });
+        await androidWebView(page);
+        await register(page, user);
+        await installPatternTile(page);
+
+        const started = await page.evaluate(() =>
+            (window as any).VoiceManager.startAndroidPiP((window as any).__pipTile, 'pip-user', 'camera')
+        );
+        expect(started).toBe(true);
+
+        // Several poll ticks land inside the entry grace while pipState still
+        // says false — none of them may strip the app.
+        await page.waitForTimeout(1400);
+        const during = await page.evaluate(() => ({
+            active: (window as any).VoiceManager.isAndroidPipActive(),
+            cls: document.body.classList.contains('e2e-pip-active'),
+            wrap: !!document.querySelector('.e2e-pip-wrap'),
+        }));
+        expect(during, 'the entry-lag false must not tear the session down').toEqual({
+            active: true,
+            cls: true,
+            wrap: true,
+        });
+
+        // The transition lands: the open window is confirmed...
+        await page.evaluate(() => {
+            (window as any).__bridgeReplies['plugin:call-service|pipState'] = { inPip: true };
+        });
+        await page.waitForTimeout(900);
+        expect(await page.evaluate(() => (window as any).VoiceManager.isAndroidPipActive())).toBe(true);
+
+        // ...and when the user closes the window with the system button, the
+        // session still ends (two consecutive falses, so a flicker at the edge
+        // of a transition cannot fake a close either).
+        await page.evaluate(() => {
+            (window as any).__bridgeReplies['plugin:call-service|pipState'] = { inPip: false };
+        });
+        await expect
+            .poll(() => page.evaluate(() => (window as any).VoiceManager.isAndroidPipActive()), { timeout: 5000 })
+            .toBe(false);
+        expect(await page.evaluate(() => document.body.classList.contains('e2e-pip-active'))).toBe(false);
+        expect(await page.evaluate(() => document.querySelector('.e2e-pip-wrap') === null)).toBe(true);
+    });
 });
 
 test.describe('the phone decides whether the app makes a noise', () => {

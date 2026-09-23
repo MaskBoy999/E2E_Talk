@@ -5532,16 +5532,49 @@
         setTimeout(_paintAndroidPip, 250);
     }
 
+    // How long after entering PiP an `inPip:false` read is treated as "the pin
+    // transition has not landed yet" rather than "the user closed the window".
+    // `enterPictureInPictureMode()` answers `true` as soon as the task is pinned
+    // on the system side, but `Pip.isActive` reads
+    // `activity.isInPictureInPictureMode()`, which reflects the activity's
+    // *delivered configuration* — that only flips once the system's windowing
+    // transition has run. On a real device that lag can outlast several 400 ms
+    // ticks, and tearing the tile down on one of them stranded the app: the
+    // window finished opening onto the raw app itself, with the poll — and with
+    // it every chance of recovery — already stopped.
+    var _ANDROID_PIP_ENTRY_GRACE_MS = 2000;
+
     function _androidPipPollStart() {
         _androidPipPollStop();
         // Polled rather than callback-driven: the user closes the PiP window with
         // the system's own button, which we get no event for, and PiP *pauses* the
         // activity — the worst moment to depend on a JS callback arriving. The
         // separate resize listener handles the geometry.
+        //
+        // A `false` only counts as "closed" once the session has either been
+        // confirmed open (a real close always follows the window being seen) or
+        // the entry grace above has expired (a system that accepted the request
+        // but never reports open must not leave the app stripped down forever),
+        // and then only twice in a row — a single flickering read at the edge of
+        // the transition must not strip the app out from under an open window.
+        var enteredAt = Date.now();
+        var seenOpen = false;
+        var falseStreak = 0;
         _androidPipPoll = setInterval(function () {
             if (!_androidPipWrap) { _androidPipPollStop(); return; }
             _pipInvoke('pipState').then(function (res) {
-                if (!res || res.inPip) return;
+                if (!_androidPipWrap) return;
+                if (res && res.inPip) {
+                    seenOpen = true;
+                    falseStreak = 0;
+                    return;
+                }
+                if (!seenOpen && (Date.now() - enteredAt) < _ANDROID_PIP_ENTRY_GRACE_MS) {
+                    falseStreak = 0;
+                    return;
+                }
+                falseStreak++;
+                if (falseStreak < 2) return;
                 _teardownAndroidPiP();
             }).catch(function () {});
         }, 400);
