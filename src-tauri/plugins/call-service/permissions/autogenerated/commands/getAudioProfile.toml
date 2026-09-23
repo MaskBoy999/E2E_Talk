@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-getAudioProfile"
+description = "Enables the getAudioProfile command without any pre-configured scope."
+commands.allow = ["getAudioProfile"]
+
+[[permission]]
+identifier = "deny-getAudioProfile"
+description = "Denies the getAudioProfile command without any pre-configured scope."
+commands.deny = ["getAudioProfile"]

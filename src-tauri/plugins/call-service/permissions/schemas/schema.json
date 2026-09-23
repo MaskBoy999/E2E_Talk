@@ -307,6 +307,42 @@
           "markdownDescription": "Denies the cancelIncoming command without any pre-configured scope."
         },
         {
+          "description": "Enables the enterPip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-enterPip",
+          "markdownDescription": "Enables the enterPip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the enterPip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-enterPip",
+          "markdownDescription": "Denies the enterPip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the exitPip command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-exitPip",
+          "markdownDescription": "Enables the exitPip command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the exitPip command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-exitPip",
+          "markdownDescription": "Denies the exitPip command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the getAudioProfile command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-getAudioProfile",
+          "markdownDescription": "Enables the getAudioProfile command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the getAudioProfile command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-getAudioProfile",
+          "markdownDescription": "Denies the getAudioProfile command without any pre-configured scope."
+        },
+        {
           "description": "Enables the incomingCall command without any pre-configured scope.",
           "type": "string",
           "const": "allow-incoming-call",
@@ -317,6 +353,18 @@
           "type": "string",
           "const": "deny-incoming-call",
           "markdownDescription": "Denies the incomingCall command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pipState command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pipState",
+          "markdownDescription": "Enables the pipState command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pipState command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pipState",
+          "markdownDescription": "Denies the pipState command without any pre-configured scope."
         },
         {
           "description": "Enables the start command without any pre-configured scope.",
@@ -379,10 +427,10 @@
           "markdownDescription": "Denies the updateMedia command without any pre-configured scope."
         },
         {
-          "description": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`",
+          "description": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`\n- `allow-enterPip`\n- `allow-pipState`\n- `allow-exitPip`\n- `allow-getAudioProfile`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`"
+          "markdownDescription": "Keep an active voice call alive while the screen is off or the app is\nbackgrounded (start/stop the Android foreground service), and raise the\nfull-screen incoming-call notification when a call arrives while the app is\nnot in the foreground.\n\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-updateMedia`\n- `allow-stop`\n- `allow-incoming-call`\n- `allow-cancel-incoming`\n- `allow-startScreenCapture`\n- `allow-stopScreenCapture`\n- `allow-enterPip`\n- `allow-pipState`\n- `allow-exitPip`\n- `allow-getAudioProfile`"
         }
       ]
     }

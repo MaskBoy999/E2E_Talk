@@ -3,6 +3,7 @@ package com.e2echat.callservice
 import android.app.Activity
 import android.content.Intent
 import android.os.Build
+import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
@@ -10,7 +11,9 @@ import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.lang.ref.WeakReference
 
 @InvokeArg
 class StartArgs {
@@ -29,6 +32,21 @@ class StartArgs {
 class IncomingCallArgs {
     var callerName: String? = null
     var dmChannelId: String? = null
+
+    /**
+     * The incoming-call vibration, in `navigator.vibrate` shape
+     * `[buzz, pause, buzz, …]` ms — Settings → Voice → Haptics. The notification
+     * channel is created from it, because a channel's vibration pattern is fixed
+     * at creation (see IncomingCallNotifier). Null means an older page: the
+     * app's default ring pattern is used, so the ring still buzzes.
+     */
+    var vibratePattern: List<Int>? = null
+}
+
+/** `enterPip` — the tile's aspect ratio, so the PiP window has no black bars. */
+@InvokeArg
+class PipArgs {
+    var aspectRatio: Double? = null
 }
 
 /**
@@ -76,9 +94,90 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
      */
     private val screenCapture by lazy { ScreenCapture(activity) }
 
-    private companion object {
+    companion object {
         /** Same tag as ScreenCapture.kt, so one logcat filter shows the flow. */
-        const val SCREEN_TAG = "E2EScreenCapture"
+        private const val SCREEN_TAG = "E2EScreenCapture"
+
+        /** The app's default ring cue (Settings → Voice → Haptics default). */
+        private val DEFAULT_RING_PATTERN = longArrayOf(150, 80, 150)
+
+        /**
+         * The live plugin instance, so the incoming-call notification's **Decline**
+         * action can reach the page.
+         *
+         * Declining is delivered to a `BroadcastReceiver`, which Tauri constructs
+         * itself and which therefore has no plugin reference. Without a way back
+         * to the page the action can only dismiss the notification — which is
+         * exactly what it used to do, leaving the caller ringing.
+         *
+         * A `WeakReference` because the plugin belongs to the activity: if the app
+         * is torn down the notification goes with it, and a strong reference here
+         * would keep a dead plugin (and its activity) alive instead.
+         */
+        @Volatile
+        private var instance: WeakReference<CallServicePlugin>? = null
+
+        /**
+         * Called from [IncomingCallActionReceiver] when the user declines from the
+         * notification. Safe to call at any time: with no live plugin (or no live
+         * page) it is a no-op, and it never throws — an exception escaping a
+         * receiver's `onReceive` can take the process down.
+         */
+        fun deliverIncomingCallDecline(dmChannelId: String) {
+            try {
+                instance?.get()?.sendDeclineToPage(dmChannelId)
+            } catch (e: Exception) {
+                android.util.Log.w(SCREEN_TAG, "could not deliver the decline: ${e.message}")
+            }
+        }
+    }
+
+    init {
+        // Registering a reference: nothing here can throw, so this stays off the
+        // plugin-construction crash path (see screenCapture below).
+        instance = WeakReference(this)
+    }
+
+    /**
+     * The page's WebView, kept so a notification action delivered while the app is
+     * backgrounded can call into it. Set by Tauri right after the webview exists.
+     */
+    @Volatile
+    private var webViewRef: WeakReference<WebView>? = null
+
+    override fun load(webView: WebView) {
+        webViewRef = WeakReference(webView)
+    }
+
+    /**
+     * End the ring, in the page, for a decline tapped in the notification shade.
+     *
+     * The socket — and therefore the call — lives in the WebView, so the decline
+     * has to be executed there; `static/voice.js` exposes
+     * `window.__e2eDeclineIncomingCall` for exactly this. `evaluateJavascript`
+     * runs on the UI thread and does not need the app to be in the foreground, and
+     * a manifest-declared receiver is delivered to a cached process (Android
+     * unfreezes it for `onReceive`), so this works while the app is in the
+     * background. The page guards on there actually being an incoming call, so a
+     * stray tap on a dead notification does nothing.
+     */
+    private fun sendDeclineToPage(dmChannelId: String) {
+        val webView = webViewRef?.get() ?: return
+        val arg = jsStringLiteral(dmChannelId)
+        try {
+            webView.post {
+                try {
+                    webView.evaluateJavascript(
+                        "window.__e2eDeclineIncomingCall && window.__e2eDeclineIncomingCall(" + arg + ")",
+                        null
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.w(SCREEN_TAG, "decline JS failed: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(SCREEN_TAG, "could not reach the page: ${e.message}")
+        }
     }
 
     @Command
@@ -247,7 +346,10 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             IncomingCallNotifier.show(
                 activity,
                 args.callerName ?: "Someone",
-                args.dmChannelId ?: ""
+                args.dmChannelId ?: "",
+                // `List<Int>` has no toLongArray() — every pattern is in ms, well
+                // inside Int, and VibrationEffect wants longs.
+                args.vibratePattern?.map { it.toLong() }?.toLongArray() ?: DEFAULT_RING_PATTERN
             )
             invoke.resolve()
         } catch (e: Exception) {
@@ -264,4 +366,86 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject("Could not cancel the incoming call: ${e.message}")
         }
     }
+
+    /**
+     * Shrink the activity into a picture-in-picture window — the Android route to
+     * the desktop box's `requestPictureInPicture()`, which the system WebView does
+     * not implement. See [Pip].
+     *
+     * Resolves `{ inPip }` rather than rejecting: "the system would not give us a
+     * PiP window" is a normal outcome (an OEM may refuse, or the user may have it
+     * off for the app), and the page needs to put the tile back either way.
+     */
+    @Command
+    fun enterPip(invoke: Invoke) {
+        val args = try {
+            invoke.parseArgs(PipArgs::class.java)
+        } catch (_: Exception) {
+            PipArgs()
+        }
+        val entered = Pip.enter(activity, args.aspectRatio ?: (16.0 / 9.0))
+        val out = JSObject()
+        out.put("inPip", entered)
+        invoke.resolve(out)
+    }
+
+    /**
+     * Whether the activity is in a PiP window *right now*. The page polls this
+     * while a session is up: the user can close the window with the system's own
+     * button, which is not something we get a callback for, and PiP pauses the
+     * activity (so a JS callback is not guaranteed to run at that moment).
+     */
+    @Command
+    fun pipState(invoke: Invoke) {
+        val out = JSObject()
+        out.put("inPip", Pip.isActive(activity))
+        invoke.resolve(out)
+    }
+
+    /** Best-effort "leave PiP" — see [Pip.exit]. Always resolves. */
+    @Command
+    fun exitPip(invoke: Invoke) {
+        try {
+            Pip.exit(activity)
+        } catch (e: Exception) {
+            android.util.Log.w(SCREEN_TAG, "exitPip failed: ${e.message}")
+        }
+        invoke.resolve()
+    }
+
+    /**
+     * The phone's ringer mode + do-not-disturb state.
+     *
+     * The notification is already subject to both (the system owns its channel),
+     * but the app rings *itself* through WebAudio as well, and WebAudio has no idea
+     * a phone can be on silent. `static/voice.js` reads this before it rings so an
+     * incoming call can't sound off on a muted phone. See [AudioProfile].
+     */
+    @Command
+    fun getAudioProfile(invoke: Invoke) {
+        invoke.resolve(AudioProfile.read(activity))
+    }
+}
+
+/**
+ * A JS string literal for `evaluateJavascript`, escaped here rather than via a
+ * JSON dependency so a hostile/odd channel id can never break out of the literal
+ * (or terminate it early with a stray `</script>`).
+ */
+private fun jsStringLiteral(s: String): String {
+    val sb = StringBuilder("\"")
+    for (c in s) {
+        when {
+            c == '\\' -> sb.append("\\\\")
+            c == '"' -> sb.append("\\\"")
+            c == '\n' -> sb.append("\\n")
+            c == '\r' -> sb.append("\\r")
+            c == '\u2028' -> sb.append("\\u2028")
+            c == '\u2029' -> sb.append("\\u2029")
+            c == '<' -> sb.append("\\u003c")
+            c.code < 0x20 -> sb.append(String.format("\\u%04x", c.code))
+            else -> sb.append(c)
+        }
+    }
+    return sb.append("\"").toString()
 }

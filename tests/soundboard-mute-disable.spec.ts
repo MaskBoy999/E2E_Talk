@@ -112,6 +112,88 @@ async function becomeFriends(page1: any, page2: any, token1: string, token2: str
     expect(acc.ok()).toBeTruthy();
 }
 
+/**
+ * Bring up a REAL two-user server voice room: u1 owns the server, u2 is
+ * invited, and both are sitting in the voice channel — the minimum state in
+ * which the member right-click menu (and its soundboard buttons) exists.
+ * Returns ready-to-use pages plus any uncaught page errors.
+ */
+async function twoUsersInServerVoice(context: any, tag: string) {
+    const ts = Date.now();
+    const ctx1 = await context.browser()!.newContext();
+    const page1 = await ctx1.newPage();
+    const ctx2 = await context.browser()!.newContext();
+    const page2 = await ctx2.newPage();
+
+    const errors: string[] = [];
+    page1.on('pageerror', (e: Error) => errors.push('p1: ' + e.message));
+    page2.on('pageerror', (e: Error) => errors.push('p2: ' + e.message));
+
+    const u1 = await registerUser(page1, tag + '1_' + ts);
+    const u2 = await registerUser(page2, tag + '2_' + ts);
+    await becomeFriends(page1, page2, u1.token, u2.token);
+    await waitForWs(page1);
+    await waitForWs(page2);
+
+    const { serverId, voiceChannelId } = await createServerWithVoiceChannel(page1);
+
+    const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const code = Array.from({ length: 16 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
+    const invRes = await page1.request.post(`${BASE}/api/servers/${serverId}/invite`, {
+        headers: { Authorization: `Bearer ${u1.token}`, 'Content-Type': 'application/json' },
+        data: { invite_code: code },
+    });
+    expect(invRes.ok()).toBeTruthy();
+    const joinRes = await page2.request.post(`${BASE}/api/invites/join`, {
+        headers: { Authorization: `Bearer ${u2.token}`, 'Content-Type': 'application/json' },
+        data: { code: code },
+    });
+    expect(joinRes.ok()).toBeTruthy();
+
+    await page1.click(`.server-icon[data-id="${serverId}"]`);
+    await page1.waitForSelector(`.channel-item[data-id="${voiceChannelId}"]`, { timeout: 10000 });
+    await page1.click(`.channel-item[data-id="${voiceChannelId}"]`);
+    await page1.waitForSelector('#voice-bar', { timeout: 10000 });
+
+    await page2.reload();
+    await page2.waitForSelector('#settings-btn', { state: 'visible', timeout: 15000 });
+    await page2.click(`.server-icon[data-id="${serverId}"]`);
+    await page2.waitForSelector(`.channel-item[data-id="${voiceChannelId}"]`, { timeout: 10000 });
+    await page2.click(`.channel-item[data-id="${voiceChannelId}"]`);
+    await page2.waitForSelector('#voice-bar', { timeout: 10000 });
+
+    await page1.waitForTimeout(2000);
+    return { ctx1, page1, ctx2, page2, u1, u2, serverId, voiceChannelId, errors };
+}
+
+/**
+ * The member rows live in the server voice popup, so it has to be open before
+ * a row can be right-clicked. Uses the same toggleServerPopup() affordance the
+ * other soundboard specs drive.
+ */
+async function ensureServerVoicePopup(page: any) {
+    const open = await page.evaluate(() => {
+        const p = document.getElementById('voice-popup');
+        return !!p && p.style.display !== 'none';
+    });
+    if (!open) await page.evaluate(() => (window as any).VoiceManager.toggleServerPopup());
+    await page.waitForTimeout(400);
+}
+
+/** Right-click another member's row and wait for the real volume menu. */
+async function openMemberVolumeMenu(page: any, uid: string) {
+    await ensureServerVoicePopup(page);
+    const row = page.locator(`.voice-member-row[data-uid="${uid}"]`).first();
+    await expect(row).toBeVisible({ timeout: 15000 });
+    const box = await row.boundingBox();
+    await row.dispatchEvent('contextmenu', {
+        clientX: (box?.x || 100) + 10,
+        clientY: (box?.y || 100) + 10,
+        bubbles: true,
+    });
+    await page.waitForSelector('#volume-menu', { state: 'visible', timeout: 10000 });
+}
+
 // ──────────────────────────────────────────────
 // Soundboard Mute/Disable: Unit Tests
 // ──────────────────────────────────────────────
@@ -352,88 +434,143 @@ test.describe('Soundboard Mute/Disable (integration)', () => {
         expect(result.removed).toBe(true);
     });
 
-    test('volume menu button active class and text when muted', async ({ page }) => {
-        test.setTimeout(60000);
-        const username = unique('sb_int4');
-        await registerUser(page, username);
-        await waitForWs(page);
+});
 
-        const result = await page.evaluate(() => {
-            const testUid = 'active-class-user';
+// ──────────────────────────────────────────────
+// Soundboard member-menu buttons (two-user)
+// ──────────────────────────────────────────────
+//
+// These two used to build the expected button label as a LOCAL STRING in the
+// test body (`'✓ 🔊 Unmute Soundboard'`) and assert on that literal — they
+// passed no matter what the UI rendered, which is how an emoji→icon migration
+// slipped through them. They now open the real member menu in a real voice
+// room and read/click the real button the user sees.
 
-            // Before muting
-            const beforeMuted = (window as any)._sbMutedList.indexOf(testUid) === -1;
+test.describe('Soundboard member-menu buttons (two-user)', () => {
 
-            // Mute
-            (window as any)._sbToggleMuteUser(testUid);
-            const isMuted = (window as any)._sbMutedList.indexOf(testUid) !== -1;
+    test('soundboard mute button flips in place in the member menu (no reopen)', async ({ context }) => {
+        test.setTimeout(180000);
+        const room = await twoUsersInServerVoice(context, 'sb_menu_mute_');
+        const { page1, u2 } = room;
 
-            // Button text simulation
-            const buttonTextOn = isMuted ? '✓ 🔊 Unmute Soundboard' : '🔇 Mute Soundboard';
-            const buttonClassOn = 'volume-menu-btn' + (isMuted ? ' active' : '');
+        await openMemberVolumeMenu(page1, u2.user.id);
 
-            // Unmute
-            (window as any)._sbToggleMuteUser(testUid);
-            const isUnmuted = (window as any)._sbMutedList.indexOf(testUid) === -1;
+        // Sample, click, re-sample the SAME node. Keeping the node reference is
+        // the whole point: a reopen would hide the bug this guards against
+        // (the on/off indicator only appearing after closing and reopening).
+        const probe = await page1.evaluate((uid: string) => {
+            const btns = Array.from(document.querySelectorAll('#volume-menu .volume-menu-btn')) as HTMLElement[];
+            const btn = btns.find((b) => /^(Un)?Mute Soundboard$/.test((b.textContent || '').trim()));
+            if (!btn) {
+                return { found: false, saw: btns.map((b) => (b.textContent || '').trim()) } as any;
+            }
+            // The rendered glyph, read from the real sprite references. Comparing
+            // ids instead of innerHTML avoids HTML-serialisation noise (`<use/>`
+            // vs `<use></use>`) while still proving an icon is present.
+            const iconIds = () =>
+                Array.from(btn.querySelectorAll('svg use')).map((u) => u.getAttribute('href'));
+            const snap = () => ({
+                active: btn.classList.contains('active'),
+                icons: iconIds(),
+                text: (btn.textContent || '').trim(),
+                muted: ((window as any)._sbMutedList || []).indexOf(uid) !== -1,
+            });
+            const before = snap();
+            btn.click();
+            const afterOn = {
+                ...snap(),
+                menuStillOpen: (() => {
+                    const m = document.getElementById('volume-menu') as HTMLElement | null;
+                    return !!m && getComputedStyle(m).display !== 'none';
+                })(),
+            };
+            btn.click();
+            const afterOff = snap();
+            return { found: true, before, afterOn, afterOff } as any;
+        }, u2.user.id);
 
-            // After unmuting, the button offers MUTING again (user is not muted)
-            const buttonTextOff = isUnmuted ? '🔇 Mute Soundboard' : '✓ 🔊 Unmute Soundboard';
-            const buttonClassOff = 'volume-menu-btn' + (isUnmuted ? '' : ' active');
+        expect(
+            probe.found,
+            `no soundboard mute button in the member menu; saw ${JSON.stringify(probe.saw)}`
+        ).toBe(true);
+        // Idle: offers muting, no indicator, a real ICON (never emoji text).
+        expect(probe.before.muted).toBe(false);
+        expect(probe.before.active).toBe(false);
+        expect(probe.before.text).toBe('Mute Soundboard');
+        expect(probe.before.icons).toEqual(['#icon-volume-off']);
+        // Clicked: indicator turns ON in the same node while the menu stays open.
+        expect(probe.afterOn.muted).toBe(true);
+        expect(probe.afterOn.active).toBe(true);
+        expect(probe.afterOn.text).toBe('Unmute Soundboard');
+        expect(probe.afterOn.icons).toEqual(['#icon-check', '#icon-volume-on']);
+        expect(probe.afterOn.menuStillOpen).toBe(true);
+        // Clicked again: back to offering a mute.
+        expect(probe.afterOff.muted).toBe(false);
+        expect(probe.afterOff.active).toBe(false);
+        expect(probe.afterOff.text).toBe('Mute Soundboard');
+        expect(probe.afterOff.icons).toEqual(['#icon-volume-off']);
 
-            return { beforeMuted, isMuted, buttonTextOn, buttonClassOn, isUnmuted, buttonTextOff, buttonClassOff };
-        });
-
-        expect(result.beforeMuted).toBe(true);
-        expect(result.isMuted).toBe(true);
-        expect(result.buttonTextOn).toContain('✓');
-        expect(result.buttonTextOn).toContain('Unmute');
-        expect(result.buttonClassOn).toContain('active');
-        expect(result.isUnmuted).toBe(true);
-        expect(result.buttonTextOff).toContain('🔇');
-        expect(result.buttonTextOff).toContain('Mute');
-        expect(result.buttonClassOff).not.toContain('active');
+        expect(room.errors).toEqual([]);
+        await room.ctx1.close();
+        await room.ctx2.close();
     });
 
-    test('volume menu button active class and text when disabled', async ({ page }) => {
-        test.setTimeout(60000);
-        const username = unique('sb_int5');
-        await registerUser(page, username);
-        await waitForWs(page);
+    test('soundboard disable button flips in place in the member menu (owner)', async ({ context }) => {
+        test.setTimeout(180000);
+        const room = await twoUsersInServerVoice(context, 'sb_menu_dis_');
+        const { page1, u2 } = room;
 
-        const result = await page.evaluate(() => {
-            const testUid = 'disable-class-user';
+        await openMemberVolumeMenu(page1, u2.user.id);
 
-            // Before disabling
-            const beforeDisabled = !(window as any)._sbDisabledUsers.includes(testUid);
+        const probe = await page1.evaluate((uid: string) => {
+            const btns = Array.from(document.querySelectorAll('#volume-menu .volume-menu-btn')) as HTMLElement[];
+            const btn = btns.find((b) => /^(En|Dis)able Soundboard$/.test((b.textContent || '').trim()));
+            if (!btn) {
+                return { found: false, saw: btns.map((b) => (b.textContent || '').trim()) } as any;
+            }
+            const iconIds = () =>
+                Array.from(btn.querySelectorAll('svg use')).map((u) => u.getAttribute('href'));
+            const snap = () => ({
+                active: btn.classList.contains('active'),
+                icons: iconIds(),
+                text: (btn.textContent || '').trim(),
+                disabled: ((window as any)._sbDisabledUsers || []).indexOf(uid) !== -1,
+            });
+            const before = snap();
+            btn.click();
+            const afterOn = {
+                ...snap(),
+                menuStillOpen: (() => {
+                    const m = document.getElementById('volume-menu') as HTMLElement | null;
+                    return !!m && getComputedStyle(m).display !== 'none';
+                })(),
+            };
+            btn.click();
+            const afterOff = snap();
+            return { found: true, before, afterOn, afterOff } as any;
+        }, u2.user.id);
 
-            // Disable
-            (window as any)._sbDisabledUsers.push(testUid);
-            const isDisabled = (window as any)._sbDisabledUsers.includes(testUid);
+        expect(
+            probe.found,
+            `no soundboard disable button in the owner's member menu; saw ${JSON.stringify(probe.saw)}`
+        ).toBe(true);
+        expect(probe.before.disabled).toBe(false);
+        expect(probe.before.active).toBe(false);
+        expect(probe.before.text).toBe('Disable Soundboard');
+        expect(probe.before.icons).toEqual(['#icon-close']);
+        expect(probe.afterOn.disabled).toBe(true);
+        expect(probe.afterOn.active).toBe(true);
+        expect(probe.afterOn.text).toBe('Enable Soundboard');
+        expect(probe.afterOn.icons).toEqual(['#icon-check', '#icon-volume-on']);
+        expect(probe.afterOn.menuStillOpen).toBe(true);
+        expect(probe.afterOff.disabled).toBe(false);
+        expect(probe.afterOff.active).toBe(false);
+        expect(probe.afterOff.text).toBe('Disable Soundboard');
+        expect(probe.afterOff.icons).toEqual(['#icon-close']);
 
-            const buttonTextOn = isDisabled ? '✓ 🔊 Enable Soundboard' : '🚫 Disable Soundboard';
-            const buttonClassOn = 'volume-menu-btn' + (isDisabled ? ' active' : '');
-
-            // Re-enable
-            const idx = (window as any)._sbDisabledUsers.indexOf(testUid);
-            if (idx !== -1) (window as any)._sbDisabledUsers.splice(idx, 1);
-            const isEnabled = !(window as any)._sbDisabledUsers.includes(testUid);
-
-            // After re-enabling, the button offers DISABLING again
-            const buttonTextOff = isEnabled ? '🚫 Disable Soundboard' : '✓ 🔊 Enable Soundboard';
-            const buttonClassOff = 'volume-menu-btn' + (isEnabled ? '' : ' active');
-
-            return { beforeDisabled, isDisabled, buttonTextOn, buttonClassOn, isEnabled, buttonTextOff, buttonClassOff };
-        });
-
-        expect(result.beforeDisabled).toBe(true);
-        expect(result.isDisabled).toBe(true);
-        expect(result.buttonTextOn).toContain('✓');
-        expect(result.buttonTextOn).toContain('Enable');
-        expect(result.buttonClassOn).toContain('active');
-        expect(result.isEnabled).toBe(true);
-        expect(result.buttonTextOff).toContain('🚫');
-        expect(result.buttonTextOff).toContain('Disable');
-        expect(result.buttonClassOff).not.toContain('active');
+        expect(room.errors).toEqual([]);
+        await room.ctx1.close();
+        await room.ctx2.close();
     });
 });
 

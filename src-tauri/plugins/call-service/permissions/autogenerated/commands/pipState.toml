@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-pipState"
+description = "Enables the pipState command without any pre-configured scope."
+commands.allow = ["pipState"]
+
+[[permission]]
+identifier = "deny-pipState"
+description = "Denies the pipState command without any pre-configured scope."
+commands.deny = ["pipState"]

@@ -10100,6 +10100,30 @@ body.resizing-dm { cursor: ns-resize !important; user-select: none; }
     align-items: center;
     justify-content: center;
 }
+
+/* ── Native (Android) picture-in-picture ───────────────────────────────────
+   Android's system WebView has no Picture-in-Picture API, so the box uses the
+   platform's *activity* PiP: the system shrinks the whole window, and
+   `voice.js` puts the chosen tile in a body-level `.voice-fs-wrap` (so rotation,
+   mirror and the contain-fit are byte-for-byte the fullscreen behaviour) while
+   this class hides everything else.
+
+   `visibility` rather than `display:none` on purpose: the app keeps its layout,
+   so nothing that measures a tile, a canvas or a scroll container sees a
+   zero-sized world and re-renders into a broken state while the PiP window is
+   up. The wrapper has to be re-shown explicitly because visibility is an
+   inherited property. */
+body.e2e-pip-active {
+    background: #000 !important;
+    overflow: hidden !important;
+}
+body.e2e-pip-active * {
+    visibility: hidden !important;
+}
+body.e2e-pip-active .e2e-pip-wrap,
+body.e2e-pip-active .e2e-pip-wrap * {
+    visibility: visible !important;
+}
 .voice-fs-wrap video,
 .voice-fs-wrap video.remote-video-tile,
 .voice-fs-wrap video.voice-self-video,

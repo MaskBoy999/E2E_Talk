@@ -8318,3 +8318,86 @@ ordering. No app code changed since the local Android + desktop builds of
 **Files:** `.github/workflows/release.yml`, `.github/workflows/android.yml`,
 `tests/release-publishing.spec.ts`
 
+### 157. Android: picture-in-picture, a Decline that declines, and a phone that decides when to ring
+
+Three v0.2.25 fixes, all of them the same shape: a feature that worked in a
+browser or the desktop box and quietly did nothing inside the phone's WebView.
+
+**1. Picture-in-picture on Android.** The desktop box pops a tile out with
+`HTMLVideoElement.requestPictureInPicture()`. The Android system WebView
+implements neither that nor `document.pictureInPictureEnabled` (Chrome-for-Android
+got it in 105; that is a different embedding), so the PiP button answered "PiP not
+supported in this browser". The phone now uses the platform's *activity* PiP —
+`Activity.enterPictureInPictureMode()` shrinks the whole window — and the page
+decides what that window shows by lifting the chosen tile into the same
+`.voice-fs-wrap` the app's own fullscreen button uses, with everything else hidden
+by a `body.e2e-pip-active` class. Reusing that wrapper is what keeps rotation and
+mirror correct for free: the transform rules, the contain-fit and
+`applyTileTransform` are literally the fullscreen path, so PiP cannot drift from
+it. No canvas and no per-frame JS either, which matters because PiP *pauses* the
+activity — the compositor keeps drawing the live video where a JS loop would stop.
+`visibility` (not `display:none`) is what hides the rest, so nothing that measures
+a tile or a canvas sees a zero-sized world while the window is up, and the tile is
+re-fitted on resize because entering and leaving PiP resizes the activity and
+otherwise the picture would be cropped to the top-left corner. Leaving PiP has no
+public API, so the page asks the native side to raise the task and *polls*
+`pipState` (400 ms) — the user closes the window with the system's own button,
+which never arrives as a callback, and the activity is paused at that moment
+anyway. The activity's `supportsPictureInPicture` is contributed by the plugin's
+manifest and merged in, because `gen/android/` is generated and wiped by
+`tauri android init`.
+
+**2. Decline from the call notification.** The action only dismissed the
+notification, which is exactly why it looked like it worked while the caller kept
+ringing: the socket — and therefore the whole call — lives in the WebView. The
+receiver now forwards the decline to the page through `evaluateJavascript`
+(`window.__e2eDeclineIncomingCall`), which runs without the app being foregrounded
+and which the page guards on there actually being an incoming call for that
+channel id (carried in the intent's extra), so a tap on a dead notification cannot
+end a live call. The plugin instance is reached through a `WeakReference` — a
+receiver has no plugin reference, and a strong one would keep a dead plugin and
+its activity alive. The channel id is escaped into a JS string literal by hand
+rather than via a JSON dependency, so a hostile id cannot break out of it.
+
+**3. The phone's ringer mode, not just the app's toggles.** The system already
+honours silent/vibrate/DND for the *notification*, because it owns that channel —
+but the app also rings **itself** through WebAudio and buzzes through the native
+vibrator, and neither knows a phone can be muted. An incoming call used to ring out
+loud on a silenced phone while the notification beside it stayed politely quiet.
+`getAudioProfile` now reads the ringer mode and the interruption filter, and the
+page consults it before playing the WebAudio ringtone (sound off in
+vibrate/silent, both off under DND), for every haptic cue, and again at the moment
+a ring starts — the state can change while the app is backgrounded, and ringing
+loud and silencing a beat later beats missing a call. Settings' "Test pattern"
+buttons bypass the gate on purpose: the user is asking for the cue right now.
+Unknown state (a browser, the desktop box, the setup screen) means *allow*. And
+because a notification channel's vibration pattern is **fixed when the channel is
+created**, the live pattern from Settings → Voice → Haptics is now sent with every
+ring and the channel is keyed by it (the previous pattern's channel is deleted so
+the list does not grow one entry per slider edit). Off means a channel with no
+vibration at all.
+
+**Verified locally.** `:tauri-plugin-call-service:compileReleaseKotlin`,
+`:app:minifyUniversalReleaseWithR8` (R8 runs with the new keep rules — the mapping
+file shows every `com.e2echat.callservice.*` class unrenamed), the manifest merge
+(one `MainActivity`, now with `supportsPictureInPicture="true"`; the activity
+already declares the `configChanges` that keep it from being recreated on entering
+PiP), `cargo check` for both the host and `aarch64-linux-android`, and a rebuilt
+desktop box driven over CDP. Tests: `tests/box-pip-ringer.spec.ts` (8, brand new —
+the aspect-ratio clamp, a refused request putting the tile back, the system-button
+close, leaving the call with no window left behind, the ringer gate, the channel's
+pattern, and the decline only ending the matching call),
+`tests/android-plugin-startup.spec.ts` (14, the Kotlin constraints that no browser
+test can reach). Regression-checked: `box-shell`/`box-device`/`screen-share-native`/
+`screen-share-fallback`/`app-background` (34 pass), `soundboard-mute-disable` +
+`call-indicators*` (21), `ringtone*`/`notif-sound-trim`/`notification-sound`,
+`voice-smoke`/`dm-call-*`. Two failures in `voice-fullscreen.spec.ts` and one in
+`dm-call-volume.spec.ts` are pre-existing — each reproduced with `voice.js` and
+`style.css` stashed to HEAD.
+
+**Files:** `src-tauri/plugins/call-service/android/src/main/java/com/e2echat/callservice/{Pip,AudioProfile,IncomingCallNotifier,CallServicePlugin}.kt`,
+`src-tauri/plugins/call-service/android/src/main/AndroidManifest.xml`,
+`src-tauri/plugins/call-service/permissions/{default.toml,autogenerated/**}`,
+`src-tauri/plugins/call-service/build.rs`, `static/voice.js`, `static/style.css`,
+`static/index.html`, `tests/{box-pip-ringer,android-plugin-startup,box-device,call-indicators,call-indicators-live,soundboard-mute-disable}.spec.ts`
+

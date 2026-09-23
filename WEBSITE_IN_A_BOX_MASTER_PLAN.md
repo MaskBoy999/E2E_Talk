@@ -1776,3 +1776,88 @@ icons no longer re-ran the build script, and the icon compiled into the binary
 (which is what the desktop shortcut shows) stayed stale. `src-tauri/build.rs` now
 declares the icon files. Verified by checking that the newly built binary contains
 all six frames of the current `icons/icon.ico` byte-for-byte.
+
+### 13.14 PiP, Decline, and the phone's ringer — v0.2.25
+
+Three phone-only gaps, each of which is the same root cause as §13.13: **the
+system WebView is not Chrome.** A feature that exists in the desktop box's WebView2
+or in the browser can be missing, still-present-but-inert, or owned by the platform.
+
+**1. Picture-in-picture needs *activity* PiP, not the web API.** WebView has no
+`document.pictureInPictureEnabled` and no `requestPictureInPicture()` (Chrome for
+Android got it in 105; it is a different embedding — caniwebview lists the web
+feature as unsupported in WebView on every version). So the phone shrinks the whole
+activity instead, and the page decides what that window shows: it lifts the chosen
+tile into the very same `.voice-fs-wrap` the app's fullscreen button uses and hides
+everything else with `body.e2e-pip-active`. That reuse is the whole design —
+rotation, mirror and the contain-fit are the fullscreen path byte-for-byte, so PiP
+cannot drift from it, and because it is a composited `<video>`/`<img>` rather than a
+canvas loop the picture keeps updating while the activity is paused (wry calls
+`WebView.onPause`).
+
+*Rules that shaped it, each of which a phone must be the judge of:*
+
+1. The activity must declare `android:supportsPictureInPicture="true"` or
+   `enterPictureInPictureMode()` throws. `gen/android/` is generated and wiped by
+   `tauri android init`, so the attribute is contributed by the **plugin's** manifest
+   and merged in (the merged manifest was checked: one `MainActivity`, attribute
+   present). The activity already declares `configChanges` covering
+   `orientation|screenSize|smallestScreenSize|screenLayout`, so entering PiP does
+   **not** recreate it and the WebView is not reloaded.
+2. Aspect ratio is clamped to Android's 2.39:1 … 1:2.39 *inside* the limit, and
+   computed from the tile **as seen** (a 90°/270° rotation swaps width and height),
+   which is what keeps the window free of black bars.
+3. There is no public "leave PiP". The user's own close button is the normal exit and
+   it never arrives as a callback, so the page polls `pipState` (400 ms) — polling,
+   not a callback, because PiP *pauses* the activity and that is the worst moment to
+   depend on JS running. Programmatic exit raises the task with
+   `FLAG_ACTIVITY_REORDER_TO_FRONT` (not a new task: the app is `singleTask`).
+4. Entering and leaving PiP resizes the activity, so the contain-fit dimensions
+   written a moment earlier are stale — the tile is re-fitted on resize (immediately,
+   and again at 60 ms and 250 ms), or the picture would be cropped to the top-left
+   corner of the window.
+5. Hiding uses `visibility: hidden`, not `display: none`: the app keeps its layout,
+   so nothing that measures a tile or a canvas sees a zero-sized world and re-renders
+   into a broken state while the window is up. The wrapper is re-shown explicitly
+   because visibility is inherited.
+
+**2. The notification's Decline was cosmetic.** The action dismissed the
+notification and nothing else — the socket, and therefore the call, belongs to the
+page. A `BroadcastReceiver` has no plugin reference, so a `WeakReference` to the live
+plugin (a strong one would keep a dead plugin and its activity alive) plus
+`evaluateJavascript` is the hand-off; it works with the app backgrounded, and a
+manifest-declared receiver is delivered to a cached process because Android
+unfreezes it for `onReceive`. The page guards on there being an incoming call for
+that channel id, so a tap on a stale notification cannot end a live one, and the id
+is escaped into the JS literal by hand (no JSON dependency) so it cannot break out.
+
+**3. A channel's vibration pattern is fixed at creation.** The phone was using *its*
+default buzz instead of the cue from Settings → Voice → Haptics because the channel
+had been created once with `enableVibration(true)` and no pattern, and Android does
+not let an app change a channel's sound or vibration afterwards. The live pattern is
+now sent with every ring and the channel id is derived from it (the previous
+pattern's channel is deleted, so the list does not grow one entry per slider edit);
+switching the cue off means a channel with no vibration at all. The channel keeps a
+**ringtone as its sound** rather than alerting from our process, so SystemUI still
+rings while the app is frozen and inherits the ringer mode and DND policy for free.
+
+The app's **own** WebAudio ringtone and every haptic cue have no such knowledge, so
+`getAudioProfile` reads the ringer mode and the interruption filter and the page
+honours it: no sound in vibrate/silent, no buzz on silent, neither under DND, and
+re-read at the moment a ring starts because a phone can be muted while the app is
+backgrounded. Settings' "Test pattern" buttons bypass the gate deliberately. Unknown
+state (browser, desktop box, setup screen) means *allow*.
+
+**Status — honest.** Compile- and R8-verified: `compileReleaseKotlin`,
+`:app:minifyUniversalReleaseWithR8` (mapping file shows every `com.e2echat.callservice.*`
+class unrenamed), the manifest merge, `cargo check` host + `aarch64-linux-android`,
+and the rebuilt desktop box over CDP. **Not device-verified** — no device or emulator
+is attached, and the emulator image that was installed needs a hypervisor this
+machine does not have enabled. What only a phone can confirm:
+
+- pressing PiP in a call puts a **live, correctly-rotated** tile in an
+  always-on-top window, and closing that window with the system button restores the
+  tile to its row (`adb logcat | grep E2EPip`);
+- **Decline in the notification shade ends the call for the caller too**;
+- the buzz is the app's configured pattern, and setting the phone to silent stops the
+  app ringing out loud.

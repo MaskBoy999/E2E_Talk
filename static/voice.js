@@ -264,6 +264,26 @@
         },
         // Battery-friendly haptics (exposed for tests).
         hapticRepeatsSuppressed: hapticRepeatsSuppressed,
+        // Android ringer-mode / DND awareness (exposed for tests): what the phone
+        // will let the app do out loud — see _boxReadAudioProfile.
+        readAudioProfile: _boxReadAudioProfile,
+        soundAllowed: _soundAllowed,
+        hapticAllowed: _hapticAllowed,
+        ringHapticPatternForNotification: _ringHapticPatternForNotification,
+        setAudioProfile: function (p) {
+            // Test hook: the ringer state without a native bridge.
+            S.audioProfile = p ? { mode: p.mode || 'normal', dnd: !!p.dnd } : null;
+        },
+        // Declining from the notification shade (exposed for tests).
+        declineIncomingFromNotification: function (dmChannelId) {
+            return window.__e2eDeclineIncomingCall(dmChannelId);
+        },
+        // Native (Android) picture-in-picture (exposed for tests).
+        isAndroidPip: _isAndroidPip,
+        pipAspectFor: pipAspectFor,
+        startAndroidPiP: startAndroidPiP,
+        teardownAndroidPiP: _teardownAndroidPiP,
+        isAndroidPipActive: function () { return !!_androidPipWrap; },
         getBackgroundedMinutes: getBackgroundedMinutes,
         getBatteryLevel: getBatteryLevel,
         refreshBatteryCache: refreshBatteryCache,
@@ -1181,16 +1201,118 @@
         var tauri = window.__TAURI__;
         if (!tauri || !tauri.core || !tauri.core.invoke) return;
         if (!/Android/i.test(navigator.userAgent || '')) return;
-        var args = action === 'incomingCall'
-            ? {
+        var args = {};
+        if (action === 'incomingCall') {
+            args = {
                 callerName: (call && call.callerUsername) || 'Someone',
-                dmChannelId: (call && call.dmChannelId) || ''
-            }
-            : {};
+                dmChannelId: (call && call.dmChannelId) || '',
+                // The phone's own notification is what buzzes while the app is in
+                // the background, and a notification channel's vibration pattern
+                // is FIXED when the channel is created (Android: "you can't change
+                // the notification channel's visual and auditory behaviors
+                // programmatically"). So the live pattern from Settings → Voice →
+                // Haptics is sent with every ring, and the native side keeps the
+                // channel in step with it. Without this the phone used its own
+                // default buzz instead of the cue the user configured.
+                // Empty array = "Vibrate on incoming calls" is off: the native
+                // channel is then created with no vibration at all.
+                vibratePattern: _ringHapticPatternForNotification()
+            };
+        }
         tauri.core.invoke('plugin:call-service|' + action, args).catch(function (e) {
             console.warn('[box] incoming call ' + action + ' failed:', e);
         });
     }
+
+    // The ring cue as `navigator.vibrate` wants it, for the notification channel.
+    function _ringHapticPatternForNotification() {
+        // Gated by the same toggle as the in-app cue: turning "Vibrate on incoming
+        // calls" off must silence the phone's buzz too, not just ours.
+        if (S.settings && S.settings.hapticIncoming === false) return [];
+        try { return buildHapticPattern(getHapticPattern('ring')) || []; } catch (_) { return []; }
+    }
+
+    // ------------------------------------------------------------------
+    // Android: what the phone will actually let us do out loud
+    // ------------------------------------------------------------------
+    // The system already keeps the *notification* honest — its channel carries the
+    // sound and the vibration pattern, and the ringer mode, do-not-disturb and the
+    // user's own per-channel tweaks are all applied by SystemUI. But the app also
+    // rings itself: `playRingtone()` drives WebAudio and every haptic cue drives
+    // the real vibrator, and neither of those knows that a phone can be on silent.
+    // So an incoming call used to ring out loud on a muted phone (and buzz on a
+    // silenced one) while the notification next to it stayed politely quiet.
+    //
+    // `AudioProfile.kt` reads the two switches that matter — ringer mode and the
+    // interruption filter — and the helpers below are what the ring and the cues
+    // consult. Unknown (a browser, the desktop box, the setup screen, or the first
+    // moments after a cold start) means "allow": being wrong in that direction is a
+    // ring the user hears, not a call they never notice.
+    var _boxIsAndroid = function () {
+        return !!(window.__TAURI__ && window.__TAURI__.core) && /Android/i.test(navigator.userAgent || '');
+    };
+
+    function _boxReadAudioProfile() {
+        if (!_boxIsAndroid()) return Promise.resolve(S.audioProfile || null);
+        return window.__TAURI__.core.invoke('plugin:call-service|getAudioProfile', {})
+            .then(function (p) {
+                if (p && typeof p.mode === 'string') {
+                    S.audioProfile = { mode: p.mode, dnd: !!p.dnd };
+                }
+                return S.audioProfile || null;
+            })
+            .catch(function () { return S.audioProfile || null; });
+    }
+
+    // May we play a ringtone of our own? Vibrate and silent both mean no sound.
+    function _soundAllowed() {
+        var p = S.audioProfile;
+        if (!p) return true;
+        if (p.dnd) return false;
+        return p.mode !== 'silent' && p.mode !== 'vibrate';
+    }
+
+    // May we buzz? Only a fully silenced phone (or DND) says no.
+    function _hapticAllowed() {
+        var p = S.audioProfile;
+        if (!p) return true;
+        if (p.dnd) return false;
+        return p.mode !== 'silent';
+    }
+
+    // The ringer mode can change at any moment — including while the app sits
+    // backgrounded — so re-read it whenever we come back and whenever a ring
+    // starts (see handleDmCallRing).
+    if (typeof document !== 'undefined') {
+        _boxReadAudioProfile();
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) _boxReadAudioProfile();
+        });
+        window.addEventListener('focus', function () { _boxReadAudioProfile(); });
+    }
+
+    // Declining from the notification shade.
+    //
+    // The native "Decline" action cannot end the call by itself: the socket — and
+    // therefore the whole call — belongs to this page. It used to only dismiss the
+    // notification, which is why declining from the shade looked like it worked
+    // while the caller kept ringing. `IncomingCallActionReceiver` now calls this
+    // through `evaluateJavascript` (see CallServicePlugin.kt), which works while the
+    // app is in the background, and this runs exactly the in-app Decline.
+    //
+    // Guarded on there actually being an incoming call for that channel, so a tap
+    // on a stale notification cannot end a call the user is in.
+    window.__e2eDeclineIncomingCall = function (dmChannelId) {
+        try {
+            if (!S.incomingCall) return false;
+            if (dmChannelId && S.incomingCall.dmChannelId && dmChannelId !== S.incomingCall.dmChannelId) return false;
+            declineDmCall();
+            return true;
+        } catch (e) {
+            console.warn('[box] decline from the notification failed:', e);
+            return false;
+        }
+    };
 
     // ------------------------------------------------------------------
     // Joining / leaving
@@ -1254,6 +1376,13 @@
         // Any path out of a room (leave, hangup, kick, replace) ends the call,
         // so release the foreground service here rather than only in leaveVoice.
         _boxCallService('stop');
+        // A native (Android) PiP window must not outlive the call it was showing:
+        // release it *before* the room's streams and tiles are torn down, or the
+        // window would be left displaying a frozen last frame.
+        if (_androidPipWrap) {
+            try { _pipInvoke('exitPip'); } catch (_) {}
+            try { _teardownAndroidPiP(); } catch (_) {}
+        }
         clearRingTimer();
         clearCalleeRingTimer();
         stopRingtone();
@@ -4967,6 +5096,17 @@
         notifyWaitingChanged();
         // Play the user's custom ringtone (loops until answered / 30s timeout).
         playRingtone(true);
+        // ...but the ringer mode may have changed while we were backgrounded (a
+        // phone can be muted at any moment, and the cached profile is only as
+        // fresh as the last time we looked). Re-read it and honour the answer:
+        // starting the ringtone and silencing it a moment later is a far better
+        // failure than ringing out loud on a muted phone. The native notification
+        // has already made the same decision from the same state.
+        _boxReadAudioProfile().then(function () {
+            if (!S.incomingCall) return;
+            if (!_soundAllowed()) stopRingtone();
+            else if (!_hapticAllowed()) stopRingHapticTicker();
+        });
         // A genuine new ring just started (all early-return guards passed) —
         // buzz so a call on silent mode is noticed before the ring times out,
         // then keep buzzing once per ringtone cycle until it's answered or
@@ -5246,21 +5386,205 @@
     // so you can choose which member/stream to pop out (and switch between
     // them). Clicking it again while a PiP window is open closes it.
     function togglePiP(anchor) {
-        if (_pipActive) { stopPiP(); return; }
+        // A native (Android) session is a *lifted tile*, not a canvas session,
+        // so `_pipActive` alone cannot tell us there is something to close.
+        if (_androidPipWrap || _pipActive) { stopPiP(); return; }
         openPipMenu(anchor);
     }
 
     function stopPiP() {
+        var wasNative = !!_androidPipWrap;
         _pipActive = false;
         _pipUid = null;
         _pipKind = null;
+        if (wasNative) {
+            // Leaving PiP has no public API (see Pip.kt): ask the native side to
+            // bring the task back to the front and let the poll below decide when
+            // the window is really gone. Tearing the tile down here instead would
+            // leave the PiP window showing a stripped-out app if the platform
+            // ignored the request.
+            _pipInvoke('exitPip').catch(function () {});
+            return;
+        }
         try { document.exitPictureInPicture().catch(function () {}); } catch (_) {}
         _cleanupCanvasPiP();
+    }
+
+    // --- Picture-in-Picture, natively (Android) -----------------------------
+    //
+    // The Android system WebView implements neither `document`.
+    // `pictureInPictureEnabled` nor `HTMLVideoElement.requestPictureInPicture()`
+    // (caniwebview lists the feature as unsupported in WebView on every version;
+    // Chrome-for-Android got it in 105, but that is a different embedding), so
+    // every desktop path above is unreachable on a phone and the PiP button used
+    // to answer "PiP not supported in this browser".
+    //
+    // Android's own answer is *activity* PiP: the system shrinks the whole window
+    // into a small always-on-top one. Deciding what that window *shows* is our
+    // job, and it is done with plumbing that already exists and is already
+    // tested — the tile is lifted into the same `.voice-fs-wrap` the app's
+    // fullscreen button uses (so rotation, mirror and the contain-fit behave
+    // identically) and everything else is hidden by the `e2e-pip-active` class.
+    // The compositor then draws the live feed: no canvas, no per-frame JS, which
+    // also means the picture keeps updating even though PiP pauses the activity
+    // (wry calls `WebView.onPause`).
+    //
+    // The native half is `Pip.kt`; the activity declares
+    // `android:supportsPictureInPicture` in the plugin's manifest.
+    var _androidPipWrap = null;
+    var _androidPipEl = null;
+    var _androidPipPoll = 0;
+
+    // Is this the Android app (and a WebView that genuinely lacks the web PiP
+    // API)? The `!pictureInPictureEnabled` test keeps a hypothetical future
+    // WebView — or the desktop box — on the standards path above.
+    function _isAndroidPip() {
+        return !!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) &&
+            /Android/i.test(navigator.userAgent || '') &&
+            !document.pictureInPictureEnabled;
+    }
+
+    function _pipInvoke(command, args) {
+        return window.__TAURI__.core.invoke('plugin:call-service|' + command, args || {});
+    }
+
+    // The tile's aspect ratio as it is *seen* (so after rotation), clamped to
+    // what Android accepts for a PiP window (2.39:1 … 1:2.39). Getting this right
+    // is what keeps the PiP window free of black bars.
+    function pipAspectFor(el, uid, kind) {
+        var st = (uid != null && kind != null) ? S.tileTransforms[uid + ':' + kind] : null;
+        var rot = st && st.rot ? ((st.rot % 360) + 360) % 360 : 0;
+        var w, h;
+        if (el.tagName === 'IMG') { w = el.naturalWidth; h = el.naturalHeight; }
+        else { w = el.videoWidth; h = el.videoHeight; }
+        if (!(w > 0 && h > 0)) { w = el.clientWidth || 16; h = el.clientHeight || 9; }
+        if (rot === 90 || rot === 270) { var t = w; w = h; h = t; }
+        var r = w / h;
+        if (!(r > 0) || !isFinite(r)) r = 16 / 9;
+        return Math.max(0.4195, Math.min(2.38, r));
+    }
+
+    function startAndroidPiP(target, uid, kind) {
+        if (!_isAndroidPip() || !target || !target.isConnected) return false;
+        // Never stack sessions: drop any canvas/desktop session left over, and
+        // any previous native one.
+        _cleanupCanvasPiP();
+        if (_androidPipWrap) _teardownAndroidPiP();
+
+        target._fsOrigParent = target.parentNode;
+        target._fsOrigNext = target.nextSibling;
+        var wrap = document.createElement('div');
+        // `.voice-fs-wrap` is already `position:fixed; inset:0; background:#000`
+        // with the contain-fit tile rules fullscreen relies on — reusing it is
+        // what makes PiP render exactly like a fullscreen tile, transforms and
+        // all.
+        wrap.className = 'voice-fs-wrap e2e-pip-wrap';
+        document.body.appendChild(wrap);
+        wrap.appendChild(target);
+        target._fsWrap = wrap;
+        _androidPipWrap = wrap;
+        _androidPipEl = target;
+        _pipActive = true;
+        _pipUid = uid;
+        _pipKind = kind;
+        document.body.classList.add('e2e-pip-active');
+        _paintAndroidPip();
+
+        return _pipInvoke('enterPip', { aspectRatio: pipAspectFor(target, uid, kind) })
+            .then(function (res) {
+                if (res && res.inPip) {
+                    _androidPipPollStart();
+                    return true;
+                }
+                // Refused — an OEM may not offer PiP, or the user may have turned
+                // it off for the app. Put the tile back rather than leave the app
+                // stripped down with no window to show for it.
+                _teardownAndroidPiP();
+                showToast('Picture-in-picture is not available on this device');
+                return false;
+            })
+            .catch(function (e) {
+                _teardownAndroidPiP();
+                showToast('PiP failed: ' + ((e && e.message) || e));
+                return false;
+            });
+    }
+
+    // Re-fit the lifted tile to the CURRENT window. Entering (and leaving) PiP
+    // resizes the activity, so the contain-fit dimensions applyTileTransform
+    // wrote a moment ago are stale — without this the picture would be cropped to
+    // the top-left corner of the PiP window.
+    function _paintAndroidPip() {
+        var el = _androidPipEl;
+        if (!el) return;
+        var uid = el.dataset ? el.dataset.uid : null;
+        var kind = el.dataset ? el.dataset.kind : null;
+        try { applyTileTransform(el, uid, kind); } catch (_) {}
+        try { syncResetViewChips(uid, kind); } catch (_) {}
+    }
+
+    function _androidPipOnResize() {
+        if (!_androidPipWrap) return;
+        // The resize is delivered before the new window has necessarily been laid
+        // out, so paint now and again once it has settled.
+        _paintAndroidPip();
+        setTimeout(_paintAndroidPip, 60);
+        setTimeout(_paintAndroidPip, 250);
+    }
+
+    function _androidPipPollStart() {
+        _androidPipPollStop();
+        // Polled rather than callback-driven: the user closes the PiP window with
+        // the system's own button, which we get no event for, and PiP *pauses* the
+        // activity — the worst moment to depend on a JS callback arriving. The
+        // separate resize listener handles the geometry.
+        _androidPipPoll = setInterval(function () {
+            if (!_androidPipWrap) { _androidPipPollStop(); return; }
+            _pipInvoke('pipState').then(function (res) {
+                if (!res || res.inPip) return;
+                _teardownAndroidPiP();
+            }).catch(function () {});
+        }, 400);
+        window.addEventListener('resize', _androidPipOnResize);
+    }
+
+    function _androidPipPollStop() {
+        if (_androidPipPoll) { clearInterval(_androidPipPoll); _androidPipPoll = 0; }
+        window.removeEventListener('resize', _androidPipOnResize);
+    }
+
+    // Put the tile back exactly where fullscreen would have put it, and drop the
+    // PiP styling. Safe to call when nothing is lifted.
+    function _teardownAndroidPiP() {
+        _androidPipPollStop();
+        var wrap = _androidPipWrap;
+        var el = _androidPipEl;
+        _androidPipWrap = null;
+        _androidPipEl = null;
+        document.body.classList.remove('e2e-pip-active');
+        if (wrap) {
+            try { restoreFromFsWrap(wrap, el); } catch (_) {}
+        }
+        _pipActive = false;
+        _pipUid = null;
+        _pipKind = null;
+        if (el) {
+            // The window is still shrinking back to full size at this moment, and
+            // restoreFromFsWrap fitted the tile to whatever size it had — re-fit
+            // once the layout has settled so the tile lands in its row properly.
+            setTimeout(function () {
+                if (!el.isConnected || !el.dataset) return;
+                try { applyTileTransform(el, el.dataset.uid, el.dataset.kind); } catch (_) {}
+            }, 300);
+        }
     }
 
     // Start PiP for one specific feed (invoked from the picker).
     function startPiPForTile(target, uid, kind) {
         if (!target) { showToast('No active video to PiP'); return; }
+        // Android: the WebView has no web PiP API at all, so the tile is popped
+        // out with the platform's own activity PiP (see startAndroidPiP).
+        if (_isAndroidPip()) { startAndroidPiP(target, uid, kind); return; }
         if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
         _pipUid = uid || target.getAttribute('data-uid') || getSelfId();
         _pipKind = kind || target.getAttribute('data-kind') || 'camera';
@@ -5327,7 +5651,9 @@
     function openPipMenu(anchor) {
         var menu = overlayNode('voice-pip-menu');
         if (!menu) return;
-        if (!document.pictureInPictureEnabled) { showToast('PiP not supported in this browser'); return; }
+        // The picker itself works on Android too — only the *mechanism* differs
+        // (activity PiP instead of the web API).
+        if (!document.pictureInPictureEnabled && !_isAndroidPip()) { showToast('PiP not supported in this browser'); return; }
         mountOverlay(menu);
         var selfId = getSelfId();
         var sources = collectPipSources();
@@ -6112,7 +6438,14 @@
     // phone. Everywhere else this falls back to the web API, so a browser and the
     // desktop box behave exactly as they always have. A page without box-shell.js
     // is also fine.
-    function vibrate(pattern) {
+    function vibrate(pattern, force) {
+        // One gate for every cue in the app (including the notification haptics
+        // chat.js fires through vibrateNotifCue and the incoming-ring ticker): a
+        // silenced phone must not buzz, and DND must not be argued with. `force`
+        // is for the Settings → "Test pattern" buttons, where the user is asking
+        // for the cue right now and a silent phone would make the button look
+        // broken. Read from the native side — see _boxReadAudioProfile.
+        if (!force && !_hapticAllowed()) return;
         if (typeof window.boxHaptic === 'function') {
             try { if (window.boxHaptic(pattern)) return; } catch (_) {}
         }
@@ -6369,7 +6702,9 @@
     // with the configured pattern, bypassing the enable toggles so power users
     // can tune intensity/duration while the cue is disabled.
     function testHapticPattern(kind) {
-        vibrate(buildHapticPattern(getHapticPattern(kind)));
+        // `force`: an explicit request from Settings, not a cue the phone should
+        // decide about (see vibrate()).
+        vibrate(buildHapticPattern(getHapticPattern(kind)), true);
     }
 
     // Reset a haptic pattern back to its default ({ pulse, gap, pulses } from
@@ -9413,6 +9748,11 @@
     function playRingtone(loop) {
         ensureAudioCtx();
         if (!S.audioCtx) return;
+        // An incoming ring must not sound off on a phone that is on silent or
+        // vibrate (and not during DND): WebAudio has no idea the ringer exists,
+        // so the decision is ours. Only the CALL ring is gated — the Settings
+        // "Test ringtone" button (loop=false) is the user asking to hear it.
+        if (loop && !_soundAllowed()) return;
         stopRingtone();
         // Generation token: the custom-ringtone path is fully async (getRingtoneUrl
         // → FileReader → decodeAudioData). If the call is accepted/declined/ended

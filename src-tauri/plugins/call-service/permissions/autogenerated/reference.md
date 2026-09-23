@@ -14,6 +14,10 @@ not in the foreground.
 - `allow-cancel-incoming`
 - `allow-startScreenCapture`
 - `allow-stopScreenCapture`
+- `allow-enterPip`
+- `allow-pipState`
+- `allow-exitPip`
+- `allow-getAudioProfile`
 
 ## Permission Table
 
@@ -53,6 +57,84 @@ Denies the cancelIncoming command without any pre-configured scope.
 <tr>
 <td>
 
+`call-service:allow-enterPip`
+
+</td>
+<td>
+
+Enables the enterPip command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-enterPip`
+
+</td>
+<td>
+
+Denies the enterPip command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:allow-exitPip`
+
+</td>
+<td>
+
+Enables the exitPip command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-exitPip`
+
+</td>
+<td>
+
+Denies the exitPip command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:allow-getAudioProfile`
+
+</td>
+<td>
+
+Enables the getAudioProfile command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-getAudioProfile`
+
+</td>
+<td>
+
+Denies the getAudioProfile command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `call-service:allow-incoming-call`
 
 </td>
@@ -72,6 +154,32 @@ Enables the incomingCall command without any pre-configured scope.
 <td>
 
 Denies the incomingCall command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:allow-pipState`
+
+</td>
+<td>
+
+Enables the pipState command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`call-service:deny-pipState`
+
+</td>
+<td>
+
+Denies the pipState command without any pre-configured scope.
 
 </td>
 </tr>

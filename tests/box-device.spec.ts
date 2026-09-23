@@ -24,7 +24,9 @@ import * as path from 'path';
 
 const ROOT = path.join(__dirname, '..');
 const SHELL = fs.readFileSync(path.join(ROOT, 'static', 'box-shell.js'), 'utf8');
-const BASE = 'https://localhost:3443';
+// E2E_TEST_BASE_URL lets the suite run against a second, isolated server
+// instance (its own DB and raised rate limits) without disturbing a dev server.
+const BASE = process.env.E2E_TEST_BASE_URL || 'https://localhost:3443';
 
 const ANDROID_UA =
     'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';

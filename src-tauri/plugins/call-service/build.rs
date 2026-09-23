@@ -6,6 +6,14 @@ const COMMANDS: &[&str] = &[
     // android/src/main/java/com/e2echat/callservice/ScreenCapture.kt.
     "startScreenCapture",
     "stopScreenCapture",
+    // Native picture-in-picture (the Android WebView has no PiP API) — see
+    // android/src/main/java/com/e2echat/callservice/Pip.kt.
+    "enterPip",
+    "pipState",
+    "exitPip",
+    // The phone's ringer mode + do-not-disturb state, so the page can stop its
+    // own WebAudio ringtone on a muted phone — see AudioProfile.kt.
+    "getAudioProfile",
 ];
 
 fn main() {

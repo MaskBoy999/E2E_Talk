@@ -20,4 +20,12 @@ permissions = [
     # page asks the plugin to run MediaProjection instead (and to stop it).
     "allow-startScreenCapture",
     "allow-stopScreenCapture",
+    # Native picture-in-picture (the Android WebView has no PiP API): enter it for
+    # a tile, poll whether the window is still up, and leave it.
+    "allow-enterPip",
+    "allow-pipState",
+    "allow-exitPip",
+    # The phone's ringer mode + do-not-disturb state, read before the app rings
+    # its own (WebAudio) ringtone.
+    "allow-getAudioProfile",
 ]

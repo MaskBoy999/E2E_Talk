@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-const BASE = 'https://localhost:3443';
+// E2E_TEST_BASE_URL lets the suite run against a second, isolated server
+// instance (its own DB and raised rate limits) without disturbing a dev server.
+const BASE = process.env.E2E_TEST_BASE_URL || 'https://localhost:3443';
 
 async function mockMedia(page: any) {
     await page.addInitScript(() => {
@@ -330,21 +332,31 @@ test.describe('call indicators (DM list, DM strip, server list)', () => {
         const snap = await page.evaluate(() => {
             const active = document.getElementById('dm-strip-waiting') as HTMLElement;
             const forUs = document.getElementById('dm-strip-for-us') as HTMLElement;
+            // The badges render inline SVG icons (icon('mic') / icon('phone')),
+            // not emoji. Asserting on the sprite ids the badge actually
+            // references proves the glyph a user sees — and would catch a badge
+            // that silently renders nothing. (Comparing innerHTML instead is
+            // fragile: the DOM serialises `<use/>` as `<use></use>`.)
+            const iconIds = (el: HTMLElement | null) => el
+                ? Array.from(el.querySelectorAll('svg.ui-icon use')).map((u) => u.getAttribute('href'))
+                : [];
             return {
                 activeVisible: active ? active.style.display !== 'none' : false,
                 activeConnected: active ? active.classList.contains('connected') : false,
-                activeText: active ? active.textContent : '',
+                activeIcons: iconIds(active),
                 forUsVisible: forUs ? forUs.style.display !== 'none' : false,
-                forUsText: forUs ? forUs.textContent : '',
+                forUsIcons: iconIds(forUs),
             };
         });
         console.log('[IND] strip snap:', JSON.stringify(snap));
         // BOTH badges at once: we're in a call with B AND C is waiting for us.
         expect(snap.activeVisible).toBe(true);
         expect(snap.activeConnected).toBe(true);
-        expect(snap.activeText).toContain('🎤');
+        expect(snap.activeIcons).toEqual(['#icon-mic']);
         expect(snap.forUsVisible).toBe(true);
-        expect(snap.forUsText).toContain('📞');
+        expect(snap.forUsIcons).toEqual(['#icon-phone']);
+        // The two badges must stay visually distinguishable (mic ≠ phone).
+        expect(snap.activeIcons).not.toEqual(snap.forUsIcons);
 
         // The DM list mirrors both too: B's row = blue mic, C's row = red phone.
         await page.waitForSelector(`.dm-item[data-dm-id="${dmB.id}"] .dm-connected-dot`, { timeout: 15000 });
