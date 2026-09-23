@@ -375,6 +375,11 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
      * Resolves `{ inPip }` rather than rejecting: "the system would not give us a
      * PiP window" is a normal outcome (an OEM may refuse, or the user may have it
      * off for the app), and the page needs to put the tile back either way.
+     *
+     * The WebView goes along because the window shows the *activity*, and entering
+     * PiP pauses it — wry pauses the WebView with it, which would leave the window
+     * showing a crop of the full-screen page. [Pip] undoes that one pause; the
+     * page has to be handed to it for that.
      */
     @Command
     fun enterPip(invoke: Invoke) {
@@ -383,7 +388,7 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
         } catch (_: Exception) {
             PipArgs()
         }
-        val entered = Pip.enter(activity, args.aspectRatio ?: (16.0 / 9.0))
+        val entered = Pip.enter(activity, args.aspectRatio ?: (16.0 / 9.0), webViewRef?.get())
         val out = JSObject()
         out.put("inPip", entered)
         invoke.resolve(out)

@@ -63,10 +63,20 @@ async function installAndroidBridge(page: Page, replies: Record<string, unknown>
         const invoked: any[] = [];
         (window as any).__testInvoked = invoked;
         (window as any).__bridgeReplies = initial;
+        (window as any).__frames = 0;
+        // Count animation frames so a test can tell whether a paint happened
+        // between two moments (PiP may only be entered once the lifted tile is on
+        // screen — see the "painted" test below).
+        const raf = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = (cb: FrameRequestCallback) =>
+            raf((t) => {
+                (window as any).__frames++;
+                return cb(t);
+            });
         (window as any).__TAURI__ = {
             core: {
                 invoke: (cmd: string, args: any) => {
-                    invoked.push({ cmd, args });
+                    invoked.push({ cmd, args, frames: (window as any).__frames });
                     const r = (window as any).__bridgeReplies[cmd];
                     if (r === undefined) return Promise.resolve(null);
                     return Promise.resolve(r);
@@ -256,13 +266,15 @@ test.describe('native (Android) picture-in-picture', () => {
             .toBe(true);
     });
 
-    test('closing the PiP window with the system button restores the tile', async ({ page }) => {
+    test('the window going away restores the tile, whatever the native flag says', async ({ page }) => {
         const user = unique('apipc');
+        const full = page.viewportSize()!;
         await installAndroidBridge(page, {
             'plugin:call-service|enterPip': { inPip: true },
-            // Still open at first — then the user closes it. There is no event
-            // for that, which is why the page polls.
-            'plugin:call-service|pipState': { inPip: true },
+            // Deliberately the wrong answer, and it stays wrong. The activity's own
+            // flag only flips *after* the pause, so it reports "not in PiP" while
+            // the window is opening: acting on it is what used to strand the app.
+            'plugin:call-service|pipState': { inPip: false },
         });
         await androidWebView(page);
         await register(page, user);
@@ -273,9 +285,23 @@ test.describe('native (Android) picture-in-picture', () => {
         );
         expect(await page.evaluate(() => (window as any).VoiceManager.isAndroidPipActive())).toBe(true);
 
-        await page.evaluate(() => {
-            (window as any).__bridgeReplies['plugin:call-service|pipState'] = { inPip: false };
+        // The system opens the window by resizing the activity into it.
+        await page.setViewportSize({ width: 420, height: 260 });
+        await page.waitForTimeout(1400);
+        const during = await page.evaluate(() => ({
+            active: (window as any).VoiceManager.isAndroidPipActive(),
+            cls: document.body.classList.contains('e2e-pip-active'),
+            wrap: !!document.querySelector('.e2e-pip-wrap'),
+        }));
+        expect(during, 'a small window — and a lying flag — must not end the session').toEqual({
+            active: true,
+            cls: true,
+            wrap: true,
         });
+
+        // The user closes it with the system button: the app is back at its own
+        // size, which is the only thing that means the window is gone.
+        await page.setViewportSize(full);
         await expect
             .poll(() => page.evaluate(() => (window as any).VoiceManager.isAndroidPipActive()), { timeout: 5000 })
             .toBe(false);
@@ -310,62 +336,71 @@ test.describe('native (Android) picture-in-picture', () => {
         expect(state.asked).toBe(true);
     });
 
-    test('a pipState false during the pin transition does not strand the app', async ({ page }) => {
-        // Regression: `enterPictureInPictureMode()` answers `true` as soon as
-        // the task is pinned on the system side, but the activity's own
-        // configuration — which `Pip.isActive` reads — only flips once the
-        // windowing transition has run, which on a real device can outlast
-        // several 400 ms poll ticks. One `inPip:false` from that lag used to
-        // tear the tile down AND stop the poll with it, so the window finished
-        // opening onto the raw app with no chance of recovery: exactly the
-        // "PiP opens a small portion of the app and is stuck" report.
-        const user = unique('apipg');
-        await installAndroidBridge(page, {
-            'plugin:call-service|enterPip': { inPip: true },
-            // The transition has not landed yet: every read says "not in PiP".
-            'plugin:call-service|pipState': { inPip: false },
-        });
+    test('the window is only asked for once the lifted tile has been painted', async ({ page }) => {
+        // Regression: entering PiP pauses the activity, and wry pauses the WebView
+        // with it — so the page stops laying out and painting, and whatever is on
+        // screen at that instant is what the small window shows for as long as it
+        // is up. Asking for the window in the same turn as the lift put the
+        // *unlifted* app in it: the "PiP opens a corner of the app" report.
+        const user = unique('apipaint');
+        await installAndroidBridge(page, { 'plugin:call-service|enterPip': { inPip: true } });
         await androidWebView(page);
         await register(page, user);
         await installPatternTile(page);
 
-        const started = await page.evaluate(() =>
+        const early = await page.evaluate(() => {
+            const asked = (i: any) => i.cmd === 'plugin:call-service|enterPip';
+            (window as any).__run = (window as any).VoiceManager.startAndroidPiP(
+                (window as any).__pipTile,
+                'pip-user',
+                'camera'
+            );
+            return {
+                asked: (window as any).__testInvoked.filter(asked).length,
+                frames: (window as any).__frames,
+            };
+        });
+        expect(
+            early.asked,
+            'nothing may be asked for synchronously: a painted frame has to fit in between'
+        ).toBe(0);
+
+        expect(await page.evaluate(() => (window as any).__run)).toBe(true);
+        const invoke = await page.evaluate(() =>
+            (window as any).__testInvoked.filter((i: any) => i.cmd === 'plugin:call-service|enterPip')[0]
+        );
+        expect(invoke).toBeTruthy();
+        expect(
+            invoke.frames,
+            'a frame must have been painted between the lift and the PiP request'
+        ).toBeGreaterThan(early.frames);
+    });
+
+    test('a window that never opens puts the tile back instead of stranding the app', async ({ page }) => {
+        // The other half of the entry rule. A system can answer `true` and then
+        // never produce a window (an OEM quirk, or a desktop-mode session); the app
+        // must not be left stripped down with nothing to show for it. A request
+        // that never shrinks the viewport is given up on — the escape hatch for
+        // waiting forever on a window that is not coming.
+        const user = unique('apipn');
+        await installAndroidBridge(page, { 'plugin:call-service|enterPip': { inPip: true } });
+        await androidWebView(page);
+        await register(page, user);
+        await installPatternTile(page);
+
+        await page.evaluate(() =>
             (window as any).VoiceManager.startAndroidPiP((window as any).__pipTile, 'pip-user', 'camera')
         );
-        expect(started).toBe(true);
-
-        // Several poll ticks land inside the entry grace while pipState still
-        // says false — none of them may strip the app.
-        await page.waitForTimeout(1400);
-        const during = await page.evaluate(() => ({
-            active: (window as any).VoiceManager.isAndroidPipActive(),
-            cls: document.body.classList.contains('e2e-pip-active'),
-            wrap: !!document.querySelector('.e2e-pip-wrap'),
-        }));
-        expect(during, 'the entry-lag false must not tear the session down').toEqual({
-            active: true,
-            cls: true,
-            wrap: true,
-        });
-
-        // The transition lands: the open window is confirmed...
-        await page.evaluate(() => {
-            (window as any).__bridgeReplies['plugin:call-service|pipState'] = { inPip: true };
-        });
-        await page.waitForTimeout(900);
         expect(await page.evaluate(() => (window as any).VoiceManager.isAndroidPipActive())).toBe(true);
 
-        // ...and when the user closes the window with the system button, the
-        // session still ends (two consecutive falses, so a flicker at the edge
-        // of a transition cannot fake a close either).
-        await page.evaluate(() => {
-            (window as any).__bridgeReplies['plugin:call-service|pipState'] = { inPip: false };
-        });
         await expect
-            .poll(() => page.evaluate(() => (window as any).VoiceManager.isAndroidPipActive()), { timeout: 5000 })
+            .poll(() => page.evaluate(() => (window as any).VoiceManager.isAndroidPipActive()), { timeout: 15000 })
             .toBe(false);
         expect(await page.evaluate(() => document.body.classList.contains('e2e-pip-active'))).toBe(false);
-        expect(await page.evaluate(() => document.querySelector('.e2e-pip-wrap') === null)).toBe(true);
+        expect(
+            await page.evaluate(() => getComputedStyle(document.querySelector('.app')!).visibility),
+            'the app has to be usable again'
+        ).toBe('visible');
     });
 });
 

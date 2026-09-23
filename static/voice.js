@@ -5425,15 +5425,27 @@
     // tested — the tile is lifted into the same `.voice-fs-wrap` the app's
     // fullscreen button uses (so rotation, mirror and the contain-fit behave
     // identically) and everything else is hidden by the `e2e-pip-active` class.
-    // The compositor then draws the live feed: no canvas, no per-frame JS, which
-    // also means the picture keeps updating even though PiP pauses the activity
-    // (wry calls `WebView.onPause`).
+    // That part is the easy half. What the window *shows* is the whole activity,
+    // and entering PiP pauses the activity — so wry freezes the WebView with it
+    // (`WryActivity.onPause` → `WebView.onPause`). A paused WebView stops laying
+    // out and painting: the page never reflows for the PiP-sized window, so the
+    // window showed a crop of the full-screen layout — "PiP opens a corner of the
+    // app instead of the feed" — and none of the JS here could fix it, because
+    // none of it was running. Two things make it work: the lifted tile is painted
+    // *before* the window is asked for (below), and `Pip.kt` undoes that single
+    // pause for as long as the window is up.
     //
     // The native half is `Pip.kt`; the activity declares
     // `android:supportsPictureInPicture` in the plugin's manifest.
     var _androidPipWrap = null;
     var _androidPipEl = null;
-    var _androidPipPoll = 0;
+    var _androidPipWatch = 0;
+    // The app's own viewport, in CSS px, as it was when PiP was asked for. The
+    // PiP window is a fraction of it, so this is the size the window is "gone"
+    // at — see `_androidPipWindowGone`.
+    var _androidPipFullArea = 0;
+    var _androidPipSawSmall = false;
+    var _androidPipEnteredAt = 0;
 
     // Is this the Android app (and a WebView that genuinely lacks the web PiP
     // API)? The `!pictureInPictureEnabled` test keeps a hypothetical future
@@ -5464,6 +5476,27 @@
         return Math.max(0.4195, Math.min(2.38, r));
     }
 
+    // Resolve once the browser has actually painted what we just changed.
+    //
+    // Entering PiP pauses the activity, and wry answers that pause with
+    // `WebView.onPause()` — which stops the page laying out and painting (see
+    // Pip.kt). Whatever is on screen at that instant is therefore what the PiP
+    // window shows until the page is awake again, so the lift has to be *painted*
+    // before the system is asked to shrink the window, not merely applied to the
+    // DOM. Two animation frames: the first is the one that contains the lift, the
+    // second is delivered after that frame has been committed. The timer is the
+    // escape hatch for a page that is hidden (a hidden page never paints).
+    function _afterNextPaint() {
+        return new Promise(function (resolve) {
+            var done = false;
+            var finish = function () { if (!done) { done = true; resolve(); } };
+            try {
+                requestAnimationFrame(function () { requestAnimationFrame(finish); });
+            } catch (_) { /* no rAF (ancient embedder) — the timer covers it */ }
+            setTimeout(finish, 250);
+        });
+    }
+
     function startAndroidPiP(target, uid, kind) {
         if (!_isAndroidPip() || !target || !target.isConnected) return false;
         // Never stack sessions: drop any canvas/desktop session left over, and
@@ -5489,25 +5522,33 @@
         _pipKind = kind;
         document.body.classList.add('e2e-pip-active');
         _paintAndroidPip();
+        // Read before the system is asked, so this can only ever be the app's own
+        // full-screen viewport and never a PiP-sized one.
+        _androidPipFullArea = window.innerWidth * window.innerHeight;
 
-        return _pipInvoke('enterPip', { aspectRatio: pipAspectFor(target, uid, kind) })
-            .then(function (res) {
-                if (res && res.inPip) {
-                    _androidPipPollStart();
-                    return true;
-                }
-                // Refused — an OEM may not offer PiP, or the user may have turned
-                // it off for the app. Put the tile back rather than leave the app
-                // stripped down with no window to show for it.
-                _teardownAndroidPiP();
-                showToast('Picture-in-picture is not available on this device');
-                return false;
-            })
-            .catch(function (e) {
-                _teardownAndroidPiP();
-                showToast('PiP failed: ' + ((e && e.message) || e));
-                return false;
-            });
+        return _afterNextPaint().then(function () {
+            // Cancelled while we waited (the call ended, the picker was reopened):
+            // there is nothing left to pop out.
+            if (!_androidPipWrap || _androidPipWrap !== wrap) return false;
+            return _pipInvoke('enterPip', { aspectRatio: pipAspectFor(target, uid, kind) })
+                .then(function (res) {
+                    if (res && res.inPip) {
+                        _androidPipWatchStart();
+                        return true;
+                    }
+                    // Refused — an OEM may not offer PiP, or the user may have
+                    // turned it off for the app. Put the tile back rather than leave
+                    // the app stripped down with no window to show for it.
+                    _teardownAndroidPiP();
+                    showToast('Picture-in-picture is not available on this device');
+                    return false;
+                })
+                .catch(function (e) {
+                    _teardownAndroidPiP();
+                    showToast('PiP failed: ' + ((e && e.message) || e));
+                    return false;
+                });
+        });
     }
 
     // Re-fit the lifted tile to the CURRENT window. Entering (and leaving) PiP
@@ -5530,66 +5571,73 @@
         _paintAndroidPip();
         setTimeout(_paintAndroidPip, 60);
         setTimeout(_paintAndroidPip, 250);
+        _androidPipWindowGone();
     }
 
-    // How long after entering PiP an `inPip:false` read is treated as "the pin
-    // transition has not landed yet" rather than "the user closed the window".
-    // `enterPictureInPictureMode()` answers `true` as soon as the task is pinned
-    // on the system side, but `Pip.isActive` reads
-    // `activity.isInPictureInPictureMode()`, which reflects the activity's
-    // *delivered configuration* — that only flips once the system's windowing
-    // transition has run. On a real device that lag can outlast several 400 ms
-    // ticks, and tearing the tile down on one of them stranded the app: the
-    // window finished opening onto the raw app itself, with the poll — and with
-    // it every chance of recovery — already stopped.
-    var _ANDROID_PIP_ENTRY_GRACE_MS = 2000;
+    // Back in the foreground: on a phone that is the PiP window being gone
+    // (expanded, or closed and the app reopened). This is the first moment the
+    // app can be un-stripped again, so it does not wait for the paint below.
+    function _androidPipOnVisibility() {
+        if (!_androidPipWrap || document.hidden) return;
+        _paintAndroidPip();
+        _androidPipWindowGone();
+    }
 
-    function _androidPipPollStart() {
-        _androidPipPollStop();
-        // Polled rather than callback-driven: the user closes the PiP window with
-        // the system's own button, which we get no event for, and PiP *pauses* the
-        // activity — the worst moment to depend on a JS callback arriving. The
-        // separate resize listener handles the geometry.
-        //
-        // A `false` only counts as "closed" once the session has either been
-        // confirmed open (a real close always follows the window being seen) or
-        // the entry grace above has expired (a system that accepted the request
-        // but never reports open must not leave the app stripped down forever),
-        // and then only twice in a row — a single flickering read at the edge of
-        // the transition must not strip the app out from under an open window.
-        var enteredAt = Date.now();
-        var seenOpen = false;
-        var falseStreak = 0;
-        _androidPipPoll = setInterval(function () {
-            if (!_androidPipWrap) { _androidPipPollStop(); return; }
-            _pipInvoke('pipState').then(function (res) {
-                if (!_androidPipWrap) return;
-                if (res && res.inPip) {
-                    seenOpen = true;
-                    falseStreak = 0;
-                    return;
-                }
-                if (!seenOpen && (Date.now() - enteredAt) < _ANDROID_PIP_ENTRY_GRACE_MS) {
-                    falseStreak = 0;
-                    return;
-                }
-                falseStreak++;
-                if (falseStreak < 2) return;
-                _teardownAndroidPiP();
-            }).catch(function () {});
-        }, 400);
+    // When is the PiP window gone?
+    //
+    // There is no event for "the user closed it", and the one native read we have
+    // — `Activity.isInPictureInPictureMode()`, behind `pipState` — is not one to
+    // act on: it flips *after* the activity's pause, so it reports "not in PiP"
+    // while the window is still opening. Acting on that is what stranded the app:
+    // the tile was put back and the poll stopped with the window still up, so the
+    // only thing left to see was the raw app — for good.
+    //
+    // What the system does do, reliably, is resize the window: entering PiP
+    // shrinks the viewport to a fraction of the app's, and leaving it (close or
+    // expand) restores it. So a session ends when the viewport comes back to the
+    // size the app had before PiP — never earlier, which is why nothing here can
+    // strip an open window's tile out from under it.
+    function _androidPipWindowIsSmall() {
+        if (!_androidPipFullArea) return false;
+        return (window.innerWidth * window.innerHeight) <= _androidPipFullArea * 0.5;
+    }
+
+    function _androidPipWindowGone() {
+        if (!_androidPipWrap) return;
+        if (_androidPipWindowIsSmall()) { _androidPipSawSmall = true; return; }
+        // Never seen small yet: the shrink arrives with the window, which is well
+        // after `enterPip` answered `true`. Only give up on a window that is not
+        // coming (an OEM that accepted the request and did nothing) once it is
+        // clear it never will.
+        if (!_androidPipSawSmall && (Date.now() - _androidPipEnteredAt) < _ANDROID_PIP_OPEN_MS) return;
+        _teardownAndroidPiP();
+    }
+
+    // How long to wait for the window to actually appear (the viewport shrinking)
+    // before deciding the system never opened one and putting the tile back.
+    var _ANDROID_PIP_OPEN_MS = 4000;
+
+    function _androidPipWatchStart() {
+        _androidPipWatchStop();
+        _androidPipEnteredAt = Date.now();
+        _androidPipSawSmall = false;
         window.addEventListener('resize', _androidPipOnResize);
+        document.addEventListener('visibilitychange', _androidPipOnVisibility);
+        // The belt to the resize/visibility braces: a device that delivers
+        // neither when the window closes still gets its app back within a second.
+        _androidPipWatch = setInterval(_androidPipWindowGone, 1000);
     }
 
-    function _androidPipPollStop() {
-        if (_androidPipPoll) { clearInterval(_androidPipPoll); _androidPipPoll = 0; }
+    function _androidPipWatchStop() {
+        if (_androidPipWatch) { clearInterval(_androidPipWatch); _androidPipWatch = 0; }
         window.removeEventListener('resize', _androidPipOnResize);
+        document.removeEventListener('visibilitychange', _androidPipOnVisibility);
     }
 
     // Put the tile back exactly where fullscreen would have put it, and drop the
     // PiP styling. Safe to call when nothing is lifted.
     function _teardownAndroidPiP() {
-        _androidPipPollStop();
+        _androidPipWatchStop();
         var wrap = _androidPipWrap;
         var el = _androidPipEl;
         _androidPipWrap = null;

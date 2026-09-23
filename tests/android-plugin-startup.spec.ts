@@ -305,9 +305,49 @@ test.describe('native PiP, notification decline and ringer awareness', () => {
         expect(/MAX_RATIO\s*=\s*2\.3/.test(PIP_KT)).toBe(true);
         expect(/coerceIn\(\s*MIN_RATIO\s*,\s*MAX_RATIO\s*\)/.test(PIP_KT)).toBe(true);
         expect(/catch\s*\(e:\s*Exception\)/.test(PIP_KT)).toBe(true);
-        // Polling (isInPictureInPictureMode), not a lifecycle callback: PiP pauses
-        // the activity, which is exactly when a callback may not run.
+        // PiP pauses the activity, which is exactly when a callback may not run.
         expect(/isInPictureInPictureMode/.test(PIP_KT)).toBe(true);
+    });
+
+    test('the PiP window keeps the page awake, and only the page decides it is over', () => {
+        // The window shows the whole *activity*, and entering PiP pauses it — and
+        // wry answers a paused activity by pausing the WebView
+        // (`WryActivity.onPause` → `mWebView.onPause()`). A paused WebView stops
+        // laying the page out, so the page never reflows for the PiP-sized window
+        // and the window shows a crop of the full-screen app: the reported "PiP
+        // opens a corner of the app instead of the feed", which no page-side fix
+        // could reach because the page was not running at all.
+        expect(
+            /registerActivityLifecycleCallbacks/.test(PIP_KT),
+            'the plugin has to watch the lifecycle: nothing else tells it the window opened or closed'
+        ).toBe(true);
+        expect(
+            /onActivityPaused/.test(PIP_KT) && /onActivityStopped/.test(PIP_KT),
+            'the pause is the moment to undo the WebView pause; the stop is the moment the window is gone'
+        ).toBe(true);
+        expect(
+            /webView\.onResume\(\)/.test(PIP_KT),
+            'without resuming the WebView in the PiP window the page never lays out for it'
+        ).toBe(true);
+        expect(
+            /webView\.onPause\(\)/.test(PIP_KT),
+            'the forced resume is only for the visible window — it must be handed back'
+        ).toBe(true);
+        // The page must not act on the one native read available: it flips only
+        // *after* the activity's pause, so it reports "not in PiP" while the window
+        // is still opening. Acting on it is what stranded the app.
+        expect(
+            VOICE_JS.includes("_pipInvoke('pipState')"),
+            'voice.js must not tear the tile down on a flag that lags the window'
+        ).toBe(false);
+        // Instead: enter only after the lifted tile has been painted (a paused
+        // WebView never repaints, so the last painted frame is what the window
+        // shows), and end the session on the viewport coming back.
+        expect(
+            /function _afterNextPaint\(/.test(VOICE_JS),
+            'the lift has to be painted before the system is asked to shrink the window'
+        ).toBe(true);
+        expect(/function _androidPipWindowGone\(/.test(VOICE_JS)).toBe(true);
     });
 
     test('the decline reaches the page, and the plugin can still be reached by name', () => {
