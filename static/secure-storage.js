@@ -65,6 +65,11 @@
         'e2e_encrypted_password': true,
         'e2e_friend_code': true,
         'e2e_local_storage_key': true,
+        // 5.6: the key vault (keyvault.js) is stored exactly as written. It is
+        // self-protecting — Argon2id + XChaCha20-Poly1305 — and it must be
+        // readable BEFORE any storage key exists (it is what produces one),
+        // so encrypting it under that key would be circular.
+        'e2e_key_vault': true,
     };
 
     var SESSION_KEY_NAME = '_ssk';
@@ -80,6 +85,11 @@
 
     // Cached encryption/decryption key as a Uint8Array
     var _key = null;
+
+    // 5.6: true when a key vault exists but no key could be produced on this
+    // load, i.e. the password has not been supplied yet. Pages must show the
+    // lock screen when this is set — never the "you are logged out" path.
+    window._secLocked = false;
 
     // S7 — Secure memory erasure: zero out sensitive buffers after use.
     // JavaScript doesn't guarantee memory zeroing, but fill(0) prevents
@@ -484,6 +494,26 @@
     }
 
     /**
+     * 5.6: is there a key vault on this device? `_kvExists` is synchronous (a
+     * plain read of the blob) even though creating and opening the vault are
+     * not, because _ensureKey() has to be able to answer this at parse time.
+     */
+    function _vaultPresent() {
+        try { return typeof window._kvExists === 'function' && window._kvExists(); }
+        catch (_) { return false; }
+    }
+
+    /**
+     * A key can be produced on this load when EITHER the legacy password
+     * bootstrap is intact OR a 5.6 vault is present. Both mean the key is
+     * recoverable — but through a password, not from storage alone — so the
+     * random fallback must never be allowed to win over them (see _ensureKey).
+     */
+    function _hasKeySource() {
+        return _hasPasswordBootstrap() || _vaultPresent();
+    }
+
+    /**
      * Ensure the encryption key is available.
      *
      * Priority order:
@@ -516,7 +546,7 @@
         // random fallback win over it: a fallback minted by an earlier load
         // that lost the sodium-ready race would otherwise orphan the token
         // forever (the cold-start "logged out on mobile" bug).
-        if (_hasPasswordBootstrap()) {
+        if (_hasKeySource()) {
             var derivedNow = _tryDeriveFromEncryptedPassword();
             if (derivedNow) {
                 _key = derivedNow;
@@ -544,6 +574,12 @@
                     if (fk.length === 32) { _key = fk; return _key; }
                 }
             } catch (_) {}
+            // 5.6: a vault with no derivable bootstrap means the key is sealed
+            // behind the password. Say so, and hand back nothing: a random key
+            // here would orphan every stored value, and "no key" must never be
+            // read as "no session" (that path runs the login page's wipe). The
+            // page shows the lock screen instead.
+            if (_vaultPresent()) window._secLocked = true;
             return null;
         }
 
@@ -872,6 +908,57 @@
         try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
         window._secDerivationPending = false;
         return true;
+    };
+
+    /**
+     * 5.6: the vault needs the KEY ITSELF, not a value encrypted under it, so it
+     * can seal it for the next cold start. Returns base64 (32 bytes) or null.
+     */
+    window._secKeyB64 = function () {
+        var k = _key || _currentKeyRaw();
+        if (!k) {
+            try { k = _ensureKey(); } catch (_) { k = null; }
+        }
+        if (!k || k.length !== 32) return null;
+        return _bytesToBase64(k);
+    };
+
+    /**
+     * 5.6: open the vault with `password` and adopt the storage key inside it.
+     * Only the tab is remembering it (sessionStorage): writing it to
+     * localStorage would be the plaintext key copy the vault just replaced.
+     * Returns true when the vault opened and the key was adopted.
+     */
+    window._secUnlockVault = function (password) {
+        if (typeof window._kvUnlock !== 'function') return Promise.resolve(false);
+        return Promise.resolve(window._kvUnlock(password)).then(function (opened) {
+            if (!opened || !opened.k) return false;
+            var k;
+            try { k = _base64ToBytes(opened.k); } catch (_) { return false; }
+            if (!k || k.length !== 32) return false;
+            _key = k;
+            try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
+            // Hold it for this page load first (memory — nothing written),
+            // then refresh the session ticket so in-page flows that need the
+            // password (key-blob mirror, reauth) keep working across reloads.
+            // The ticket is storage-key-encrypted and dies with the session /
+            // the wipes — see keyvault.js for why it is not the old bootstrap.
+            window._vaultSessionPassword = password;
+            try { if (typeof window._kvTicketWrite === 'function') window._kvTicketWrite(password); } catch (_) {}
+            window._secLocked = false;
+            window._secVaultUnlocked = true;
+            return true;
+        }).catch(function () { return false; });
+    };
+
+    /** Diagnostics + tests: what the storage layer can and cannot do right now. */
+    window._secVaultStatus = function () {
+        return {
+            locked: !!window._secLocked,
+            vault: _vaultPresent(),
+            passwordBootstrap: _hasPasswordBootstrap(),
+            hasKey: !!(_key || _currentKeyRaw()),
+        };
     };
 
     window._secReKey = function () {

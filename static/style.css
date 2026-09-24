@@ -11705,3 +11705,116 @@ body.e2e-pip-active .e2e-pip-wrap * {
 .share-sheet-start:hover {
     background: var(--accent-hover);
 }
+
+/* 5.6 key vault lock screen — covers the app before any module has read a
+   value, so nothing half-populated is visible behind it. */
+.vault-lock-overlay {
+    position: fixed;
+    inset: 0;
+    /* Above the boot spinner (#loading-overlay, 99999) — while locked the lock
+       screen IS the boot UI. */
+    z-index: 100000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    padding: 20px;
+}
+.vault-lock-card {
+    width: 100%;
+    max-width: 380px;
+    padding: 22px;
+    border: 1px solid var(--bg-border);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+}
+.vault-lock-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+}
+.vault-lock-hint {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    margin: 0 0 6px;
+}
+.vault-lock-bio {
+    width: 100%;
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.vault-lock-error {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--danger);
+}
+.vault-lock-forget {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
+    padding: 6px;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12.5px;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+/* 1.7 on-device captions — a display-only overlay, hidden until captions run. */
+.captions-panel {
+    display: none;
+    position: fixed;
+    left: 50%;
+    bottom: 76px;
+    transform: translateX(-50%);
+    width: min(680px, 92vw);
+    z-index: 2500;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.78);
+    border: 1px solid var(--bg-border);
+    pointer-events: none;
+}
+.captions-panel.captions-open {
+    display: block;
+}
+.captions-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+.captions-badge {
+    color: var(--accent);
+}
+.captions-line {
+    font-size: 14px;
+    line-height: 1.4;
+    color: #fff;
+    margin-bottom: 4px;
+}
+.captions-line-live {
+    opacity: 0.7;
+}
+.captions-who {
+    color: var(--accent);
+    margin-right: 8px;
+    font-weight: 600;
+}
+.captions-text {
+    word-break: break-word;
+}

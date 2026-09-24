@@ -1,16 +1,32 @@
 package com.e2echat.boxshell
 
+import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.hardware.biometrics.BiometricPrompt
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.OpenableColumns
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.view.Window
 import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
@@ -24,6 +40,13 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+
+import java.io.File
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 @InvokeArg
 class BackHandlerArgs {
@@ -42,15 +65,6 @@ class BackHandlerArgs {
  */
 @InvokeArg
 class KeepScreenOnArgs {
-    var active: Boolean = false
-}
-
-/**
- * Arguments for [`BoxShellPlugin.setSecureMode`] (5.2, FEATURE_PLAN.md):
- * whether the window must refuse screenshots/recordings right now.
- */
-@InvokeArg
-class SecureModeArgs {
     var active: Boolean = false
 }
 
@@ -83,6 +97,30 @@ class VibrateArgs {
  * `clearNotifications` (the shade must be empty on return, minus an ongoing
  * call).
  */
+/** Arguments for `setAudioRoute` (1.3): the device id to route call audio to. */
+@InvokeArg
+class AudioRouteArgs {
+    var id: String? = null
+}
+
+/**
+ * `biometricSeal` arguments (5.1): the operation and a base64 payload — the
+ * plaintext password on the way in (`wrap`), the Keystore ciphertext on the
+ * way out (and the reverse for `unwrap`).
+ */
+@InvokeArg
+class BiometricSealArgs {
+    var mode: String? = null
+    var data: String? = null
+    var title: String? = null
+}
+
+/** Arguments for `sharedRead` (3.4): which staged file (index into the FIFO). */
+@InvokeArg
+class SharedReadArgs {
+    var index: Int = -1
+}
+
 @TauriPlugin
 class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
 
@@ -95,6 +133,99 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
          * numbers in step if the call notification id ever moves.
          */
         private const val ONGOING_CALL_NOTIFICATION_ID = 4711
+
+        /** Alias of the per-operation biometric key (5.1) — AndroidKeyStore. */
+        private const val BIOMETRIC_KEY_ALIAS = "e2e_storage_unlock"
+
+        /**
+         * 3.4 (FEATURE_PLAN.md): the inbound share FIFO.
+         *
+         * Staged in PROCESS MEMORY (text) and the app's own cacheDir (file
+         * bytes) until the page consumes it — `sharedPending` → `sharedRead`
+         * → `sharedDiscard`. Two plan rules, encoded here:
+         *  - the text of a share is NEVER written to disk (the FIFO carries
+         *    file bytes only; a message body on disk would be a durable
+         *    plaintext copy outside every at-rest control, R5);
+         *  - everything is dropped on read and replaced by the next share, so
+         *    no backlog of shared content accumulates.
+         * [SharedContentActivity] is the only writer.
+         */
+        data class StagedFile(val file: File, val name: String, val mime: String)
+        data class PendingShared(val text: String?, val files: List<StagedFile>)
+
+        @Volatile
+        private var pendingShared: PendingShared? = null
+
+        /** Cap: a share is an import, not a file-transfer protocol. */
+        private const val MAX_SHARED_FILE_BYTES = 25L * 1024 * 1024
+        private const val MAX_SHARED_TEXT_CHARS = 100_000
+
+        /** Read-only view for `sharedPending` / `sharedRead`. */
+        @JvmStatic
+        fun peekShared(): PendingShared? = pendingShared
+
+        /** `sharedDiscard`: drop the staged text and delete the cached copies. */
+        @JvmStatic
+        fun discardShared() {
+            pendingShared?.files?.forEach { f -> try { f.file.delete() } catch (_: Exception) {} }
+            pendingShared = null
+        }
+
+        /**
+         * Stage an ACTION_SEND intent: text into RAM, file bytes into the app's
+         * own cache. Never throws — a failed share must not crash the app.
+         * A new share replaces anything unconsumed (no backlog).
+         */
+        @JvmStatic
+        fun stageShared(context: Context, intent: Intent?) {
+            try {
+                if (intent == null) return
+                var text: String? = null
+                try {
+                    text = intent.getStringExtra(Intent.EXTRA_TEXT)
+                        ?: intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                } catch (_: Exception) {
+                }
+                if (text != null && text.length > MAX_SHARED_TEXT_CHARS) text = null
+
+                val uris = mutableListOf<Uri>()
+                try {
+                    intent.clipData?.let { cd ->
+                        for (i in 0 until cd.itemCount) cd.getItemAt(i)?.uri?.let { uris.add(it) }
+                    }
+                    if (uris.isEmpty()) {
+                        @Suppress("DEPRECATION")
+                        (intent.getParcelableExtra<android.os.Parcelable>(Intent.EXTRA_STREAM) as? Uri)
+                            ?.let { uris.add(it) }
+                    }
+                } catch (_: Exception) {
+                }
+
+                discardShared()
+                val dir = File(context.cacheDir, "shared").apply { mkdirs() }
+                val staged = uris.mapNotNull { uri ->
+                    try {
+                        var name = "shared.bin"
+                        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                            val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (i >= 0 && c.moveToFirst()) c.getString(i)?.let { name = it }
+                        }
+                        val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifEmpty { "shared.bin" }
+                        val out = File(dir, "${System.currentTimeMillis()}-$safe")
+                        val input = context.contentResolver.openInputStream(uri) ?: return@mapNotNull null
+                        input.use { ins -> out.outputStream().use { ins.copyTo(it) } }
+                        if (out.length() > MAX_SHARED_FILE_BYTES) { out.delete(); return@mapNotNull null }
+                        StagedFile(out, name, mime)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                if (text == null && staged.isEmpty()) return
+                pendingShared = PendingShared(text, staged)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     /** Whether the page currently wants the system bars hidden. */
@@ -230,31 +361,6 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
-     * Block screenshots and screen recordings of whatever is on screen —
-     * 5.2, FEATURE_PLAN.md (`FLAG_SECURE`).
-     *
-     * "No screenshots" is the point of this app in some channels, and a
-     * screenshot bypasses every layer below the display: the pixels are
-     * decrypted by definition. Deliberately PER-CHANNEL, driven by the page:
-     * a global FLAG_SECURE would also block the user's own screenshots
-     * everywhere (and Assist) — the trap FEATURE_PLAN.md §10 calls out. No
-     * permission involved; the flag lives on the window and dies with it.
-     */
-    @Command
-    fun setSecureMode(invoke: Invoke) {
-        val args = invoke.parseArgs(SecureModeArgs::class.java)
-        activity.runOnUiThread {
-            val w = window()
-            if (args.active) {
-                w?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            } else {
-                w?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            }
-        }
-        invoke.resolve()
-    }
-
-    /**
      * Whether the app already ignores battery optimizations — 6.1,
      * FEATURE_PLAN.md. Returns `{ignoring:true}` when there is nothing to ask
      * for (no PowerManager, or an OEM build that reports no optimization at
@@ -335,6 +441,273 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
         null
     }
 
+    // ── 1.3 (FEATURE_PLAN.md): audio output routing ────────────────────────
+    // The WebView cannot choose a call-audio route; AudioManager can (API 31+
+    // setCommunicationDevice, with the pre-31 speakerphone fallback our minSdk
+    // 29 still needs). Local device state only — nothing leaves the process.
+
+    @Command
+    fun audioRoutes(invoke: Invoke) {
+        val out = JSObject()
+        val routes = org.json.JSONArray()
+        try {
+            val am = activity.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            if (am != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                var current = ""
+                try { current = am.communicationDevice?.id?.toString() ?: "" } catch (_: Exception) {}
+                for (d in am.availableCommunicationDevices) {
+                    val item = org.json.JSONObject()
+                    item.put("id", d.id)
+                    item.put("type", routeType(d.type))
+                    val pretty = d.productName?.toString() ?: ""
+                    item.put("name", pretty.ifEmpty { routeTypeName(d.type) })
+                    routes.put(item)
+                }
+                out.put("routes", routes)
+                out.put("current", current)
+            } else {
+                // Pre-31 (or no audio service): the only route the platform
+                // exposes is speaker on/off — show exactly those.
+                val speakerOn = try { am?.isSpeakerphoneOn == true } catch (_: Exception) { false }
+                val item = org.json.JSONObject()
+                item.put("id", "speaker")
+                item.put("type", "speaker")
+                item.put("name", "Speaker")
+                routes.put(item)
+                out.put("routes", routes)
+                out.put("current", if (speakerOn) "speaker" else "")
+            }
+        } catch (_: Exception) {
+            out.put("routes", routes)
+            out.put("current", "")
+        }
+        invoke.resolve(out)
+    }
+
+    @Command
+    fun setAudioRoute(invoke: Invoke) {
+        val args = invoke.parseArgs(AudioRouteArgs::class.java)
+        val out = JSObject()
+        try {
+            val am = activity.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            val id = args.id ?: ""
+            var ok = false
+            if (am != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    ok = if (id.isEmpty()) {
+                        am.clearCommunicationDevice()
+                        true
+                    } else {
+                        val target = am.availableCommunicationDevices.firstOrNull { it.id.toString() == id }
+                        if (target != null) am.setCommunicationDevice(target) else false
+                    }
+                } else {
+                    am.isSpeakerphoneOn = (id == "speaker")
+                    ok = true
+                }
+            }
+            out.put("ok", ok)
+        } catch (_: Exception) {
+            out.put("ok", false)
+        }
+        invoke.resolve(out)
+    }
+
+    private fun routeType(type: Int): String = when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "earpiece"
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "speaker"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "wired"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "bluetooth"
+        else -> "other"
+    }
+
+    private fun routeTypeName(type: Int): String = when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Earpiece"
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "Wired headset"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth"
+        else -> "Audio output"
+    }
+
+    // ── 5.1 (FEATURE_PLAN.md): biometric unlock ────────────────────────────
+    // The biometric RELEASES the Keystore-wrapped storage password: an AES-GCM
+    // key in the Android Keystore with setUserAuthenticationRequired +
+    // AUTH_BIOMETRIC_STRONG (per-operation), used THROUGH a BiometricPrompt
+    // CryptoObject — the cipher literally cannot produce output without a
+    // successful biometric match, a failed/cancelled prompt rejects, and
+    // onAuthenticationFailed resolves NOTHING (plan: failed auth must never
+    // reset to an unlocked state). The password path stays untouched as the
+    // fallback; the key never leaves the enclave.
+
+    @Command
+    fun biometricAvailable(invoke: Invoke) {
+        val out = JSObject()
+        val pm = activity.packageManager
+        val has = pm.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)
+            || pm.hasSystemFeature(PackageManager.FEATURE_FACE)
+        out.put("available", has)
+        invoke.resolve(out)
+    }
+
+    @Command
+    fun biometricSeal(invoke: Invoke) {
+        val args = invoke.parseArgs(BiometricSealArgs::class.java)
+        val mode = args.mode ?: "unwrap"
+        val payload = args.data ?: ""
+        val out = JSObject()
+        try {
+            val key = biometricSecretKey()
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val plain: ByteArray?
+            var ct: ByteArray? = null
+            if (mode == "wrap") {
+                plain = Base64.decode(payload, Base64.NO_WRAP)
+                cipher.init(Cipher.ENCRYPT_MODE, key)
+            } else {
+                plain = null
+                val all = Base64.decode(payload, Base64.NO_WRAP)
+                if (all.size <= 12) { invoke.reject("biometric blob is malformed"); return }
+                cipher.init(
+                    Cipher.DECRYPT_MODE,
+                    key,
+                    GCMParameterSpec(128, all.copyOfRange(0, 12))
+                )
+                ct = all.copyOfRange(12, all.size)
+            }
+            val sealedCt = ct
+            val crypto = BiometricPrompt.CryptoObject(cipher)
+            val prompt = BiometricPrompt.Builder(activity)
+                .setTitle(args.title ?: "Confirm it's you")
+                .setSubtitle(
+                    if (mode == "wrap") "Store your password for fingerprint unlock"
+                    else "Unlock with your fingerprint"
+                )
+                .setConfirmationRequired(false)
+                .build()
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    try {
+                        if (mode == "wrap") {
+                            val enc = cipher.doFinal(plain)
+                            val joined = ByteArray(12 + enc.size)
+                            System.arraycopy(cipher.iv, 0, joined, 0, 12)
+                            System.arraycopy(enc, 0, joined, 12, enc.size)
+                            out.put("data", Base64.encodeToString(joined, Base64.NO_WRAP))
+                        } else {
+                            val dec = cipher.doFinal(sealedCt)
+                            out.put("data", Base64.encodeToString(dec, Base64.NO_WRAP))
+                        }
+                        invoke.resolve(out)
+                    } catch (e: Exception) {
+                        invoke.reject("biometric operation failed: ${e.message}")
+                    }
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    invoke.reject("biometric: $errString")
+                }
+
+                override fun onAuthenticationFailed() {
+                    // A partial non-match: the error callback follows for real
+                    // failures. Deliberately resolves NOTHING — see the doc
+                    // above (no fallback to an unlocked state, ever).
+                }
+            }
+            prompt.authenticate(crypto, CancellationSignal(), activity.mainExecutor, callback)
+        } catch (e: Exception) {
+            invoke.reject("biometric unavailable: ${e.message}")
+        }
+    }
+
+    private fun biometricSecretKey(): SecretKey {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (ks.containsAlias(BIOMETRIC_KEY_ALIAS)) {
+            (ks.getKey(BIOMETRIC_KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        }
+        val spec = KeyGenParameterSpec.Builder(
+            BIOMETRIC_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setUserAuthenticationRequired(true)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // 0 = authenticated for EVERY operation, biometric-strength.
+                    setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+                } else {
+                    setUserAuthenticationValidityDurationSeconds(-1)
+                }
+            }
+            .build()
+        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        gen.init(spec)
+        return gen.generateKey()
+    }
+
+    // ── 3.4 (FEATURE_PLAN.md): share-into-app consumption ────────────────
+    // [SharedContentActivity] stages; these three drain: pending (what is
+    // staged, metadata only), read (one file as base64, ≤25 MB), discard
+    // (delete the cached copies + clear the RAM copy). Consume-once by
+    // construction: discard runs right after a successful read loop in JS.
+
+    @Command
+    fun sharedPending(invoke: Invoke) {
+        val out = JSObject()
+        try {
+            val p = peekShared()
+            if (p == null) {
+                out.put("staged", false)
+            } else {
+                out.put("staged", true)
+                p.text?.let { out.put("text", it) }
+                val files = org.json.JSONArray()
+                p.files.forEach { f ->
+                    val item = org.json.JSONObject()
+                    item.put("name", f.name)
+                    item.put("mime", f.mime)
+                    files.put(item)
+                }
+                out.put("files", files)
+            }
+        } catch (_: Exception) {
+            out.put("staged", false)
+        }
+        invoke.resolve(out)
+    }
+
+    @Command
+    fun sharedRead(invoke: Invoke) {
+        val args = invoke.parseArgs(SharedReadArgs::class.java)
+        try {
+            val p = peekShared()
+            if (p == null) { invoke.reject("nothing staged"); return }
+            val f = p.files.getOrNull(args.index)
+            if (f == null) { invoke.reject("no such shared file"); return }
+            val bytes = f.file.readBytes()
+            val out = JSObject()
+            out.put("name", f.name)
+            out.put("mime", f.mime)
+            out.put("dataB64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            invoke.resolve(out)
+        } catch (e: Exception) {
+            invoke.reject("could not read shared file: ${e.message}")
+        }
+    }
+
+    @Command
+    fun sharedDiscard(invoke: Invoke) {
+        try { discardShared() } catch (_: Exception) {}
+        invoke.resolve()
+    }
+
     private fun window(): Window? = activity.window
 
     private fun installBackCallback() {
@@ -345,6 +718,173 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
         val host = activity as? AppCompatActivity ?: return
         host.onBackPressedDispatcher.addCallback(host, backCallback)
         backInstalled = true
+    }
+
+    // ─── 1.7 on-device live captions ─────────────────────────────────────
+    //
+    // The plan's exploit review puts two rules on the captions engine, and this
+    // is the only layer that can actually enforce them:
+    //
+    //   1. The engine must be OFFLINE. `isRecognitionAvailable()` is NOT enough
+    //      — that can be the network recogniser, which ships the audio to
+    //      Google and would take a call's audio off the device, the single thing
+    //      captions must never do. So availability is
+    //      `SpeechRecognizer.isOnDeviceRecognitionAvailable()` (API 31+) only.
+    //   2. Starting captions uses `createOnDeviceSpeechRecognizer` and
+    //      EXTRA_PREFER_OFFLINE, and REJECTS when the device has no on-device
+    //      recogniser rather than silently falling back to the network one.
+    //
+    // Scope, stated plainly: the recogniser listens to the MICROPHONE — what
+    // this device's user is saying. Android hands the far end of a call only to
+    // a system app (CAPTURE_AUDIO_OUTPUT), so this feature does not transcribe
+    // the other participants, and the UI says so.
+
+    private var recognizer: SpeechRecognizer? = null
+    private var captionsActive = false
+    private val captionHandler = Handler(Looper.getMainLooper())
+
+    private fun onDeviceRecognizerAvailable(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+        return try {
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(activity)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun hasMicPermission(): Boolean =
+        activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Report whether captions can run at all. `available` is true only for an
+     * offline recogniser that also has a microphone to listen to.
+     */
+    @Command
+    fun captionsAvailable(invoke: Invoke) {
+        val onDevice = onDeviceRecognizerAvailable()
+        val mic = hasMicPermission()
+        invoke.resolve(JSObject().apply {
+            put("available", onDevice && mic)
+            put("onDevice", onDevice)
+            put("reason", when {
+                !onDevice -> "no-offline-recognizer"
+                !mic -> "no-microphone-permission"
+                else -> ""
+            })
+        })
+    }
+
+    private fun emitCaption(text: String, isFinal: Boolean) {
+        trigger("box:caption", JSObject().apply {
+            put("text", text)
+            put("final", isFinal)
+        })
+    }
+
+    private fun stopRecognizer() {
+        val r = recognizer
+        recognizer = null
+        if (r != null) {
+            try { r.stopListening() } catch (_: Exception) {}
+            try { r.cancel() } catch (_: Exception) {}
+            try { r.destroy() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Restart listening after an utterance: an on-device recogniser ends its
+     * session at every result, and captions are supposed to keep going until the
+     * user turns them off. Only ever restarted while `captionsActive`.
+     */
+    private fun listenForCaptions() {
+        if (!captionsActive) return
+        val r = recognizer ?: return
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            // The belt to createOnDeviceSpeechRecognizer's braces: even a session
+            // created on-device is told to stay on-device.
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, activity.packageName)
+        }
+        try { r.startListening(intent) } catch (_: Exception) { captionsActive = false }
+    }
+
+    @Command
+    fun captionsStart(invoke: Invoke) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !onDeviceRecognizerAvailable()) {
+            // Fail closed. The network recogniser is right there and would work
+            // — and would break E2EE for the call's audio, which is the entire
+            // reason this feature exists as a native one.
+            invoke.reject("no-offline-recognizer")
+            return
+        }
+        if (!hasMicPermission()) {
+            invoke.reject("no-microphone-permission")
+            return
+        }
+        activity.runOnUiThread {
+            try {
+                stopRecognizer()
+                val r = SpeechRecognizer.createOnDeviceSpeechRecognizer(activity)
+                if (r == null) { invoke.reject("no-offline-recognizer"); return@runOnUiThread }
+                recognizer = r
+                captionsActive = true
+                r.setRecognitionListener(object : RecognitionListener {
+                    override fun onPartialResults(partialResults: Bundle?) {
+                        val text = partialResults
+                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.firstOrNull()
+                        if (!text.isNullOrBlank()) emitCaption(text, false)
+                    }
+
+                    override fun onResults(results: Bundle?) {
+                        val text = results
+                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.firstOrNull()
+                        if (!text.isNullOrBlank()) emitCaption(text, true)
+                        listenForCaptions()
+                    }
+
+                    override fun onError(error: Int) {
+                        // Reported, never swallowed: the page shows "captions
+                        // stopped" instead of a panel that has quietly died.
+                        trigger("box:caption", JSObject().apply {
+                            put("text", "")
+                            put("final", true)
+                            put("error", error)
+                        })
+                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                            captionsActive = false
+                            return
+                        }
+                        // Transient errors (no speech, a busy recogniser, a
+                        // momentary timeout) just mean "listen again".
+                        captionHandler.postDelayed({ listenForCaptions() }, 400)
+                    }
+
+                    override fun onReadyForSpeech(params: Bundle?) {}
+                    override fun onBeginningOfSpeech() {}
+                    override fun onRmsChanged(rmsdB: Float) {}
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+                    override fun onEndOfSpeech() {}
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                })
+                listenForCaptions()
+                invoke.resolve()
+            } catch (e: Exception) {
+                captionsActive = false
+                stopRecognizer()
+                invoke.reject(e.message ?: "captions failed to start")
+            }
+        }
+    }
+
+    @Command
+    fun captionsStop(invoke: Invoke) {
+        captionsActive = false
+        activity.runOnUiThread { stopRecognizer() }
+        invoke.resolve()
     }
 
     /**

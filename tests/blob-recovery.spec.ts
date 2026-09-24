@@ -2,6 +2,14 @@ import { test, expect } from '@playwright/test';
 
 const BASE = 'https://localhost:3443';
 
+// A real *server key* is `e2e_server_<uuid>`. The bundle also carries the
+// shared local app state — `e2e_server_groups_<uid>` (folders) and
+// `e2e_server_group_assignments_<uid>` — which a fresh registration writes as
+// empty defaults. Those are per-account SETTINGS, not server keys, so a plain
+// `startsWith('e2e_server_')` would count them and make these assertions
+// meaningless (bundle v4 added that shared state).
+const SERVER_KEY_RE = /^e2e_server_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 test.describe('Key Blob Recovery After Cookie Clear', () => {
 
     async function registerUser(page: any, username: string, password = 'password123') {
@@ -326,13 +334,11 @@ test.describe('Key Blob Recovery After Cookie Clear', () => {
         const blobData = await blobRes.json();
 
         const blobContents = await page.evaluate(async ({ encryptedBlob, salt, nonce }) => {
-            const encPw = localStorage.getItem('e2e_encrypted_password');
-            const devKeyStr = localStorage.getItem('e2e_device_key');
-            if (!encPw || !devKeyStr) return JSON.stringify({ error: 'missing_password_or_device_key' });
-            const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-            const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            if (!pwB64) return JSON.stringify({ error: 'cannot_decrypt_password' });
-            const password = atob(pwB64);
+            // 5.6: the vault owns the at-rest password now, so read it the way
+            // the app does (session memory → vault ticket → legacy bootstrap)
+            // instead of unwrapping the deleted e2e_encrypted_password blob.
+            const password = (typeof loadDecryptedPassword === 'function') ? loadDecryptedPassword() : null;
+            if (!password) return JSON.stringify({ error: 'missing_password_or_device_key' });
             const bundle = E2ECrypto.decryptKeyBundle(encryptedBlob, password, salt, nonce);
             if (!bundle) return JSON.stringify({ error: 'cannot_decrypt_bundle' });
             return JSON.stringify(bundle);
@@ -346,7 +352,7 @@ test.describe('Key Blob Recovery After Cookie Clear', () => {
         const hasIdentityKey = keys.some(k => k.startsWith('e2e_identity_private_'));
         const hasHmac = parsed['e2e_hmac_key'] !== undefined;
         const hasFriendCode = parsed['e2e_friend_code'] !== undefined;
-        const hasServerKey = keys.some(k => k.startsWith('e2e_server_') && !k.includes('history'));
+        const hasServerKey = keys.some(k => SERVER_KEY_RE.test(k));
         const hasProfileCache = parsed['profile_key_cache'] !== undefined;
 
         console.log('=== BLOB KEY INVENTORY ===');
@@ -385,13 +391,10 @@ test.describe('Key Blob Recovery After Cookie Clear', () => {
         const blobData = await blobRes.json();
 
         const blobContents = await page.evaluate(async ({ encryptedBlob, salt, nonce }) => {
-            const encPw = localStorage.getItem('e2e_encrypted_password');
-            const devKeyStr = localStorage.getItem('e2e_device_key');
-            if (!encPw || !devKeyStr) return JSON.stringify({ error: 'missing' });
-            const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-            const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            if (!pwB64) return JSON.stringify({ error: 'no_pw' });
-            const password = atob(pwB64);
+            // 5.6: read the password the way the app does — the vault deleted
+            // the at-rest bootstrap blob this used to unwrap.
+            const password = (typeof loadDecryptedPassword === 'function') ? loadDecryptedPassword() : null;
+            if (!password) return JSON.stringify({ error: 'missing' });
             const bundle = E2ECrypto.decryptKeyBundle(encryptedBlob, password, salt, nonce);
             return JSON.stringify(bundle);
         }, { encryptedBlob: blobData.encrypted_blob, salt: blobData.salt, nonce: blobData.nonce });
@@ -405,7 +408,7 @@ test.describe('Key Blob Recovery After Cookie Clear', () => {
         expect(parsed['e2e_hmac_key']).toBeTruthy();
         expect(parsed['e2e_friend_code']).toBeTruthy();
         expect(keys.some(k => k.startsWith('e2e_identity_private_'))).toBe(true);
-        expect(keys.some(k => k.startsWith('e2e_server_') && !k.includes('history'))).toBe(false);
+        expect(keys.some(k => SERVER_KEY_RE.test(k))).toBe(false);
     });
 
     // ──────────────────────────────────────────────────────────────────
@@ -422,13 +425,10 @@ test.describe('Key Blob Recovery After Cookie Clear', () => {
 
         // Manually save blob (bypassing saveKeyBlobToServer's silent failures)
         const blobSaved = await page.evaluate(async () => {
-            const encPw = localStorage.getItem('e2e_encrypted_password');
-            const devKeyStr = localStorage.getItem('e2e_device_key');
-            if (!encPw || !devKeyStr) return 'missing_creds';
-            const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-            const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            if (!pwB64) return 'cannot_decode_pw';
-            const password = atob(pwB64);
+            // 5.6: the vault owns the at-rest password now — one source of
+            // truth for tests and app alike.
+            const password = (typeof loadDecryptedPassword === 'function') ? loadDecryptedPassword() : null;
+            if (!password) return 'missing_creds';
             const bundle = E2ECrypto.buildKeyBundle();
             const enc = E2ECrypto.encryptKeyBundle(bundle, password);
             const res = await fetch('/api/key-blob', {
@@ -530,13 +530,10 @@ test.describe('Key Blob Recovery After Cookie Clear', () => {
         const blobData = await blobRes.json();
 
         const blobContents = await page.evaluate(async ({ encryptedBlob, salt, nonce }) => {
-            const encPw = localStorage.getItem('e2e_encrypted_password');
-            const devKeyStr = localStorage.getItem('e2e_device_key');
-            if (!encPw || !devKeyStr) return JSON.stringify({ error: 'missing_creds' });
-            const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-            const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            if (!pwB64) return JSON.stringify({ error: 'cannot_decode_pw' });
-            const password = atob(pwB64);
+            // 5.6: read the password the way the app does — the vault deleted
+            // the at-rest bootstrap blob this used to unwrap.
+            const password = (typeof loadDecryptedPassword === 'function') ? loadDecryptedPassword() : null;
+            if (!password) return JSON.stringify({ error: 'missing_creds' });
             const bundle = E2ECrypto.decryptKeyBundle(encryptedBlob, password, salt, nonce);
             if (!bundle) return JSON.stringify({ error: 'cannot_decrypt' });
             return JSON.stringify(bundle);
@@ -546,7 +543,7 @@ test.describe('Key Blob Recovery After Cookie Clear', () => {
         console.log(blobContents);
         const parsed = JSON.parse(blobContents);
         const keys = Object.keys(parsed);
-        const hasServerKey = keys.some(k => k.startsWith('e2e_server_') && !k.includes('history'));
+        const hasServerKey = keys.some(k => SERVER_KEY_RE.test(k));
 
         console.log('Server key in blob via debounced path:', hasServerKey ? 'YES' : 'NO');
         console.log('All keys:', keys);

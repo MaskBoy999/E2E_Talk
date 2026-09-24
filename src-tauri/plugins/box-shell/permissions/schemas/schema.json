@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the audioRoutes command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-audioRoutes",
+          "markdownDescription": "Enables the audioRoutes command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the audioRoutes command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-audioRoutes",
+          "markdownDescription": "Denies the audioRoutes command without any pre-configured scope."
+        },
+        {
           "description": "Enables the batteryRequest command without any pre-configured scope.",
           "type": "string",
           "const": "allow-batteryRequest",
@@ -317,6 +329,66 @@
           "type": "string",
           "const": "deny-batteryStatus",
           "markdownDescription": "Denies the batteryStatus command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the biometricAvailable command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-biometricAvailable",
+          "markdownDescription": "Enables the biometricAvailable command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the biometricAvailable command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-biometricAvailable",
+          "markdownDescription": "Denies the biometricAvailable command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the biometricSeal command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-biometricSeal",
+          "markdownDescription": "Enables the biometricSeal command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the biometricSeal command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-biometricSeal",
+          "markdownDescription": "Denies the biometricSeal command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the captionsAvailable command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-captionsAvailable",
+          "markdownDescription": "Enables the captionsAvailable command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the captionsAvailable command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-captionsAvailable",
+          "markdownDescription": "Denies the captionsAvailable command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the captionsStart command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-captionsStart",
+          "markdownDescription": "Enables the captionsStart command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the captionsStart command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-captionsStart",
+          "markdownDescription": "Denies the captionsStart command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the captionsStop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-captionsStop",
+          "markdownDescription": "Enables the captionsStop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the captionsStop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-captionsStop",
+          "markdownDescription": "Denies the captionsStop command without any pre-configured scope."
         },
         {
           "description": "Enables the clearNotifications command without any pre-configured scope.",
@@ -379,6 +451,18 @@
           "markdownDescription": "Denies the keepScreenOn command without any pre-configured scope."
         },
         {
+          "description": "Enables the setAudioRoute command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-setAudioRoute",
+          "markdownDescription": "Enables the setAudioRoute command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the setAudioRoute command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-setAudioRoute",
+          "markdownDescription": "Denies the setAudioRoute command without any pre-configured scope."
+        },
+        {
           "description": "Enables the setBackHandler command without any pre-configured scope.",
           "type": "string",
           "const": "allow-setBackHandler",
@@ -391,16 +475,40 @@
           "markdownDescription": "Denies the setBackHandler command without any pre-configured scope."
         },
         {
-          "description": "Enables the setSecureMode command without any pre-configured scope.",
+          "description": "Enables the sharedDiscard command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-setSecureMode",
-          "markdownDescription": "Enables the setSecureMode command without any pre-configured scope."
+          "const": "allow-sharedDiscard",
+          "markdownDescription": "Enables the sharedDiscard command without any pre-configured scope."
         },
         {
-          "description": "Denies the setSecureMode command without any pre-configured scope.",
+          "description": "Denies the sharedDiscard command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-setSecureMode",
-          "markdownDescription": "Denies the setSecureMode command without any pre-configured scope."
+          "const": "deny-sharedDiscard",
+          "markdownDescription": "Denies the sharedDiscard command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the sharedPending command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-sharedPending",
+          "markdownDescription": "Enables the sharedPending command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the sharedPending command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-sharedPending",
+          "markdownDescription": "Denies the sharedPending command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the sharedRead command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-sharedRead",
+          "markdownDescription": "Enables the sharedRead command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the sharedRead command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-sharedRead",
+          "markdownDescription": "Denies the sharedRead command without any pre-configured scope."
         },
         {
           "description": "Enables the vibrate command without any pre-configured scope.",
@@ -415,10 +523,10 @@
           "markdownDescription": "Denies the vibrate command without any pre-configured scope."
         },
         {
-          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-setSecureMode`",
+          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-audioRoutes`\n- `allow-setAudioRoute`\n- `allow-biometricAvailable`\n- `allow-biometricSeal`\n- `allow-sharedPending`\n- `allow-sharedRead`\n- `allow-sharedDiscard`\n- `allow-captionsAvailable`\n- `allow-captionsStart`\n- `allow-captionsStop`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-setSecureMode`"
+          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-audioRoutes`\n- `allow-setAudioRoute`\n- `allow-biometricAvailable`\n- `allow-biometricSeal`\n- `allow-sharedPending`\n- `allow-sharedRead`\n- `allow-sharedDiscard`\n- `allow-captionsAvailable`\n- `allow-captionsStart`\n- `allow-captionsStop`"
         }
       ]
     }

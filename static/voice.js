@@ -83,6 +83,7 @@
             // 4.1: the desktop global hotkey's accelerator. Blank means the
             // shell's documented default (Ctrl+Shift+Space).
             pttShortcut: '',
+            audioOutputId: '',   // 1.3: '' = system default (setSinkId / setCommunicationDevice)
             echoCancellation: false,          // Chrome's AEC on the mic (default OFF)
             // Audio quality (Settings → Voice → Audio Quality). Send = the
             // capture sample rate / Opus bitrate for the mic; receive = the
@@ -243,6 +244,11 @@
         setVideoWatchdogSecs: setVideoWatchdogSecs,
         getScreenDiag: getScreenDiag,
         getPeerDiag: function () { return collectPeerDiag(); },
+        // 6.5: pure same-LAN verdict from local facts only (see sameLanAsBox) —
+        // exposed for the diagnostics panel's network line and for tests.
+        sameLanAsBox: function (boxHost, localIp) { return sameLanAsBox(boxHost, localIp); },
+        listAudioOutputs: function () { return listAudioOutputs(); },
+        setAudioOutput: function (id) { return setAudioOutput(id); },
         getVoiceState: function () { return { inVoice: S.connected, channelId: S.channelId, dmChannelId: S.dmChannelId, serverId: S.serverId, roomType: S.roomType }; },
         refreshVoiceDiag: renderVoiceDiag,
         healAndRejoin: healAndRejoin,
@@ -590,6 +596,18 @@
         // 4.1: the global hotkey's press/release listener, and the setting it
         // obeys (a saved "hold to talk + key" is registered on every launch).
         _boxPttListen();
+        // 4.2: the mini window's buttons.
+        _boxMiniControlListen();
+        // 4.2: the voice-bar toggle (desktop shell — on a phone the emit simply
+        // has no Rust listener, so nothing happens).
+        var _miniBtn = el('voice-bar-mini');
+        if (_miniBtn) _miniBtn.addEventListener('click', function () {
+            var t = window.__TAURI__;
+            if (!t || !t.event || typeof t.event.emit !== 'function') return;
+            t.event.emit('box:mini-window', { open: true });
+        });
+        // 1.3: populate the output-device picker (async).
+        refreshAudioOutputSelect();
         _boxPttShortcut();
         bindVolumeMenu();
         bindCamOptMenu();
@@ -1025,6 +1043,38 @@
     function getWs() {
         try { return typeof ws !== 'undefined' ? ws : null; } catch (_) { return null; }
     }
+    // 1.7: publish one caption line to the call. There is deliberately NO new
+    // message type and no new server path: this reuses the existing
+    // `voice_signal` envelope, which send() encrypts with the call's signal key
+    // (the same E2EE protection SDP and ICE already get), and it addresses each
+    // peer individually exactly like an offer does, because "signal" is a
+    // peer-to-peer message by construction.
+    //
+    // Returns false when not in a call — the caller must not treat that as
+    // success, and nothing is buffered: captions are in-the-moment only.
+    window.__voiceSendCaption = function (text, isFinal) {
+        try {
+            var peers = Object.keys(S.peers || {});
+            if (!peers.length || !text) return false;
+            var payload = {
+                type: 'caption',
+                text: String(text).slice(0, 240),
+                final: !!isFinal,
+            };
+            for (var i = 0; i < peers.length; i++) {
+                send({
+                    type: 'voice_signal',
+                    room_type: S.roomType,
+                    channel_id: S.channelId || '',
+                    dm_channel_id: S.dmChannelId || '',
+                    to_user_id: peers[i],
+                    signal: payload,
+                });
+            }
+            return true;
+        } catch (_) { return false; }
+    };
+
     function send(obj) {
         var w = getWs();
         if (w && w.readyState === WebSocket.OPEN) {
@@ -1587,6 +1637,8 @@
         S.pttOpen = false;
         // 4.6: the tray must stop claiming there is a call.
         _boxTrayState();
+        // 4.2: same for the mini window's status line.
+        _boxMiniStatePush();
         // A native (Android) PiP window must not outlive the call it was showing:
         // release it *before* the room's streams and tiles are torn down, or the
         // window would be left displaying a frozen last frame.
@@ -3922,6 +3974,9 @@
         });
     }
     setInterval(audioElementHealthSweep, 2000);
+    // 1.3: slow re-apply for elements recreated while a choice is active
+    // (join/rejoin) — a no-op when the sink already matches.
+    setInterval(function () { if (S.audioOutputId) applySinkToAll(); }, 2000);
 
     function setMemberVolume(uid, pct) {
         try { localStorage.setItem('voice_volume_' + uid, String(pct)); } catch (_) {}
@@ -4040,6 +4095,16 @@
     // Signaling handling
     // ------------------------------------------------------------------
     function handleSignal(fromUid, signal) {
+        // 1.7: published captions ride this same signal envelope — encrypted by
+        // encryptSignalPayload() in send(), decrypted above before we are called
+        // — but they are not peer-connection state, so they are handled before
+        // the pc lookup. A device with captions off simply has nothing to show.
+        if (signal.type === 'caption') {
+            if (typeof window.__captionsShowRemote === 'function') {
+                window.__captionsShowRemote(fromUid, signal);
+            }
+            return;
+        }
         var pc = S.peers[fromUid];
         if (!pc) {
             // A peer we haven't created yet — create it (covers late-joining
@@ -7532,6 +7597,8 @@
         if (vht) vht.addEventListener('change', function (e) { setHoldToTalk(e.target.checked); });
         var vps = document.getElementById('voice-ptt-shortcut');
         if (vps) vps.addEventListener('change', function (e) { setPttShortcut(e.target.value); });
+        var aos = document.getElementById('audio-output-select');
+        if (aos) aos.addEventListener('change', function (e) { setAudioOutput(e.target.value); });
         var saq = document.getElementById('voice-send-audio-quality');
         if (saq) saq.addEventListener('change', function (e) {
             S.settings.sendAudioQuality = e.target.value;
@@ -10289,6 +10356,8 @@
         // 4.6: every self-state change (mute/deafen/join) funnels through here,
         // which makes this the one place the tray needs to be told about.
         _boxTrayState();
+        // 4.2: and the mini window reads the same state.
+        _boxMiniStatePush();
         // 1.6: with hold-to-talk on, the mic buttons show the GATE state, not
         // the mute state — closed (= you are not transmitting) looks like a
         // muted mic, and holding the button lights it up like an open one.
@@ -12226,6 +12295,155 @@
         return m;
     }
 
+    // ── 6.5 (FEATURE_PLAN.md): network awareness ───────────────────────────
+    // "Are we on the box's own network — is a direct path possible?" answered
+    // from local interface facts only: the IP this device actually uses toward
+    // a peer (an ICE local candidate) vs the box's host. Both must be private
+    // RFC1918 literals in the same /24 for a useful "yes"; anything else is
+    // honestly `null` (can't tell). Pure → unit-tested. Nothing here ever
+    // leaves the machine — no SSID, no notification, no log (R6).
+    function sameLanAsBox(boxHost, localIp) {
+        function ipv4(s) { return /^\d{1,3}(\.\d{1,3}){3}$/.test(s || ''); }
+        function parts(s) { return s.split('.').map(Number); }
+        function priv(p) {
+            if (p.some(function (n) { return !(n >= 0 && n <= 255); })) return false;
+            return p[0] === 10 || (p[0] === 192 && p[1] === 168) || (p[0] === 172 && p[1] >= 16 && p[1] <= 31);
+        }
+        if (!ipv4(boxHost) || !ipv4(localIp)) return null;
+        var b = parts(boxHost), l = parts(localIp);
+        if (!priv(b) || !priv(l)) return null;
+        return b[0] === l[0] && b[1] === l[1] && b[2] === l[2]; // same /24 (heuristic)
+    }
+
+    // The panel's network line (6.5): the same-LAN verdict for the interface a
+    // live call actually uses. Shown in-app only.
+    function networkDiagHtml(peers) {
+        var localIp = null;
+        for (var i = 0; i < peers.length; i++) {
+            if (peers[i] && peers[i].localIp) { localIp = peers[i].localIp; break; }
+        }
+        if (!localIp) {
+            return '<div style="margin-top:4px">▸ <b>Network</b>  [unknown — no ICE candidates yet (join a call)]</div>';
+        }
+        var same = sameLanAsBox(location.hostname, localIp);
+        var verdict = same === null
+            ? 'box host is not a private LAN address — direct-path question does not apply'
+            : (same ? 'same LAN as the box — direct path possible' : 'different networks — expect a relayed path');
+        return '<div style="margin-top:4px">▸ <b>Network</b>  [' + esc(String(localIp)) + ' → ' + esc(location.hostname) + ' — ' + verdict + ']</div>';
+    }
+
+    // ── 1.3 (FEATURE_PLAN.md): audio output routing ────────────────────────
+    // Desktop/browser: HTMLMediaElement.setSinkId per remote-audio element (a
+    // slow sweep re-applies because elements are recreated on rejoin — a cheap
+    // no-op when the sink already matches). Android: the WebView ignores
+    // setSinkId, so the page asks the shell for the real route (AudioManager
+    // setCommunicationDevice behind plugin:box-shell|setAudioRoute). Local
+    // device state only — nothing leaves the process (plan verdict 1.3 ✅).
+    function _isAndroidBox() { return /Android/i.test(navigator.userAgent || ''); }
+
+    function listAudioOutputs() {
+        if (_isAndroidBox() && window.__TAURI__ && window.__TAURI__.core
+            && typeof window.__TAURI__.core.invoke === 'function') {
+            return window.__TAURI__.core.invoke('plugin:box-shell|audioRoutes').then(function (r) {
+                return { routes: (r && r.routes) || [], current: (r && r.current) || '', android: true };
+            }).catch(function () { return { routes: [], current: '', android: true }; });
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+            return Promise.resolve({ routes: [], current: '', android: false });
+        }
+        return navigator.mediaDevices.enumerateDevices().then(function (devs) {
+            var outs = devs.filter(function (d) { return d.kind === 'audiooutput'; });
+            return {
+                routes: outs.map(function (d, i) {
+                    return { id: d.deviceId || 'default', name: d.label || ('Output ' + (i + 1)), type: 'other' };
+                }),
+                current: S.audioOutputId || '',
+                android: false,
+            };
+        }).catch(function () { return { routes: [], current: '', android: false }; });
+    }
+
+    function applySinkToAll() {
+        if (!S.audioOutputId) return;
+        var els = document.querySelectorAll('audio');
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            if (el.sinkId === S.audioOutputId) continue;
+            if (typeof el.setSinkId === 'function') {
+                try {
+                    var p = el.setSinkId(S.audioOutputId);
+                    if (p && p.catch) p.catch(function () {});
+                } catch (_) {}
+            }
+        }
+    }
+
+    async function setAudioOutput(id) {
+        S.audioOutputId = id || '';
+        S.settings.audioOutputId = S.audioOutputId;
+        saveSettings();
+        if (_isAndroidBox() && window.__TAURI__ && window.__TAURI__.core
+            && typeof window.__TAURI__.core.invoke === 'function') {
+            try {
+                await window.__TAURI__.core.invoke('plugin:box-shell|setAudioRoute', { id: S.audioOutputId });
+            } catch (e) { console.warn('[box] setAudioRoute failed:', e); }
+        }
+        applySinkToAll();
+        refreshAudioOutputSelect();
+    }
+
+    function refreshAudioOutputSelect() {
+        var sel = document.getElementById('audio-output-select');
+        if (!sel) return;
+        listAudioOutputs().then(function (info) {
+            var prev = S.audioOutputId || '';
+            sel.innerHTML = '';
+            var def = document.createElement('option');
+            def.value = '';
+            def.textContent = info.android ? 'System default route' : 'System default output';
+            sel.appendChild(def);
+            info.routes.forEach(function (r) {
+                var o = document.createElement('option');
+                o.value = r.id;
+                o.textContent = r.name || r.type || r.id;
+                sel.appendChild(o);
+            });
+            var known = false;
+            for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === prev) { known = true; break; } }
+            sel.value = known ? prev : '';
+        });
+    }
+
+    // 4.2: the mini window's buttons arrive here — this window owns the call,
+    // so it is the one that acts (the mini view holds no call state of its own).
+    function _boxMiniControlListen() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.event || typeof tauri.event.listen !== 'function') return;
+        try {
+            tauri.event.listen('box:mini-control', function (e) {
+                var a = e && e.payload && e.payload.action;
+                if (a === 'mute') toggleMute();
+                else if (a === 'deafen') toggleDeafen();
+                else if (a === 'hangup') leaveVoice();
+            });
+        } catch (_) {}
+    }
+
+    // 4.2: push the call half of the state for the mini window's status line —
+    // booleans + a count, nothing else (same R1 posture as the tray).
+    function _boxMiniStatePush() {
+        var tauri = window.__TAURI__;
+        if (!tauri || !tauri.event || typeof tauri.event.emit !== 'function') return;
+        try {
+            tauri.event.emit('box:call-state', {
+                in_call: !!S.connected,
+                muted: !!S.muted,
+                deafened: !!S.deafened,
+                peers: Object.keys(S.peers || {}).length,
+            });
+        } catch (_) {}
+    }
+
     // Resolves to an array of per-peer diagnostics (one entry per RTCPeerConnection
     // in S.peers). Exposed on VoiceManager.getPeerDiag() and _debug.getPeerDiag.
     function collectPeerDiag() {
@@ -12242,16 +12460,23 @@
                 receivers: {},
             };
             return pc.getStats().then(function (stats) {
-                var outAgg = {}, inAgg = {};
+                var outAgg = {}, inAgg = {}, localCands = {};
                 try {
                     stats.forEach(function (r) {
                         // Connection-level ping first: candidate-pair reports
                         // carry no `kind`, so they have to be read BEFORE the
                         // kind guard below or they are silently dropped (1.8).
-                        if (r.type === 'candidate-pair' && r.state === 'succeeded' && typeof r.currentRoundTripTime === 'number') {
-                            // Several pairs can succeed; the nominated one is the
-                            // live path, so it wins.
-                            if (entry.pingMs === undefined || r.nominated) entry.pingMs = r.currentRoundTripTime * 1000;
+                        if (r.type === 'candidate-pair' && r.state === 'succeeded') {
+                            if (typeof r.currentRoundTripTime === 'number') {
+                                // Several pairs can succeed; the nominated one is the
+                                // live path, so it wins.
+                                if (entry.pingMs === undefined || r.nominated) entry.pingMs = r.currentRoundTripTime * 1000;
+                            }
+                            // 6.5: which LOCAL candidate carries the traffic — its
+                            // address answers "are we on the box's own network?".
+                            if (r.localCandidateId) entry._localCandidateId = r.localCandidateId;
+                        } else if (r.type === 'local-candidate') {
+                            localCands[r.id] = r.address || r.ip || null;
                         }
                         var k = r.kind || r.mediaType;
                         if (!k) return;
@@ -12285,6 +12510,12 @@
                         }
                     });
                 } catch (_) {}
+                // 6.5: resolve the live pair's local candidate → the address
+                // this device actually uses toward the peer.
+                if (entry._localCandidateId) {
+                    entry.localIp = localCands[entry._localCandidateId] || undefined;
+                    delete entry._localCandidateId;
+                }
                 var sAgg = {}, rAgg = {};
                 pc.getSenders().forEach(function (s) {
                     var kind = s.track ? s.track.kind : 'held';
@@ -12471,11 +12702,11 @@
             // a failed share is exactly the case where you open this panel, and
             // by then the call may already be over.
             if (!peers.length) {
-                list.innerHTML = screenDiagHtml()
+                list.innerHTML = screenDiagHtml() + networkDiagHtml(peers)
                     + '<div style="color:var(--text-muted)">Not in a call — join a voice channel or DM call to see per-peer stats.</div>';
                 return;
             }
-            var html = screenDiagHtml() + peers.map(diagPeerHtml).join('');
+            var html = screenDiagHtml() + networkDiagHtml(peers) + peers.map(diagPeerHtml).join('');
             html += '<div style="color:var(--text-muted);margin-top:6px">Updated ' + new Date(when).toLocaleTimeString() + ' · ' + peers.length + ' peer(s)</div>';
             list.innerHTML = html;
         });

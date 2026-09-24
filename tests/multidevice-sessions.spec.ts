@@ -236,11 +236,12 @@ test.describe('Shared local state (key blob)', () => {
             localStorage.setItem('sb_muted', JSON.stringify(['mirror_probe']));
         });
 
+        // 5.6: read the password through the app's own accessor (session memory
+        // → vault ticket → legacy bootstrap) — the vault deleted the at-rest
+        // password blob this used to unwrap.
         const pw = await page.evaluate(() => {
-            const encPw = localStorage.getItem('e2e_encrypted_password');
-            const dk = new Uint8Array((window as any).E2ECrypto.base64ToArrayBuffer(localStorage.getItem('e2e_device_key')));
-            const b64 = (window as any).E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            return b64 ? atob(b64) : null;
+            const getPw = (window as any).loadDecryptedPassword;
+            return (typeof getPw === 'function') ? getPw() : null;
         });
         expect(pw).toBeTruthy();
 
@@ -268,12 +269,8 @@ test.describe('Shared local state (key blob)', () => {
         const result = await page.evaluate(async () => {
             const t = localStorage.getItem('token');
             const E = (window as any).E2ECrypto;
-            const pw = (function () {
-                const encPw = localStorage.getItem('e2e_encrypted_password');
-                const dk = new Uint8Array(E.base64ToArrayBuffer(localStorage.getItem('e2e_device_key')));
-                const b64 = E.decodeEncryptedFileKey(encPw, dk);
-                return b64 ? atob(b64) : null;
-            })();
+            // 5.6: the vault's session accessor is the one source of truth.
+            const pw = (window as any).loadDecryptedPassword();
             const put = async (extra: Record<string, unknown>, baseRev: number | null) => {
                 const bundle = E.buildKeyBundle();
                 Object.assign(bundle, extra);

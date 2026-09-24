@@ -190,7 +190,12 @@ test.describe('Cross-Device Storage Key', () => {
                 ssk: sessionStorage.getItem('_ssk'),
                 // Bootstrap keys (should be different per device)
                 devKey: (W._secGetRaw ? W._secGetRaw('e2e_device_key') : localStorage.getItem('e2e_device_key')),
-                encPw: (W._secGetRaw ? W._secGetRaw('e2e_encrypted_password') : localStorage.getItem('e2e_encrypted_password')),
+                // 5.6: there is no shared password blob any more — each device
+                // holds its own Argon2id vault (own salt) and its own session
+                // ticket (encrypted under the device's session key).
+                vault: (W._secGetRaw ? W._secGetRaw('e2e_key_vault') : localStorage.getItem('e2e_key_vault')),
+                ticket: (W._secGetRaw ? W._secGetRaw('e2e_vault_ticket') : localStorage.getItem('e2e_vault_ticket')),
+                encPwGone: (W._secGetRaw ? W._secGetRaw('e2e_encrypted_password') : localStorage.getItem('e2e_encrypted_password')) === null,
                 // Token raw form (should be encrypted with ~)
                 tokenRaw: W._secGetRaw ? W._secGetRaw('token') : null,
                 // Token decrypted (should match)
@@ -199,7 +204,6 @@ test.describe('Cross-Device Storage Key', () => {
                 userRaw: W._secGetRaw ? W._secGetRaw('user') : null,
                 // Verify bootstrap keys are NOT encrypted
                 devKeyNotEncrypted: !localStorage.getItem('e2e_device_key')?.startsWith('~'),
-                encPwNotEncrypted: !localStorage.getItem('e2e_encrypted_password')?.startsWith('~'),
             };
         });
 
@@ -214,7 +218,11 @@ test.describe('Cross-Device Storage Key', () => {
         expect(device1State.tokenRaw?.startsWith('~')).toBe(true);
         expect(device1State.tokenDecrypted).toBe(user1Data.token);
         expect(device1State.devKeyNotEncrypted).toBe(true);
-        expect(device1State.encPwNotEncrypted).toBe(true);
+        // The vault replaced the password bootstrap, and it is gone (not left
+        // behind next to the vault).
+        expect(device1State.encPwGone).toBe(true);
+        expect(device1State.vault).toBeTruthy();
+        expect(device1State.ticket?.startsWith('~')).toBe(true);
 
         // ─── Device 2: Login (same account, new browser context) ─────
         const ctx2 = await browser.newContext({ ignoreHTTPSErrors: true });
@@ -230,12 +238,16 @@ test.describe('Cross-Device Storage Key', () => {
             return {
                 ssk: sessionStorage.getItem('_ssk'),
                 devKey: (W._secGetRaw ? W._secGetRaw('e2e_device_key') : localStorage.getItem('e2e_device_key')),
-                encPw: (W._secGetRaw ? W._secGetRaw('e2e_encrypted_password') : localStorage.getItem('e2e_encrypted_password')),
+                // 5.6: there is no shared password blob any more — each device
+                // holds its own Argon2id vault (own salt) and its own session
+                // ticket (encrypted under the device's session key).
+                vault: (W._secGetRaw ? W._secGetRaw('e2e_key_vault') : localStorage.getItem('e2e_key_vault')),
+                ticket: (W._secGetRaw ? W._secGetRaw('e2e_vault_ticket') : localStorage.getItem('e2e_vault_ticket')),
+                encPwGone: (W._secGetRaw ? W._secGetRaw('e2e_encrypted_password') : localStorage.getItem('e2e_encrypted_password')) === null,
                 tokenRaw: W._secGetRaw ? W._secGetRaw('token') : null,
                 tokenDecrypted: W._secGet ? W._secGet('token') : localStorage.getItem('token'),
                 userRaw: W._secGetRaw ? W._secGetRaw('user') : null,
                 devKeyNotEncrypted: !localStorage.getItem('e2e_device_key')?.startsWith('~'),
-                encPwNotEncrypted: !localStorage.getItem('e2e_encrypted_password')?.startsWith('~'),
             };
         });
 
@@ -244,7 +256,8 @@ test.describe('Cross-Device Storage Key', () => {
             tokenEncrypted: device2State.tokenRaw?.startsWith('~'),
             tokenMatch: device2State.tokenDecrypted?.substring(0, 20) + '...',
             devKeySame: device1State.devKey === device2State.devKey,
-            encPwSame: device1State.encPw === device2State.encPw,
+            vaultSame: device1State.vault === device2State.vault,
+            ticketSame: device1State.ticket === device2State.ticket,
             sskSame: device1State.ssk === device2State.ssk,
         }));
 
@@ -271,12 +284,18 @@ test.describe('Cross-Device Storage Key', () => {
         // Bootstrap keys (e2e_device_key) MUST be different per device
         // since each device generates its own random device key.
         expect(device2State.devKey).not.toBe(device1State.devKey);
-        expect(device2State.encPw).not.toBe(device1State.encPw);
+        // Per-device secrets must be per-device: each vault carries its own
+        // Argon2id salt and each ticket its own nonce, so device 2's are never a
+        // copy of device 1's (which is what the old password blob could have been).
+        expect(device2State.encPwGone).toBe(true);
+        expect(device2State.vault).toBeTruthy();
+        expect(device2State.vault).not.toBe(device1State.vault);
+        expect(device2State.ticket?.startsWith('~')).toBe(true);
+        expect(device2State.ticket).not.toBe(device1State.ticket);
 
-        // Bootstrap keys must NOT be encrypted (they need to be readable
-        // to bootstrap the key derivation on each page load)
+        // The device key is still a readable bootstrap value — it needs to be
+        // readable to identify the device on each page load.
         expect(device2State.devKeyNotEncrypted).toBe(true);
-        expect(device2State.encPwNotEncrypted).toBe(true);
 
         // Encryption must be working on device 2
         expect(device2State.tokenRaw?.startsWith('~')).toBe(true);

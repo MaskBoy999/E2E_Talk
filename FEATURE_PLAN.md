@@ -5,7 +5,7 @@ build"*; this one answers *"what does each thing actually mean, can it ship
 without breaking encryption, and where would an attacker get at it"*. Every
 verdict below was checked against the code as it stands, not assumed.
 
-Research date: 2026-09-23 · box at v0.2.27.
+Research date: 2026-09-23 · box at v0.2.29.
 
 ---
 
@@ -153,7 +153,7 @@ Effort letters are from `FEATURE_RESEARCH.md`. Verdict key:
 | # | What it *means* | Verdict | Exploit review |
 |---|---|---|---|
 | 5.1 Biometric unlock | Fingerprint instead of typing the storage-password bootstrap | ✅ strengthens | The biometric **releases** a Keystore-wrapped key; the template never leaves the enclave and nothing is stored that a bypass of the app UI wouldn't equally expose. Must keep the password path as fallback, and failed-auth attempts must not reset to an unlocked state. |
-| 5.2 `FLAG_SECURE` per channel | Block screenshots/screen-record for sensitive channels | ✅ strengthens | Per-channel, not global (research §10): global also blocks the user's own Assist/screenshot and fights PiP. |
+| 5.2 `FLAG_SECURE` per channel | Block screenshots/screen-record for sensitive channels | ❌ removed | Removed by request: opt-in per-channel flag was "not really helping" (the OS already lets the user screenshot their own screen). JS + Kotlin + ACL fully stripped. |
 | 5.3 Panic wipe / auto-lock | Wipe keys+cache after N idle minutes or a hidden gesture | ✅ strengthens | Wipe must cover *every* at-rest copy: secure storage, localStorage bundle, FTS5 index (5.7), cached images. Half-wipes that leave the search index are worse than none. |
 | 5.4 Device verification (SAS/emoji) | Visually confirm you're talking to the right device key | ✅ strengthens | Digest shown **in-app only** — never in a notification/widget (a verification code on a lock screen defeats TOFU for a shoulder-surfer). |
 | 5.5 Encrypted local export | Take your own data out as one encrypted file | ✅ preserves | Format pinned (age/libsodium), file via save dialog. The **file name/location** must not imply content (don't write `messages-decrypted.json` into Downloads silently — confirm dialog). |
@@ -233,3 +233,78 @@ fail-closed signaling guarantee intact.
 **Deferred / requires a security decision first:** 4.5 (Discord presence —
 opt-in wording), 4.7 (updater — pin the key first), 1.5 (ConnectionService —
 ship only after F2, since the dialer recents copy the ring's identity rules).
+
+---
+
+## 5. Implementation status — what is built, and what proves it
+
+The verdicts above are the design record and are unchanged. This section is the
+**build record**: each shipped item, the behaviour that actually matters, and
+the spec that goes red if it regresses. Run one with
+`npx playwright test tests/<file>` (the suite starts the server itself; see
+`README.md`).
+
+| Plan item | Shipped behaviour | Spec |
+|---|---|---|
+| **F1** | The ongoing-call card's text comes from the room *type* — a decrypted channel name never reaches the FGS notification | `notification-privacy.spec.ts` |
+| **F2** | Hide-preview reaches the native ring, lock-screen clean in both states | `notification-privacy.spec.ts` |
+| **F3** | Desktop asks Rust for an expiring toast; every Android card is cancelled by id when its time is up | `notification-privacy.spec.ts` |
+| **1.1** | Call notification actions: Mute / Deafen / Hang up as id-only `FLAG_IMMUTABLE` PendingIntents, plus a duration counter — commands, never content | `notification-privacy.spec.ts`, `call-comfort.spec.ts` |
+| **1.3** | The output picker is a real control over the OS output devices (`audioRoutes` / `setAudioRoute`) | `batch-b.spec.ts` |
+| **1.4** | The call requests transient audio focus (music pauses, notifications duck) and abandons it on teardown | `android-plugin-startup.spec.ts` |
+| **1.6** | Speak-only rides the existing RNNoise energy gate (never a second detector, never a mode it cannot gate); hold-to-talk keeps the mic track disabled until held — a gate, not a mute — and a server mute wins | `voice-activation.spec.ts` |
+| **1.7** | On-device captions: an **offline** engine only (no engine ⇒ captions refuse and say why, and `captionsStart` is never invoked, so no recogniser is handed the mic); display-only by default; publishing a second opt-in over the call channel, finals only; never on disk, in the console or in notifications | `captions.spec.ts` |
+| **1.8** | Per-peer ping / rtt / jitter beside frames, loss and E2EE transform counts in the diagnostics panel — in-app only, ids and numbers | `voice-diag.spec.ts` |
+| **2.3** | Quick Settings tile: literal labels only ("Mute"/"Unmute"/"Answer"/"E2E Chat"), boolean state, forwards the same verbs as the notification buttons | `batch-b.spec.ts` |
+| **2.6** | The message chime is ringer/DND-aware; Settings' "Test sound" deliberately bypasses the gate | `quiet-hours.spec.ts` |
+| **3.1** | Screen share carries the app's own audio as native PCM on the same projection; a refused capture costs only the audio track, never the video | `screen-share-audio-mobile.spec.ts` |
+| **3.2** | The Android 14+ projection intent requests the user-choice config, so the system picker offers a single app | `android-plugin-startup.spec.ts` |
+| **3.3 / 3.4** | Snip overlay, and share-into-app staging consumed into the composer | `batch-b.spec.ts` |
+| **3.5** | Drag-out hands the OS a DownloadURL, reusing the Save-as decryption (no new trust) | `drag-out.spec.ts` |
+| **4.1** | Global push-to-talk hotkey: the accelerator is parsed and rejected in Rust, press/release reaches the page as a boolean (default `Ctrl+Shift+Space`) | `ptt-hotkey.spec.ts`, box `cargo test` |
+| **4.2** | `?mini=1` renders only the controls view; the main window acts on its buttons | `batch-b.spec.ts` |
+| **4.4** | Deep links accept only in-scope id routes | `batch-b.spec.ts` |
+| **4.6** | Tray tooltip/status carry state and counts only — `in_call`/`muted`/`deafened`/`unread`, never a name | `tray-parity.spec.ts`, box `cargo test` |
+| **5.1** | Biometric unlock: enabling seals the **real** password (never plaintext), a cancelled prompt seals nothing and never looks enabled, the seal survives the login-page wipe, and the password path stays as fallback | `biometric-unlock.spec.ts` |
+| **5.2** | *Removed by request* — JS, Kotlin and ACL fully stripped, `setSecureMode` gone | `batch-b.spec.ts` (asserts absence) |
+| **5.3** | Panic wipe / auto-lock: default OFF, clamps, fires only past the idle limit, the chord wipes with no confirmation, and the wipe is total (search index included) | `panic-wipe.spec.ts` |
+| **5.4** | Device verification: both devices derive the SAME string, marking verified pins the key and a later key change warns, and the string never reaches a notification or a log | `device-verify.spec.ts` |
+| **5.5** | Encrypted local export: round-trips, a wrong passphrase fails, bytes are opaque, and the payload carries no session credentials | `encrypted-export.spec.ts` |
+| **5.6** | Stronghold-style vault: Argon2id, **delete-after-migrate**, migration fails closed, a cold start is LOCKED (no redirect, no wipe), unlocking restores the session, and the vault dies with the device | `key-vault.spec.ts` |
+| **5.7** | On-device search: decrypted text indexed and matched locally with the query never sent, ciphertext at rest, bounded/rotating, disappearing messages never indexed, panic wipe takes the DB | `local-search.spec.ts` |
+| **6.1** | Battery prompt asks once, opens Android's own exemption dialog, remembers for 30 days; already-exempt phones never see it | `call-comfort.spec.ts` |
+| **6.2** | The screen stays on for exactly the call's lifetime and releases at teardown | `call-comfort.spec.ts` |
+| **6.5** | Network awareness: same-LAN answered from local IP facts only, offline schedules no retry while `online` reconnects at once, diagnostics shows facts | `network-awareness.spec.ts` |
+
+| **7.1** | `turn-config` requires auth and mints per-session TURN credentials; the client merges them into `iceServers` (static pair still supported) | `voice-turn.spec.ts`, server `cargo test` |
+| **7.2** | Documented coturn recipe for calls that must survive mobile data — docs only, no code path | `COTURN.md` |
+
+**7.3 (LiveKit SFU) is deliberately not started** — it needs its own session for
+the key-derivation ↔ FrameCryptor check and the fail-closed signalling
+guarantee.
+
+### The 5.6 ↔ 5.1 seam: the session ticket
+
+Deleting the password bootstrap removed the only thing that let **in-page**
+flows wrap the key blob: the mirror wraps every save with the password, and
+enabling biometrics (5.1) seals the password itself. Keeping it in page memory
+alone died at the first navigation (login.html → index.html) or reload, which
+broke 5.1 and silently stopped every key-blob save.
+
+The middle ground is `e2e_vault_ticket`: the password written through
+secure-storage's own interceptor, i.e. stored **encrypted under the live
+session key** — the same protection the session token already has. It is only
+readable while a session is unlocked; a cold start has no key, so it reads as
+nothing and the lock screen asks for the password (or a fingerprint). It is
+written in exactly two places — `_kvMigrate()` (login/register/recovery) and
+`_secUnlockVault()` — and the writer proves the value landed as ciphertext
+(read through `_secGetRaw`, since the interceptor's `getItem` would hand back
+plaintext) before keeping it, so a failed encryption can never leave the
+password in the clear.
+
+### Known red, and NOT from this work
+
+`tests/profile-sharing.spec.ts` — `SV1`/`SV2`/`SV3` fail on a checkout of `HEAD`
+too (verified by stashing the `static/` diff and re-running). They are about
+display-name propagation after a server join, not about keys or the vault, so
+they belong to a dedicated fix rather than this plan.

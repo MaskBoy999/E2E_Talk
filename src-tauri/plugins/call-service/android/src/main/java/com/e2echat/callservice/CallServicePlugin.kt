@@ -174,6 +174,45 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 android.util.Log.w(SCREEN_TAG, "could not deliver the answer: ${e.message}")
             }
         }
+
+        // 2.3 (FEATURE_PLAN.md): the Quick Settings tile's state. Booleans plus
+        // an id chosen by US — the tile's labels are compile-time string
+        // literals (see CallTileService), so nothing user-visible and nothing
+        // decrypted ever reaches the launcher/system-UI process (R1/R2: tile
+        // labels are static app-defined strings, state booleans only).
+        @Volatile
+        @JvmStatic
+        var sInCall = false
+
+        @Volatile
+        @JvmStatic
+        var sMuted = false
+
+        @Volatile
+        @JvmStatic
+        var sRinging = false
+
+        /** Id only (never a name): needed so the tile's Answer can call back. */
+        @Volatile
+        @JvmStatic
+        var sRingingDmId = ""
+
+        /**
+         * Ask the system to re-read [CallTileService] — a tile only renders
+         * inside `onStartListening`, so every state change must nudge it.
+         * Never throws: a tile refresh failing must not fail the call command
+         * that triggered it.
+         */
+        fun requestTileUpdate(context: android.content.Context) {
+            try {
+                android.service.quicksettings.TileService.requestListeningState(
+                    context,
+                    android.content.ComponentName(context, CallTileService::class.java)
+                )
+            } catch (e: Exception) {
+                android.util.Log.w(SCREEN_TAG, "tile update skipped: ${e.message}")
+            }
+        }
     }
 
     init {
@@ -289,6 +328,10 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
             } else {
                 activity.startService(intent)
             }
+            // 2.3: the tile lights up for the length of the call.
+            sInCall = true
+            sMuted = false
+            requestTileUpdate(activity)
             invoke.resolve()
         } catch (e: Exception) {
             // Most common cause: the app was already fully backgrounded when the
@@ -307,6 +350,10 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun updateCallState(invoke: Invoke) {
         val args = invoke.parseArgs(UpdateCallStateArgs::class.java)
+        // 2.3: the tile's Mute/Unmute label follows the real state — booleans
+        // only cross to the system UI.
+        sMuted = args.muted == true
+        requestTileUpdate(activity)
         val intent = Intent(activity, CallForegroundService::class.java).apply {
             action = CallForegroundService.ACTION_UPDATE
             putExtra(CallForegroundService.EXTRA_MUTED, args.muted == true)
@@ -446,6 +493,10 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun stop(invoke: Invoke) {
         try {
             activity.stopService(Intent(activity, CallForegroundService::class.java))
+            // 2.3: no call → the tile goes back to unavailable.
+            sInCall = false
+            sMuted = false
+            requestTileUpdate(activity)
             invoke.resolve()
         } catch (e: Exception) {
             invoke.reject("Could not stop the call service: ${e.message}")
@@ -471,6 +522,11 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 args.vibratePattern?.map { it.toLong() }?.toLongArray() ?: DEFAULT_RING_PATTERN,
                 args.hideIdentity == true
             )
+            // 2.3: while ringing the tile offers a way in — id only, never the
+            // caller's name (R1: tile labels are static strings).
+            sRinging = true
+            sRingingDmId = args.dmChannelId ?: ""
+            requestTileUpdate(activity)
             invoke.resolve()
         } catch (e: Exception) {
             invoke.reject("Could not show the incoming call: ${e.message}")
@@ -481,6 +537,9 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun cancelIncoming(invoke: Invoke) {
         try {
             IncomingCallNotifier.cancel(activity)
+            sRinging = false
+            sRingingDmId = ""
+            requestTileUpdate(activity)
             invoke.resolve()
         } catch (e: Exception) {
             invoke.reject("Could not cancel the incoming call: ${e.message}")

@@ -14,6 +14,15 @@ permissions = [
     "allow-keepScreenOn",
     "allow-batteryStatus",
     "allow-batteryRequest",
-    # Per-channel screenshot blocking (FEATURE_PLAN.md 5.2): FLAG_SECURE.
-    "allow-setSecureMode",
+    "allow-audioRoutes",
+    "allow-setAudioRoute",
+    "allow-biometricAvailable",
+    "allow-biometricSeal",
+    "allow-sharedPending",
+    "allow-sharedRead",
+    "allow-sharedDiscard",
+    # On-device live captions (FEATURE_PLAN.md 1.7): the OFFLINE recognizer only.
+    "allow-captionsAvailable",
+    "allow-captionsStart",
+    "allow-captionsStop",
 ]

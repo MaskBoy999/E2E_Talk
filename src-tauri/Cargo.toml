@@ -1,6 +1,6 @@
 [package]
 name = "e2e-chat-app"
-version = "0.2.28"
+version = "0.2.29"
 description = "E2E Chat — native desktop shell for the encrypted chat app"
 authors = ["E2E Chat"]
 edition = "2021"
@@ -40,6 +40,10 @@ tauri-plugin-single-instance = "2"
 # Desktop-only: the global push-to-talk hotkey (feature 4.1). Used from Rust
 # only, so no capability/ACL entry is involved — see PTT_EVENT in src/lib.rs.
 tauri-plugin-global-shortcut = "2"
+# Desktop-only: e2e-chat:// deep links (4.4), paired with single-instance —
+# the documented combo: a second launch forwards its argv to the first, so a
+# cold-start link lands in the already-running app.
+tauri-plugin-deep-link = "2"
 
 # Windows-only: the WebView2 certificate and permission hooks (src/win_webview.rs).
 # Both versions are the ones tauri/wry already build, so this adds no compilation

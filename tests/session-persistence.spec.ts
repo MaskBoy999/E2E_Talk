@@ -64,7 +64,7 @@ test.describe('session persistence across a cold start', () => {
         await ctx.close();
     });
 
-    test('no random fallback key is minted while a password bootstrap exists', async ({ browser }) => {
+    test('no random fallback key is minted while a vault/key source exists', async ({ browser }) => {
         const ctx: BrowserContext = await browser.newContext({ ignoreHTTPSErrors: true, serviceWorkers: 'block' });
         const page = await ctx.newPage();
         await register(page, unique('sess_nofallback'));
@@ -73,11 +73,16 @@ test.describe('session persistence across a cold start', () => {
             const anyWin = window as any;
             const raw = (k: string) => (anyWin._secGetRaw ? anyWin._secGetRaw(k) : localStorage.getItem(k));
             return {
-                hasBootstrap: !!raw('e2e_encrypted_password') && !!raw('e2e_device_key'),
+                // 5.6: the key source is the Argon2id vault — the migration
+                // deliberately DELETES the old password bootstrap blob, so
+                // "a key source exists" means the legacy bootstrap OR the vault.
+                hasKeySource: (!!raw('e2e_encrypted_password') && !!raw('e2e_device_key')) || !!raw('e2e_key_vault'),
+                migrated: !!raw('vault_migrated_at'),
                 fallback: raw('e2e_local_storage_key'),
             };
         });
-        expect(state.hasBootstrap).toBe(true);
+        expect(state.hasKeySource).toBe(true);
+        expect(state.migrated).toBe(true);
         expect(state.fallback).toBeNull();
 
         await ctx.close();

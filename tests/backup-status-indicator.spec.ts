@@ -28,12 +28,13 @@ async function openSecurityTab(page: Page) {
 }
 
 test.describe('Backup status indicator', () => {
-    test('shows ✅ with timestamp after registration (blob auto-saved)', async ({ page }) => {
+    test('shows saved-backup status with timestamp after registration (blob auto-saved)', async ({ page }) => {
         await registerUser(page, 'bstatus_' + Date.now().toString(36));
         await openSecurityTab(page);
 
         const statusEl = page.locator('#backup-status-line');
-        await expect(statusEl).toContainText('✅', { timeout: 10000 });
+        // The success state renders the check icon (emoji replaced by icon() in the UI)
+        await expect(statusEl.locator('svg')).toHaveCount(1, { timeout: 10000 });
         await expect(statusEl).toContainText('Key backup exists');
         // Should include a relative timestamp ("just now", "Xm ago", etc.)
         await expect(statusEl).toContainText('last saved');
@@ -48,8 +49,8 @@ test.describe('Backup status indicator', () => {
         const statusEl = page.locator('#backup-status-line');
         // Click security tab
         await page.click('.settings-tab[data-tab="security-settings"]');
-        // The text transitions from "Checking" to "✅" — just verify it resolves
-        await expect(statusEl).toContainText('✅', { timeout: 10000 });
+        // The text transitions from "Checking" to the resolved status — just verify it resolves
+        await expect(statusEl).not.toContainText('Checking', { timeout: 10000 });
     });
 
     test('indicator shows after switching away and back to security tab', async ({ page }) => {
@@ -57,7 +58,7 @@ test.describe('Backup status indicator', () => {
 
         // Open security tab
         await openSecurityTab(page);
-        await expect(page.locator('#backup-status-line')).toContainText('✅', { timeout: 10000 });
+        await expect(page.locator('#backup-status-line')).toContainText('Key backup exists', { timeout: 10000 });
 
         // Switch to display tab
         await page.click('.settings-tab[data-tab="display-settings"]');
@@ -67,8 +68,8 @@ test.describe('Backup status indicator', () => {
         await page.click('.settings-tab[data-tab="security-settings"]');
         await page.waitForTimeout(1500);
 
-        // Should re-fetch and show ✅ again
-        await expect(page.locator('#backup-status-line')).toContainText('✅', { timeout: 10000 });
+        // Should re-fetch and show the resolved status again
+        await expect(page.locator('#backup-status-line')).toContainText('Key backup exists', { timeout: 10000 });
 
         // Close settings
         await page.click('#close-settings');

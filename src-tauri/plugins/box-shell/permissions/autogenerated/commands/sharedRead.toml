@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-sharedRead"
+description = "Enables the sharedRead command without any pre-configured scope."
+commands.allow = ["sharedRead"]
+
+[[permission]]
+identifier = "deny-sharedRead"
+description = "Denies the sharedRead command without any pre-configured scope."
+commands.deny = ["sharedRead"]

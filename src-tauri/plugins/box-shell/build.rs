@@ -8,8 +8,22 @@ const COMMANDS: &[&str] = &[
     "keepScreenOn",
     "batteryStatus",
     "batteryRequest",
-    // Per-channel screenshot blocking (FEATURE_PLAN.md 5.2): FLAG_SECURE.
-    "setSecureMode",
+    // Call-audio routing (FEATURE_PLAN.md 1.3): list + pick the output device.
+    "audioRoutes",
+    "setAudioRoute",
+    // Biometric unlock (5.1): availability + Keystore wrap/unwrap THROUGH a
+    // BiometricPrompt CryptoObject — the password path is untouched.
+    "biometricAvailable",
+    "biometricSeal",
+    // Share-into-app FIFO (3.4): peek, read one file as base64, discard.
+    "sharedPending",
+    "sharedRead",
+    "sharedDiscard",
+    // On-device live captions (1.7): OFFLINE recogniser only — availability,
+    // start (rejects rather than using the network recogniser), stop.
+    "captionsAvailable",
+    "captionsStart",
+    "captionsStop",
 ];
 
 fn main() {

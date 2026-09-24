@@ -1861,3 +1861,44 @@ machine does not have enabled. What only a phone can confirm:
 - **Decline in the notification shade ends the call for the caller too**;
 - the buzz is the app's configured pattern, and setting the phone to silent stops the
   app ringing out loud.
+
+### 13.15 The rest of the plan (minus LiveKit) — v0.2.29
+
+*(0.2.26–0.2.28 shipped in between without their own sections here: the PiP
+feed selection, waking the page the phone pauses for PiP, and the notification-
+privacy audit F1–F3 with call comfort, voice activation, tray and PTT — see
+PROGRESS.md for those.)*
+
+This release closes everything FEATURE_PLAN.md still listed as open except
+7.3. On top of the audit, it ships: the **Quick Settings tile** (literal
+labels, boolean state, the same verbs the notification buttons use), **drag
+files out**, **panic wipe / auto-lock** (default OFF, total wipe including the
+search index), **network awareness** (same-LAN verdict from local facts only),
+the **audio-routing picker** (earpiece/speaker/BT via the real OS devices),
+**snip a screen region** and **share-into-app**, the **always-on-top mini call
+window** (`?mini=1`), **biometric unlock**, **device verification (SAS)**,
+**encrypted local export**, the **Stronghold-style Argon2id vault**
+(delete-after-migrate, cold start LOCKED), **on-device FTS5 search** (query
+never leaves the device, ciphertext at rest, wiped by the panic wipe),
+**offline-only live captions**, and **`e2e-chat://` deep links** (ids only,
+in-scope only, paired with single-instance so a cold-start link lands in the
+running app). The owner-requested **FLAG_SECURE removal** rides along: JS,
+Kotlin and ACL fully stripped, `setSecureMode` gone, `batch-b` asserts the
+absence.
+
+**7.3 (LiveKit SFU) is deferred by explicit owner decision for this release**
+— the plan's condition stands: its own session for the key-derivation ↔
+FrameCryptor check, with the fail-closed signalling guarantee intact. Nothing
+else on the checklist remains.
+
+**One compile-gate find:** `CallTileService.kt` referenced
+`com.e2echat.app.MainActivity` by class from the standalone plugin module
+(`Unresolved reference: app`); the ringing branch now opens through
+`getLaunchIntentForPackage`, the same path the notification already uses.
+
+**Verified:** cargo check host + aarch64-android, box cargo test (10),
+Gradle compile + R8 (all `com.e2echat.callservice.*` unrenamed), 205 Playwright
+tests green across the new and modified suites; the only reds are the three
+re-proven pre-existing failures (voice-fullscreen ×2, dm-call-volume reset) —
+stash-to-HEAD proof included in PROGRESS.md. `MANUAL_TESTING.md` gained
+sections 13–19 covering every feature in this release for on-device passes.

@@ -17,7 +17,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=25">
+    <link rel="stylesheet" href="style.css?v=26">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -254,6 +254,7 @@
                     <button class="attach-btn" id="attach-btn" title="Attach file">+</button>
                     <div class="attach-popup" id="attach-popup" style="display:none">
                         <button class="attach-popup-item" data-action="upload"><svg class="ui-icon" width="14" height="14"><use href="#icon-folder"/></svg> Upload Files</button>
+                        <button class="attach-popup-item" data-action="snip"><svg class="ui-icon" width="14" height="14"><use href="#icon-crop"/></svg> Snip Screen Region</button>
 
                         <button class="attach-popup-item" data-action="photo"><svg class="ui-icon" width="14" height="14"><use href="#icon-camera"/></svg> Take Photo</button>
                         <button class="attach-popup-item" data-action="record-video"><svg class="ui-icon" width="14" height="14"><use href="#icon-video"/></svg> Record Video</button>
@@ -638,11 +639,31 @@
                         <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Block incoming friend requests</span>
                     </label>
                     <p class="settings-hint">When enabled, other users cannot send you friend requests.</p>
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:14px">
+                        <label for="auto-lock-minutes" style="font-size:13px;color:var(--text-primary)">Auto-lock after (idle minutes, 0 = off):</label>
+                        <input type="number" id="auto-lock-minutes" min="0" max="1440" step="1" style="width:80px;padding:5px 7px;background:var(--bg-input,#2f3136);color:var(--text-primary);border:1px solid var(--bg-border);border-radius:4px" />
+                    </div>
+                    <p class="settings-hint">With a value above 0, that many minutes without mouse/keyboard/touch activity wipes ALL local data (keys, logins, settings) and signs you out. The panic chord <b>Alt+Shift+W</b> does the same instantly, with no confirmation — there is one total wipe path, and caches, stored audio and the local search index go with it.</p>
+                    <button class="btn-delete-account" id="panic-wipe-btn" style="margin-top:8px">Wipe everything now</button>
+                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:14px">
+                        <input type="checkbox" id="local-search-only-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Search only this device</span>
+                    </label>
+                    <p class="settings-hint">With this on, message search answers from an index built on this device and sends nothing — no query tokens, no message ids. Disappearing messages are never indexed either way, and the on-device index is dropped by the panic wipe.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Clear All Local Data</h4>
                     <p class="settings-hint">Clears all stored logins, keys, settings, cookies, and cached data. Use this if you encounter login or account issues such as constraint errors when creating a new account after logging out.</p>
                         <button class="btn-delete-account" id="clear-all-data-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-trash"/></svg> Clear All Data &amp; Sign Out</button>
+                </div>
+                <div class="settings-group">
+                    <h4>Export my data (encrypted)</h4>
+                    <p class="settings-hint">Downloads ONE file — <b>e2e-chat-export.enc</b> — containing your identity keys, settings, conversation metadata and the most recent 100 messages per conversation, sealed with Argon2id + a passphrase you choose. The server never sees the export, and nothing decrypted is written to disk. Without the passphrase the file is unreadable.</p>
+                    <input type="password" id="export-passphrase" placeholder="Passphrase (min 8 characters)" autocomplete="new-password" style="display:block;width:100%;max-width:280px;margin-top:8px;padding:6px 8px;background:var(--bg-input,#2f3136);color:var(--text-primary);border:1px solid var(--bg-border);border-radius:4px" />
+                    <input type="password" id="export-passphrase-confirm" placeholder="Repeat passphrase" autocomplete="new-password" style="display:block;width:100%;max-width:280px;margin-top:6px;padding:6px 8px;background:var(--bg-input,#2f3136);color:var(--text-primary);border:1px solid var(--bg-border);border-radius:4px" />
+                    <button class="btn-delete-account" id="export-data-btn" style="margin-top:8px;background:var(--accent,#5865f2);color:#fff;">Export encrypted file</button>
+                    <div id="export-status" class="settings-hint" style="margin-top:6px"></div>
                 </div>
                 <div class="settings-group">
                     <h4>Scheduled Messages</h4>
@@ -978,6 +999,12 @@
                     </div>
                 </div>
                 <div class="settings-group">
+                    <h4>Fingerprint Unlock</h4>
+                    <p class="settings-hint">Skip typing your password on this phone. Your password is sealed by a key that lives in the phone's secure hardware; only a fingerprint scan can release it (a fresh scan every time — no timed window). The password path is always still there, and a failed or cancelled scan changes nothing.</p>
+                    <label class="settings-checkbox-label"><input type="checkbox" id="biometric-unlock-toggle"> <span>Unlock with fingerprint</span></label>
+                    <p class="settings-hint" id="biometric-status-line" style="font-weight:600;">Checking&hellip;</p>
+                </div>
+                <div class="settings-group">
                     <h4>Kill Switch</h4>
                     <p class="settings-hint">Set a second password. If anyone enters it instead of your real password at the login page, your account is deleted on the spot — with all its data. If you have 2FA enabled, the 2FA code is required too, and the login just looks like a failed attempt. Off by default.</p>
                     <p class="settings-hint" id="kill-switch-status-line" style="font-weight:600;">Checking&hellip;</p>
@@ -1145,6 +1172,28 @@
                     <label class="settings-checkbox-label" style="margin-top:10px;"><span style="font-size:12px;color:var(--text-muted)">Push-to-talk key (desktop box):</span></label>
                     <input type="text" id="voice-ptt-shortcut" class="modal-input" placeholder="Ctrl+Shift+Space" autocomplete="off" style="margin-top:4px;max-width:200px;">
                     <p class="settings-hint">A global key, so it talks to the same gate while the app sits in the background. Leave it blank for Ctrl+Shift+Space. It only registers while "Hold to talk" is on.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Audio Output</h4>
+                    <select id="audio-output-select" class="settings-slider" style="margin-top:8px;padding:7px 9px;border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color)">
+                        <option value="">System default output</option>
+                    </select>
+                    <p class="settings-hint">Where call audio comes out: speakers, headphones, a wired headset or Bluetooth. On Android this uses the phone's own call-audio routing (earpiece / speaker / Bluetooth); on desktop it picks the output device per audio element. Applied live — remote audio re-routes without rejoining.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Live Captions</h4>
+                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:8px">
+                        <input type="checkbox" id="captions-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">On-device captions</span>
+                    </label>
+                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:10px">
+                        <input type="checkbox" id="captions-publish-toggle" disabled>
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Publish my captions to the call</span>
+                    </label>
+                    <p class="settings-hint" id="captions-status"></p>
+                    <p class="settings-hint">Transcription runs on an offline recogniser on this device — audio is never sent to an online speech service. It hears this device's <b>microphone</b> (what you say), not the other people on the call. Captions are shown to you only unless you turn publishing on, they are never written to disk, and they never appear in notifications or logs.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Hear Yourself (Test Mic)</h4>
@@ -1947,10 +1996,37 @@
                         </div>
                         <!-- Edit button (own profile only) — bottom-right, small pencil icon -->
                         <button class="profile-edit-btn" id="profile-edit-btn" style="display:none" title="Edit Profile" aria-label="Edit profile"><svg class="ui-icon" width="16" height="16" aria-hidden="true"><use href="#icon-edit"/></svg></button>
+                        <!-- 5.4: device verification (SAS) — for other people only -->
+                        <div id="profile-verify-row" style="display:none;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap;">
+                            <button class="btn-reauth" id="profile-verify-btn" style="font-size:12px;padding:6px 12px;">Verify device</button>
+                            <span id="profile-verify-status" style="font-size:12px;color:var(--text-muted);"></span>
+                        </div>
                     </div>
                 </div>
             </div>
             <button class="profile-modal-close" id="profile-modal-close">&times;</button>
+        </div>
+    </div>
+
+    <!--
+      5.4: device verification (SAS/emoji). The short authentication string
+      mixes BOTH identity keys, so neither side can choose it alone, and it is
+      derived identically on both devices (the fingerprints are sorted before
+      hashing). In-app ONLY: this digest never goes into a notification, a
+      widget or a log, because a verification code on a lock screen is readable
+      by exactly the shoulder-surfer it exists to defeat.
+    -->
+    <div class="modal" id="device-verify-modal" style="display:none">
+        <div class="modal-content" style="max-width:440px;text-align:center;">
+            <h3 style="margin-top:0;">Verify <span id="device-verify-name">…</span></h3>
+            <p class="settings-hint" style="margin-bottom:4px;">Compare these with them out loud on a call, or side by side in person. If both devices show the same thing, nobody is sitting in the middle.</p>
+            <div id="device-verify-emoji" style="font-size:30px;line-height:1.5;letter-spacing:6px;margin:12px 0 4px;"></div>
+            <div id="device-verify-digits" style="font-size:20px;font-family:monospace;letter-spacing:4px;margin-bottom:10px;"></div>
+            <div class="settings-hint" style="font-size:11px;word-break:break-all;">Yours: <span id="device-verify-mine"></span><br>Theirs: <span id="device-verify-theirs"></span></div>
+            <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap;">
+                <button class="btn-reauth" id="device-verify-confirm">They match — mark verified</button>
+                <button class="btn-reauth" id="device-verify-cancel" style="background:transparent;border:1px solid var(--border-color);color:var(--text-primary);">Close</button>
+            </div>
         </div>
     </div>
 
@@ -2104,6 +2180,7 @@
             <button class="voice-bar-btn voice-cam-opt" id="voice-bar-cam-opt" title="Camera options (flip / mirror / flash)"><svg class="ui-icon" width="16" height="16"><use href="#icon-more"/></svg></button>
             <button class="voice-bar-btn" id="voice-bar-screen" title="Share screen"><svg class="ui-icon" width="16" height="16"><use href="#icon-monitor"/></svg></button>
             <button class="voice-bar-btn" id="voice-bar-soundboard" title="Soundboard"><svg class="ui-icon" width="16" height="16"><use href="#icon-music"/></svg></button>
+            <button class="voice-bar-btn" id="voice-bar-mini" title="Mini call window (always on top)"><svg class="ui-icon" width="16" height="16"><use href="#icon-minimize"/></svg></button>
             <button class="voice-bar-btn voice-bar-leave" id="voice-bar-leave" title="Leave"><svg class="ui-icon" width="16" height="16"><use href="#icon-phone"/></svg></button>
         </div>
     </div>
@@ -2411,14 +2488,16 @@
         </div>
     </div>
 
-    <script src="ui-dialog.js?v=1"></script>
-    <script src="secure-storage.js?v=3"></script>
-    <script src="voice.js?v=30"></script>
+<script src="ui-dialog.js?v=1"></script>
+<script src="keyvault.js?v=1"></script>
+<script src="secure-storage.js?v=4"></script>
+    <script src="voice.js?v=32"></script>
     <script src="soundboard-pairing.js?v=12"></script>
     <script src="thread_categories_shortcuts.js?v=9"></script>
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=60"></script>
+    <script src="chat.js?v=66"></script>
+<script src="captions.js?v=1"></script>
     <!-- Android shell: immersive system bars, Back closing the top layer, the
          real-vibrator haptic bridge and notification clearing. Inert in a
          browser and on desktop (see the file's header). -->

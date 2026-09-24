@@ -48,6 +48,15 @@ test.describe('saveKeyBlobToServer console.error logging', () => {
         collector.start();
         try {
             await page.evaluate(() => {
+                // The diagnostics are dev-gated (window.__DEV_LOGS): turn them on
+                // for this assertion.
+                (window as any).__DEV_LOGS = true;
+                // 5.6: the vault DELETED e2e_encrypted_password, so a missing
+                // bootstrap is no longer enough to make the password
+                // unrecoverable — the session ticket (and the in-page copy) have
+                // to go too, or a perfectly good password is found first.
+                localStorage.removeItem('e2e_vault_ticket');
+                (window as any)._vaultSessionPassword = null;
                 localStorage.removeItem('e2e_encrypted_password');
                 saveKeyBlobToServer();
             });
@@ -73,6 +82,11 @@ test.describe('saveKeyBlobToServer console.error logging', () => {
         collector.start();
         try {
             await page.evaluate(() => {
+                (window as any).__DEV_LOGS = true;
+                // 5.6: clear the ticket/session copy so the corrupted legacy
+                // blob is actually the source that gets decoded (and fails).
+                localStorage.removeItem('e2e_vault_ticket');
+                (window as any)._vaultSessionPassword = null;
                 localStorage.setItem('e2e_encrypted_password',
                     'AAAAAAAAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
                 saveKeyBlobToServer();
@@ -98,6 +112,7 @@ test.describe('saveKeyBlobToServer console.error logging', () => {
         collector.start();
         try {
             await page.evaluate(() => {
+                (window as any).__DEV_LOGS = true;
                 localStorage.removeItem('token');
                 saveKeyBlobToServer();
             });
@@ -123,6 +138,7 @@ test.describe('saveKeyBlobToServer console.error logging', () => {
         collector.start();
         try {
             await page.evaluate(() => {
+                (window as any).__DEV_LOGS = true;
                 const origFetch = window.fetch.bind(window);
                 window.fetch = function(url, opts) {
                     var urlStr = typeof url === 'string' ? url : url.url;
@@ -157,6 +173,7 @@ test.describe('saveKeyBlobToServer console.error logging', () => {
         collector.start();
         try {
             await page.evaluate(() => {
+                (window as any).__DEV_LOGS = true;
                 var origBuild = E2ECrypto.buildKeyBundle;
                 E2ECrypto.buildKeyBundle = function() {
                     throw new Error('deliberate buildKeyBundle failure');

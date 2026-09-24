@@ -1225,6 +1225,17 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(
         |app, _args, _cwd| {
+            // 4.4 (FEATURE_PLAN.md): a cold-start deep link arrives on THIS
+            // (second) launch's argv. Hand the raw argv to the deep-link
+            // plugin — it validates the shape itself (bin + exactly one
+            // configured-scheme URL) and raises `deep-link://new-url` for the
+            // page. This is the pairing the plugin documents: without it,
+            // `e2e-chat://…` while the app is closed opens a plain window.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                app.deep_link()
+                    .handle_cli_arguments(_args.iter().map(|s| s.as_str()));
+            }
             if let Some(w) = app.get_webview_window(MAIN_LABEL) {
                 let _ = w.unminimize();
                 let _ = w.show();
@@ -1278,9 +1289,15 @@ pub fn run() {
                 if let Err(e) = app.emit(PTT_EVENT, PttPayload { down }) {
                     eprintln!("{PTT_EVENT}: could not reach the page: {e}");
                 }
-            })
-            .build(),
+            })                .build(),
     );
+
+    // 4.4 (FEATURE_PLAN.md): e2e-chat:// scheme registration comes from
+    // tauri.conf.json (plugins.deep-link.desktop.schemes). The page only ever
+    // receives the raw URL — accepting it (id-route validation) is the page's
+    // job, see `window.__handleDeepLink` in chat.js.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
 
     let builder = builder
         .manage(AppState::default())
@@ -1439,6 +1456,52 @@ pub fn run() {
             // 4.1: which key is push-to-talk, as decided by the page's
             // settings. Re-registering always unregisters first, so a changed
             // accelerator can never leave the old key held.
+    // 4.2 (FEATURE_PLAN.md): the always-on-top mini call window. The page asks
+    // for it over an event (app commands are refused to the remote origin —
+    // same reason as box:notify). It loads the same index.html with ?mini=1,
+    // which boots a CONTROLS-ONLY view: no chat boot, no socket, no decryption
+    // of its own — buttons emit `box:mini-control` for the main window (which
+    // owns the call) to act on, and the main window pushes `box:call-state`
+    // back. Local pixels on the user's own screen: same exposure as the main
+    // window being visible (plan verdict for 4.2).
+    #[cfg(desktop)]
+    {
+        const MINI_WINDOW_EVENT: &str = "box:mini-window";
+        let for_mini = handle.clone();
+        handle.listen(MINI_WINDOW_EVENT, move |event| {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default)]
+            struct MiniReq {
+                open: bool,
+            }
+            let req: MiniReq = serde_json::from_str(event.payload()).unwrap_or_default();
+            if req.open {
+                if let Some(w) = for_mini.get_webview_window("mini") {
+                    let _ = w.set_focus();
+                    return;
+                }
+                let win = tauri::WebviewWindowBuilder::new(
+                    &for_mini,
+                    "mini",
+                    tauri::WebviewUrl::App("index.html?mini=1".into()),
+                )
+                .title("E2E Chat — call controls")
+                .inner_size(320.0, 170.0)
+                .min_inner_size(240.0, 120.0)
+                .resizable(false)
+                .decorations(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .build();
+                if let Err(e) = win {
+                    eprintln!("{MINI_WINDOW_EVENT}: could not open: {e}");
+                }
+            } else if let Some(w) = for_mini.get_webview_window("mini") {
+                let _ = w.close();
+            }
+        });
+    }
+
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;

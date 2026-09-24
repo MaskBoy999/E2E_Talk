@@ -88,7 +88,7 @@ test.describe('Settings → Security: Restore from Server Backup button', () => 
         await page.click('#restore-backup-confirm-btn');
 
         // Wait for success
-        await expect(page.locator('#restore-backup-status')).toContainText('✅', { timeout: 15000 });
+        await expect(page.locator('#restore-backup-status')).toContainText('restored successfully', { timeout: 15000 });
 
         // Verify keys are restored
         const keysRestored = await page.evaluate(() => {
@@ -109,7 +109,7 @@ test.describe('Settings → Security: Restore from Server Backup button', () => 
         await page.locator('#restore-backup-password').fill('wrongpassword');
         await page.click('#restore-backup-confirm-btn');
 
-        await expect(page.locator('#restore-backup-status')).toContainText('❌', { timeout: 10000 });
+        await expect(page.locator('#restore-backup-status')).toContainText('Wrong password', { timeout: 10000 });
 
         await closeSettings(page);
     });

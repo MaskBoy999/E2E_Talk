@@ -149,13 +149,12 @@ test.describe('Blob save failure — what survives cookie clear + re-login', () 
         if (!blobRes.ok()) return null;
         var blobData = await blobRes.json();
         return await page.evaluate(({ encryptedBlob, salt, nonce }) => {
-            var encPw = localStorage.getItem('e2e_encrypted_password');
-            var devKeyStr = localStorage.getItem('e2e_device_key');
-            if (!encPw || !devKeyStr) return null;
-            var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-            var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            if (!pwB64) return null;
-            var password = atob(pwB64);
+            // 5.6: read the password the way the app does (session memory →
+            // vault ticket → legacy bootstrap) — the vault deleted the at-rest
+            // password blob this used to unwrap.
+            var getPw = (window as any).loadDecryptedPassword;
+            var password = (typeof getPw === 'function') ? getPw() : null;
+            if (!password) return null;
             var bundle = E2ECrypto.decryptKeyBundle(encryptedBlob, password, salt, nonce);
             return bundle;
         }, { encryptedBlob: blobData.encrypted_blob, salt: blobData.salt, nonce: blobData.nonce });
@@ -436,6 +435,12 @@ test.describe('Blob save failure — what survives cookie clear + re-login', () 
     // ─── Path 1: missing e2e_encrypted_password ───
     runSimulation('Path1_missing_password', async (page) => {
         await page.evaluate(() => {
+            // 5.6: the vault DELETED e2e_encrypted_password, so a missing
+            // bootstrap no longer makes the password unrecoverable — without
+            // also dropping the session ticket and the in-page copy, the save
+            // would quietly succeed and this path would test nothing.
+            localStorage.removeItem('e2e_vault_ticket');
+            (window as any)._vaultSessionPassword = null;
             localStorage.removeItem('e2e_encrypted_password');
         });
     });
@@ -443,6 +448,10 @@ test.describe('Blob save failure — what survives cookie clear + re-login', () 
     // ─── Path 2: corrupted encrypted_password ───
     runSimulation('Path2_corrupted_password', async (page) => {
         await page.evaluate(() => {
+            // 5.6: clear the ticket/session copy so the corrupted legacy blob is
+            // the source that actually gets decoded (and fails).
+            localStorage.removeItem('e2e_vault_ticket');
+            (window as any)._vaultSessionPassword = null;
             localStorage.setItem('e2e_encrypted_password',
                 'AAAAAAAAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
         });

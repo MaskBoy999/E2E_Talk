@@ -52,7 +52,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     var _mk = localStorage.key(_mi);
                     // user_display_name_cache matches the 'user' sensitive prefix,
                     // so it's removed by the clear like the other media caches.
-                    if (_mk && (_mk.indexOf('fkc_') === 0 || _mk === 'profile_key_cache' || _mk === 'user_display_name_cache')) {
+                    // 5.1: the biometric seal is a LOGIN-PAGE credential helper,
+                    // not session state — it is Keystore ciphertext that is
+                    // useless without a live fingerprint scan (every scan is
+                    // re-authenticated; there is no timed window), and it is
+                    // exactly what "Unlock with fingerprint" needs to have
+                    // survived a sign-out. Losing it here would silently disable
+                    // the feature. The Settings toggle, "Clear All Local Data"
+                    // and the panic wipe all still remove it.
+                    if (_mk && (_mk.indexOf('fkc_') === 0 || _mk === 'profile_key_cache'
+                        || _mk === 'user_display_name_cache'
+                        || _mk === 'e2e_bio_seal' || _mk === 'e2e_bio_user')) {
                         try {
                             var _mv = window._secGet ? window._secGet(_mk) : localStorage.getItem(_mk);
                             if (_mv !== null) _mediaCachePlain[_mk] = _mv;
@@ -99,6 +109,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 // and losing it on a forced re-login breaks every avatar/banner
                 // until the conversation profiles re-sync.
                 if (wipeKey === 'profile_key_cache') continue;
+                // 5.1: same reasoning as the seal above — it belongs to the
+                // login page, not to the signed-in session.
+                if (wipeKey === 'e2e_bio_seal' || wipeKey === 'e2e_bio_user') continue;
+                // 5.7: the device-only-search preference is a privacy setting,
+                // like the session duration above — a plain flag, carrying no
+                // message content. The 5.7 INDEX (e2e_local_search) is NOT
+                // preserved: it holds decrypted message text, so it is dropped
+                // by _secClearAll() with the rest of the e2e_ keys.
+                if (wipeKey === 'localSearchOnly') continue;
                 Storage.prototype.removeItem.call(localStorage, wipeKey);
             }
         } catch (_) {}
@@ -365,6 +384,15 @@ document.addEventListener('DOMContentLoaded', () => {
         // random fallback key from _secInit()'s pre-login run.
         try { if (window._secReKey) window._secReKey(); } catch (_) {}
 
+        // ── 5.6: migrate the key bootstrap into the Argon2id vault ─────────
+        // The password-derived key is active at this point, so it can be sealed
+        // for the next cold start. _kvMigrate() proves the vault opens before it
+        // deletes the old bootstrap (the plan's "must not leave the old
+        // bootstrap readable alongside the new vault"), and it fails closed: if
+        // the vault cannot be written and re-opened, the old bootstrap stays and
+        // the session continues exactly as before.
+        try { if (window._kvMigrate) await window._kvMigrate(password); } catch (_) {}
+
         // Store auth_key AFTER rekey so it's encrypted with the right key
         if (window._loginAuthKeyB64) {
             localStorage.setItem('e2e_auth_key', window._loginAuthKeyB64);
@@ -609,6 +637,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // writes use the password-derived key (not the pre-login random fallback).
             try { if (window._secReKey) window._secReKey(); } catch (_) {}
 
+            // 5.6: seal that key into the Argon2id vault and drop the old
+            // plaintext bootstrap (see the login handler for the full note).
+            try { if (window._kvMigrate) await window._kvMigrate(password); } catch (_) {}
+
             // Persist ALL e2e_* keys AFTER rekey so secure-storage encrypts them
             // with the password-derived key, making them decryptable on index.html.
             E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
@@ -642,6 +674,59 @@ document.addEventListener('DOMContentLoaded', () => {
             setLoading(registerForm, false);
         }
     });
+
+    // ── 5.1: fingerprint unlock on the login page ──────────────────────
+    // Offered only when a sealed password exists AND this really is the Android
+    // box (bridge present + Android shell). The blob was sealed with a
+    // per-operation Keystore key, so it is useless without a live scan, and the
+    // unwrap runs THROUGH the fingerprint prompt — a failed, cancelled or
+    // locked-out scan simply does nothing here. The password stays typeable the
+    // whole time; nothing about this path can land in a signed-in state on its
+    // own.
+    (function () {
+        const btn = document.getElementById('biometric-unlock-btn');
+        if (!btn) return;
+        function bridge() {
+            const t = window.__TAURI__;
+            return (t && t.core && typeof t.core.invoke === 'function') ? t : null;
+        }
+        function seal() {
+            try { return localStorage.getItem('e2e_bio_seal'); } catch (_) { return null; }
+        }
+        const b = bridge();
+        if (!b || !/Android/i.test(navigator.userAgent || '') || !seal()) return;
+        // Name the account: a shared device may carry a seal for a previous
+        // user, and "which account am I about to open" must never be a guess.
+        let who = '';
+        try { who = localStorage.getItem('e2e_bio_user') || ''; } catch (_) {}
+        btn.textContent = who ? ('Unlock as ' + who + ' with fingerprint') : 'Unlock with fingerprint';
+        btn.style.display = 'inline-block';
+        btn.addEventListener('click', async () => {
+            const blob = seal();
+            if (!blob) { btn.style.display = 'none'; return; }
+            const label = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Waiting for your fingerprint\u2026';
+            try {
+                const res = await b.core.invoke('plugin:box-shell|biometricSeal', { mode: 'unwrap', data: blob });
+                if (!res || !res.data) throw new Error('no result');
+                const bytes = Uint8Array.from(atob(res.data), (c) => c.charCodeAt(0));
+                const password = new TextDecoder().decode(bytes);
+                let username = '';
+                try { username = localStorage.getItem('e2e_bio_user') || ''; } catch (_) {}
+                if (!username) {
+                    try { username = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch (_) {}
+                }
+                (document.getElementById('login-username')).value = username;
+                (document.getElementById('login-password')).value = password;
+                document.getElementById('login-form').requestSubmit();
+            } catch (_) {
+                // Failed / cancelled / locked out: leave the form exactly as it is.
+            }
+            btn.disabled = false;
+            btn.textContent = label;
+        });
+    })();
 
 
 });

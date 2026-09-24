@@ -8466,3 +8466,65 @@ paths), `call-comfort` (5), `secure-capture` (4), `voice-turn` (2),
 `COTURN.md`, `FEATURE_PLAN.md`, `FEATURE_RESEARCH.md`,
 `tests/{notification-privacy,call-comfort,secure-capture,voice-turn,android-plugin-startup,voice-activation,quiet-hours,voice-diag,tray-parity,ptt-hotkey}.spec.ts`
 
+---
+
+## Session: the rest of the plan verified — tile, vault, biometrics, captions, search, deep links — v0.2.29
+
+FEATURE_PLAN.md §5 had been written against a working tree nobody finished
+verifying: the whole remaining batch sat uncommitted, and the release turn died
+before it could run anything. This session reconciled the plan's checklist
+against the actual tree item by item (grep for evidence, not trust), then took
+the batch through the same gate as every release.
+
+**What was already shipped before this session:** F1–F3 and the notification-
+privacy extension plus most Sprint S items landed in 0.2.26–0.2.28 (call
+notification actions, audio focus, battery prompt, keep-screen-on, DND-aware
+chime, voice activation, per-peer ping/rtt/jitter, per-app capture, tray parity,
+push-to-talk hotkey, TURN REST credentials, the coturn recipe). What sat in the
+tree: the Quick Settings tile, drag-out, panic wipe / auto-lock, network
+awareness, the audio-routing picker, snip + share-into-app, the mini call
+window, biometric unlock, device verification, encrypted export, the
+Stronghold-style vault, on-device FTS5 search, offline-only captions, deep
+links, and the owner-requested removal of the per-channel FLAG_SECURE flag.
+
+**One real defect found and fixed by the compile gate:** `CallTileService.kt`
+reached for `com.e2echat.app.MainActivity` by class — the standalone plugin
+module has no dependency on the app module, so `compileReleaseKotlin` failed
+with `Unresolved reference: app`. The ringing branch now opens through
+`getLaunchIntentForPackage`, the same path the notification and the idle branch
+already use. Everything else compiled first try.
+
+**7.3 (LiveKit SFU) stays deferred — owner decision this session**, matching
+the plan's own note: it needs its own session for the key-derivation ↔
+FrameCryptor check and the fail-closed signalling guarantee.
+
+**Verified locally.** `cargo check` host + `aarch64-linux-android` (exit 0),
+box `cargo test` (10/10), Gradle `:tauri-plugin-call-service` +
+`:tauri-plugin-box-shell` + `:app:compileUniversalReleaseKotlin` +
+`:app:minifyUniversalReleaseWithR8` BUILD SUCCESSFUL with every
+`com.e2echat.callservice.*` class (including the new `CallTileService` and
+`CallActionReceiver`) unrenamed in the mapping. Playwright: **205 passed**
+across 8 runs — batch-b (12), captions (7), biometric-unlock, panic-wipe,
+key-vault (8), local-search (8), device-verify, encrypted-export,
+network-awareness, drag-out, notification-privacy, secure-storage,
+session-persistence, the auth/blob/backup family (42), multidevice + soundboard
++ indicators + ringtone family (40), box-shell/box-device/box-pip-ringer/
+android-plugin-startup (42), voice smoke (5) — plus one new static assertion:
+the call takes transient audio focus and abandons it (1.4, previously the only
+plan item with no spec).
+
+**Known red, proven pre-existing:** `voice-fullscreen` (2) and
+`dm-call-volume` "reset buttons restore 100%" (1) fail on a checkout of HEAD
+as well — re-proven this session by stashing `static/` + `src-tauri/` to HEAD
+and re-running: the same three tests fail, then the stash popped clean.
+`profile-sharing` SV1–SV3 remain red at HEAD too (documented in FEATURE_PLAN
+§5). Nothing else failed.
+
+**Files:** `src-tauri/{tauri.conf.json,Cargo.toml,Cargo.lock,src/lib.rs}`,
+`src-tauri/plugins/{call-service,box-shell}/**` (tile, share trampoline, audio
+routes, captions/biometric commands, FLAG_SECURE removal),
+`static/{chat.js,voice.js,auth.js,secure-storage.js,captions.js,keyvault.js,index.html,login.html,style.css}`,
+`MANUAL_TESTING.md`, `FEATURE_PLAN.md`,
+`tests/{batch-b,captions,biometric-unlock,panic-wipe,key-vault,local-search,device-verify,encrypted-export,network-awareness,drag-out,android-plugin-startup}.spec.ts`
++ the auth/blob/backup spec updates.
+

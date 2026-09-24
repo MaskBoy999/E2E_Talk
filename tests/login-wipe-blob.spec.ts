@@ -115,6 +115,10 @@ test.describe('Key blob includes ALL key types + versioning + recovery', () => {
             const keys = Object.keys(bundle).filter(k => k !== 'v');
             return {
                 version: bundle.v,
+                // The build's own constant: the literal 3 here went stale the
+                // moment BUNDLE_VERSION was bumped, and a blob is always stamped
+                // with the constant of the build that wrote it.
+                expectedVersion: (window as any)._BUNDLE_VERSION,
                 keys,
                 hasAuthKey: keys.indexOf('e2e_auth_key') !== -1,
                 hasInvite: keys.indexOf('e2e_invite_server1') !== -1,
@@ -131,7 +135,7 @@ test.describe('Key blob includes ALL key types + versioning + recovery', () => {
             };
         });
 
-        expect(bundleInfo.version).toBe(3);
+        expect(bundleInfo.version).toBe(bundleInfo.expectedVersion);
         expect(bundleInfo.hasAuthKey).toBe(true);
         expect(bundleInfo.hasInvite).toBe(true);
         expect(bundleInfo.hasServer).toBe(true);
@@ -393,15 +397,17 @@ test.describe('Key blob includes ALL key types + versioning + recovery', () => {
             return {
                 ok: true,
                 version: bundle.v,
+                expectedVersion: (window as any)._BUNDLE_VERSION,
                 hasAuthKey: keys.indexOf('e2e_auth_key') !== -1,
                 hasIdentity: keys.some(k => k.indexOf('e2e_identity_private_') === 0),
                 hasProfileCache: keys.indexOf('profile_key_cache') !== -1,
             };
         }, password);
         expect(rebuilt.ok).toBe(true);
-        // The auto-update: version bumped from 1 -> 3 and the newer key type
-        // (e2e_auth_key) that the stale blob was missing is now in the bundle.
-        expect(rebuilt.version).toBe(3);
+        // The auto-update: version bumped from 1 to this build's BUNDLE_VERSION
+        // and the newer key type (e2e_auth_key) that the stale blob was missing
+        // is now in the bundle.
+        expect(rebuilt.version).toBe(rebuilt.expectedVersion);
         expect(rebuilt.hasAuthKey).toBe(true);
         expect(rebuilt.hasIdentity).toBe(true);
         expect(rebuilt.hasProfileCache).toBe(true);

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-captionsAvailable"
+description = "Enables the captionsAvailable command without any pre-configured scope."
+commands.allow = ["captionsAvailable"]
+
+[[permission]]
+identifier = "deny-captionsAvailable"
+description = "Denies the captionsAvailable command without any pre-configured scope."
+commands.deny = ["captionsAvailable"]

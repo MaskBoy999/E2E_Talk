@@ -26,7 +26,16 @@ which is what stops Doze from quietly ending an ongoing call.
 - `allow-keepScreenOn`
 - `allow-batteryStatus`
 - `allow-batteryRequest`
-- `allow-setSecureMode`
+- `allow-audioRoutes`
+- `allow-setAudioRoute`
+- `allow-biometricAvailable`
+- `allow-biometricSeal`
+- `allow-sharedPending`
+- `allow-sharedRead`
+- `allow-sharedDiscard`
+- `allow-captionsAvailable`
+- `allow-captionsStart`
+- `allow-captionsStop`
 
 ## Permission Table
 
@@ -36,6 +45,32 @@ which is what stops Doze from quietly ending an ongoing call.
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`box-shell:allow-audioRoutes`
+
+</td>
+<td>
+
+Enables the audioRoutes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-audioRoutes`
+
+</td>
+<td>
+
+Denies the audioRoutes command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -85,6 +120,136 @@ Enables the batteryStatus command without any pre-configured scope.
 <td>
 
 Denies the batteryStatus command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-biometricAvailable`
+
+</td>
+<td>
+
+Enables the biometricAvailable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-biometricAvailable`
+
+</td>
+<td>
+
+Denies the biometricAvailable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-biometricSeal`
+
+</td>
+<td>
+
+Enables the biometricSeal command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-biometricSeal`
+
+</td>
+<td>
+
+Denies the biometricSeal command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-captionsAvailable`
+
+</td>
+<td>
+
+Enables the captionsAvailable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-captionsAvailable`
+
+</td>
+<td>
+
+Denies the captionsAvailable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-captionsStart`
+
+</td>
+<td>
+
+Enables the captionsStart command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-captionsStart`
+
+</td>
+<td>
+
+Denies the captionsStart command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-captionsStop`
+
+</td>
+<td>
+
+Enables the captionsStop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-captionsStop`
+
+</td>
+<td>
+
+Denies the captionsStop command without any pre-configured scope.
 
 </td>
 </tr>
@@ -222,6 +387,32 @@ Denies the keepScreenOn command without any pre-configured scope.
 <tr>
 <td>
 
+`box-shell:allow-setAudioRoute`
+
+</td>
+<td>
+
+Enables the setAudioRoute command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-setAudioRoute`
+
+</td>
+<td>
+
+Denies the setAudioRoute command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `box-shell:allow-setBackHandler`
 
 </td>
@@ -248,12 +439,12 @@ Denies the setBackHandler command without any pre-configured scope.
 <tr>
 <td>
 
-`box-shell:allow-setSecureMode`
+`box-shell:allow-sharedDiscard`
 
 </td>
 <td>
 
-Enables the setSecureMode command without any pre-configured scope.
+Enables the sharedDiscard command without any pre-configured scope.
 
 </td>
 </tr>
@@ -261,12 +452,64 @@ Enables the setSecureMode command without any pre-configured scope.
 <tr>
 <td>
 
-`box-shell:deny-setSecureMode`
+`box-shell:deny-sharedDiscard`
 
 </td>
 <td>
 
-Denies the setSecureMode command without any pre-configured scope.
+Denies the sharedDiscard command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-sharedPending`
+
+</td>
+<td>
+
+Enables the sharedPending command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-sharedPending`
+
+</td>
+<td>
+
+Denies the sharedPending command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-sharedRead`
+
+</td>
+<td>
+
+Enables the sharedRead command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-sharedRead`
+
+</td>
+<td>
+
+Denies the sharedRead command without any pre-configured scope.
 
 </td>
 </tr>

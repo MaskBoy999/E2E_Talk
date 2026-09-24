@@ -32,8 +32,8 @@ test.describe('Save Backup Now button', () => {
         await registerUser(page, 'savebak_' + Date.now().toString(36));
         await openSecurityTab(page);
 
-        // Wait for backup status to show
-        await expect(page.locator('#backup-status-line')).toContainText('✅', { timeout: 10000 });
+        // Wait for backup status to show (icon + text; the emoji became icon('check'))
+        await expect(page.locator('#backup-status-line')).toContainText('Key backup exists', { timeout: 10000 });
 
         // Record the blob updated_at before clicking
         const beforeTimestamp = await page.evaluate(async () => {
@@ -50,8 +50,7 @@ test.describe('Save Backup Now button', () => {
         await saveBtn.click();
 
         // Should show success
-        await expect(page.locator('#save-backup-status')).toContainText('✅', { timeout: 10000 });
-        await expect(page.locator('#save-backup-status')).toContainText('Backup saved');
+        await expect(page.locator('#save-backup-status')).toContainText('Backup saved', { timeout: 10000 });
 
         // Button should be re-enabled
         await expect(saveBtn).toBeEnabled();
@@ -68,7 +67,7 @@ test.describe('Save Backup Now button', () => {
         expect(afterTimestamp).toBeTruthy();
 
         // The backup status line should also refresh
-        await expect(page.locator('#backup-status-line')).toContainText('✅');
+        await expect(page.locator('#backup-status-line')).toContainText('Key backup exists');
 
         await page.click('#close-settings');
     });

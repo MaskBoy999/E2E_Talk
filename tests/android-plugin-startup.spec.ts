@@ -408,4 +408,17 @@ test.describe('native PiP, notification decline and ringer awareness', () => {
         expect(/window\.__e2eDeclineIncomingCall|__e2eDeclineIncomingCall/.test(VOICE_JS)).toBe(true);
         expect(/getAudioProfile/.test(VOICE_JS)).toBe(true);
     });
+
+    test('the call takes transient audio focus and hands it back (1.4)', () => {
+        // Music must pause while the call runs and resume when it ends:
+        // a transient focus request on the call's start path, an abandon on
+        // its teardown path — both in real code, not in a comment (hence
+        // code(), which strips the KDoc that also mentions these symbols).
+        const fg = code(
+            fs.readFileSync(path.join(KOTLIN_DIR, 'CallForegroundService.kt'), 'utf8')
+        );
+        expect(/AUDIOFOCUS_GAIN_TRANSIENT/.test(fg)).toBe(true);
+        expect(/requestAudioFocus\(\)/.test(fg)).toBe(true);
+        expect(/abandonAudioFocusRequest|abandonAudioFocus\(/.test(fg)).toBe(true);
+    });
 });

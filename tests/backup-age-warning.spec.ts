@@ -29,8 +29,8 @@ test.describe('Backup Age Warning', () => {
         await registerAndSetup(page);
         await openSecurityTab(page);
 
-        // Check backup status shows success
-        await expect(page.locator('#backup-status-line')).toContainText('✅', { timeout: 10000 });
+        // Check backup status shows success (icon + text; the emoji became icon('check'))
+        await expect(page.locator('#backup-status-line')).toContainText('Key backup exists', { timeout: 10000 });
 
         // The age warning should NOT be visible (fresh backup)
         const ageWarning = page.locator('#backup-age-warning');

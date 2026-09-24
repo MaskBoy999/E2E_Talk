@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-sharedPending"
+description = "Enables the sharedPending command without any pre-configured scope."
+commands.allow = ["sharedPending"]
+
+[[permission]]
+identifier = "deny-sharedPending"
+description = "Denies the sharedPending command without any pre-configured scope."
+commands.deny = ["sharedPending"]

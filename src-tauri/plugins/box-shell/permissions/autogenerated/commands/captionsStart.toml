@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-captionsStart"
+description = "Enables the captionsStart command without any pre-configured scope."
+commands.allow = ["captionsStart"]
+
+[[permission]]
+identifier = "deny-captionsStart"
+description = "Denies the captionsStart command without any pre-configured scope."
+commands.deny = ["captionsStart"]

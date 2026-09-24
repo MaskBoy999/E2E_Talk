@@ -110,7 +110,11 @@ test.describe('Auth Flow — Client-Side Password Hashing', () => {
             keys.e2e_auth_key = localStorage.getItem('e2e_auth_key');
             keys.e2e_hmac_key = localStorage.getItem('e2e_hmac_key');
             keys.e2e_friend_code = localStorage.getItem('e2e_friend_code');
-            keys.e2e_encrypted_password = localStorage.getItem('e2e_encrypted_password');
+            // 5.6: the vault deleted the at-rest password blob, so "the password
+            // this session can recover" is exactly what the app's own accessor
+            // returns (session memory → vault ticket → legacy bootstrap).
+            const recoverPw = (window as any).loadDecryptedPassword;
+            keys.recoverablePassword = (typeof recoverPw === 'function') ? recoverPw() : null;
             keys.token = localStorage.getItem('token');
             keys.user = localStorage.getItem('user');
             return keys;
@@ -121,7 +125,8 @@ test.describe('Auth Flow — Client-Side Password Hashing', () => {
         expect(before.e2e_auth_key).toBeTruthy();
         expect(before.e2e_hmac_key).toBeTruthy();
         expect(before.e2e_friend_code).toBeTruthy();
-        expect(before.e2e_encrypted_password).toBeTruthy();
+        expect(before.recoverablePassword).toBeTruthy();
+        expect(before.recoverablePassword).toBe(password);
 
         // Clear everything
         await page.evaluate(() => { localStorage.clear(); });
@@ -144,7 +149,11 @@ test.describe('Auth Flow — Client-Side Password Hashing', () => {
             keys.e2e_auth_key = localStorage.getItem('e2e_auth_key');
             keys.e2e_hmac_key = localStorage.getItem('e2e_hmac_key');
             keys.e2e_friend_code = localStorage.getItem('e2e_friend_code');
-            keys.e2e_encrypted_password = localStorage.getItem('e2e_encrypted_password');
+            // 5.6: the vault deleted the at-rest password blob, so "the password
+            // this session can recover" is exactly what the app's own accessor
+            // returns (session memory → vault ticket → legacy bootstrap).
+            const recoverPw = (window as any).loadDecryptedPassword;
+            keys.recoverablePassword = (typeof recoverPw === 'function') ? recoverPw() : null;
             keys.token = localStorage.getItem('token');
             keys.user = localStorage.getItem('user');
             return keys;
@@ -160,8 +169,9 @@ test.describe('Auth Flow — Client-Side Password Hashing', () => {
         expect(after.e2e_friend_code).toBe(before.e2e_friend_code);
         // Auth key (hash_key cache) must match — recovered from blob
         expect(after.e2e_auth_key).toBe(before.e2e_auth_key);
-        // Encrypted password must be present
-        expect(after.e2e_encrypted_password).toBeTruthy();
+        // ...and recoverable again after the fresh login.
+        expect(after.recoverablePassword).toBeTruthy();
+        expect(after.recoverablePassword).toBe(password);
         // Token must be new (fresh login)
         expect(after.token).toBeTruthy();
         expect(after.token).not.toBe(before.token);
@@ -180,13 +190,12 @@ test.describe('Auth Flow — Client-Side Password Hashing', () => {
         const { serverId, serverKeyB64 } = await createServerViaApi(page, token, 'AuthSrvTest', username);
         // Force an immediate blob save instead of waiting for debounced scheduleKeyBlobSave
         const blobSaved = await page.evaluate(async () => {
-            const encPw = localStorage.getItem('e2e_encrypted_password');
-            const devKeyStr = localStorage.getItem('e2e_device_key');
-            if (!encPw || !devKeyStr) return 'missing_creds';
-            const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-            const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            if (!pwB64) return 'cannot_decode_pw';
-            const password = atob(pwB64);
+            // 5.6: read the password through the app's own accessor (session
+            // memory → vault ticket → legacy bootstrap) — the vault deleted the
+            // at-rest blob this used to unwrap.
+            const getPw = (window as any).loadDecryptedPassword;
+            const password = (typeof getPw === 'function') ? getPw() : null;
+            if (!password) return 'missing_creds';
             const bundle = E2ECrypto.buildKeyBundle();
             const enc = E2ECrypto.encryptKeyBundle(bundle, password);
             const res = await fetch('/api/key-blob', {
@@ -251,13 +260,12 @@ test.describe('Auth Flow — Client-Side Password Hashing', () => {
         });
         // Force immediate blob save
         const blobSaved = await page.evaluate(async () => {
-            const encPw = localStorage.getItem('e2e_encrypted_password');
-            const devKeyStr = localStorage.getItem('e2e_device_key');
-            if (!encPw || !devKeyStr) return 'missing_creds';
-            const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-            const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-            if (!pwB64) return 'cannot_decode_pw';
-            const password = atob(pwB64);
+            // 5.6: read the password through the app's own accessor (session
+            // memory → vault ticket → legacy bootstrap) — the vault deleted the
+            // at-rest blob this used to unwrap.
+            const getPw = (window as any).loadDecryptedPassword;
+            const password = (typeof getPw === 'function') ? getPw() : null;
+            if (!password) return 'missing_creds';
             const bundle = E2ECrypto.buildKeyBundle();
             const enc = E2ECrypto.encryptKeyBundle(bundle, password);
             const res = await fetch('/api/key-blob', {
@@ -431,13 +439,10 @@ test.describe('Auth Flow — Client-Side Password Hashing', () => {
 
             // Save blob to ensure key recovery works
             const blobSaved = await page.evaluate(async () => {
-                const encPw = localStorage.getItem('e2e_encrypted_password');
-                const devKeyStr = localStorage.getItem('e2e_device_key');
-                if (!encPw || !devKeyStr) return 'missing_creds';
-                const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-                const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-                if (!pwB64) return 'cannot_decode_pw';
-                const pw = atob(pwB64);
+                // 5.6: one source of truth for the password.
+                const getPw = (window as any).loadDecryptedPassword;
+                const pw = (typeof getPw === 'function') ? getPw() : null;
+                if (!pw) return 'missing_creds';
                 const bundle = E2ECrypto.buildKeyBundle();
                 const enc = E2ECrypto.encryptKeyBundle(bundle, pw);
                 const res = await fetch('/api/key-blob', {

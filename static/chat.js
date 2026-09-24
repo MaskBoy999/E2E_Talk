@@ -572,16 +572,11 @@ function scheduleKeyBlobSave() {
     }, 1500);
 }
 
-// Password used to wrap the blob, recovered from e2e_encrypted_password.
+// Password used to wrap the blob. 5.6: ONE source of truth —
+// loadDecryptedPassword() (session memory → vault ticket → legacy bootstrap),
+// so the mirror works the same way on every path that can know the password.
 function _keyBlobPassword() {
-    try {
-        const encPw = localStorage.getItem('e2e_encrypted_password');
-        const devKeyStr = localStorage.getItem('e2e_device_key');
-        if (!encPw || !devKeyStr) return null;
-        const dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-        const pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-        return pwB64 ? atob(pwB64) : null;
-    } catch (_) { return null; }
+    try { return loadDecryptedPassword(); } catch (_) { return null; }
 }
 
 function saveKeyBlobToServer(attempt) {
@@ -590,7 +585,16 @@ function saveKeyBlobToServer(attempt) {
         const t = localStorage.getItem('token');
         const pw = _keyBlobPassword();
         // Not signed in / keys not ready yet — a queued save is pointless.
-        if (!t || !pw) return;
+        // Diagnostics are dev-gated (window.__DEV_LOGS): the messages name
+        // WHICH credential is missing but never any part of one.
+        if (!t) {
+            if (window.__DEV_LOGS) console.error('saveKeyBlobToServer: no auth token available');
+            return;
+        }
+        if (!pw) {
+            if (window.__DEV_LOGS) console.error('saveKeyBlobToServer: missing e2e_encrypted_password or e2e_device_key (no session password recoverable)');
+            return;
+        }
         if (_keyBlobInFlight) { _keyBlobQueued = true; return; }
         _keyBlobInFlight = true;
         const bundle = E2ECrypto.buildKeyBundle();
@@ -1697,10 +1701,24 @@ function computeSearchTokens(query, scope) {
     return E2ECrypto.searchQueryTokens(query, keys);
 }
 
-function queueSearchIndex(channelId, dmChannelId, messageId, plaintext) {
+function queueSearchIndex(channelId, dmChannelId, messageId, plaintext, msgRow) {
     if (!messageId || !plaintext) return;
     var text = extractSearchableText(plaintext);
     if (!text) return;
+    // 5.7: a disappearing message is never indexed — not on the device and not
+    // on the server. Its whole promise is that it goes away, so a durable token
+    // index of any shape would outlive it (plan rule: "disappearing messages
+    // never indexed").
+    if (msgRow && msgRow.expires_at) return;
+    // 5.7: the on-device index is built FIRST and needs no keys at all. In
+    // device-only mode it is also the only thing that happens — no tokens and
+    // no message ids leave the machine.
+    localSearchIndex(
+        channelId, dmChannelId, messageId, text,
+        (msgRow && (msgRow.sender_user_id || msgRow.sender_id)) || null,
+        (msgRow && msgRow.timestamp) || Date.now()
+    );
+    if (localSearchOnlyEnabled()) return;
     var keys = null;
     if (channelId && currentServerId) {
         keys = E2ECrypto.getAllServerKeys(currentServerId) || [];
@@ -1729,6 +1747,9 @@ function flushSearchIndex() {
     _searchIndexFlushTimer = null;
     var pending = _searchIndexPending;
     _searchIndexPending = {};
+    // 5.7: in device-only mode nothing is flushed — the local index already
+    // has what it needs and the server gets no tokens at all.
+    if (localSearchOnlyEnabled()) return;
     for (var bucketKey in pending) {
         var bucket = pending[bucketKey];
         if (!bucket.entries.length) continue;
@@ -1741,6 +1762,146 @@ function flushSearchIndex() {
             body: JSON.stringify(body)
         }).catch(function () {});
     }
+}
+
+// ── 5.7 (FEATURE_PLAN.md): on-device search index ───────────────────────
+// The server-side token index above asks the SERVER to match opaque digests,
+// which still hands over the shape of every query (which tokens, how often,
+// against which bucket). This index keeps search on the machine: entries are
+// built from messages we already decrypted, matched locally, and sent nowhere.
+//
+// At rest it is an ordinary localStorage key, and secure-storage encrypts
+// sensitive keys in place with the session storage key (only the bootstrap keys
+// are plaintext) — so the on-disk copy is ciphertext, not the "durable
+// plaintext copy" the plan warns about. The plan's other rules apply on top:
+// bounded and rotating, disappearing messages never indexed (see
+// queueSearchIndex), and the panic wipe / "Clear All Local Data" drop it with
+// everything else.
+var LOCAL_SEARCH_KEY = 'e2e_local_search';
+var LOCAL_SEARCH_MAX = 1000;   // entries; the oldest fall out first
+var _localSearch = null;
+
+function localSearchOnlyEnabled() {
+    try { return localStorage.getItem('localSearchOnly') === '1'; } catch (_) { return false; }
+}
+
+function _localSearchLoad() {
+    if (_localSearch) return _localSearch;
+    try {
+        var raw = localStorage.getItem(LOCAL_SEARCH_KEY);
+        var parsed = raw ? JSON.parse(raw) : null;
+        _localSearch = (parsed && Array.isArray(parsed.entries)) ? parsed.entries : [];
+    } catch (_) { _localSearch = []; }
+    return _localSearch;
+}
+
+function _localSearchSave() {
+    try {
+        var entries = _localSearchLoad();
+        if (entries.length > LOCAL_SEARCH_MAX) {
+            entries = entries.slice(entries.length - LOCAL_SEARCH_MAX); // rotate
+            _localSearch = entries;
+        }
+        localStorage.setItem(LOCAL_SEARCH_KEY, JSON.stringify({ v: 1, entries: entries }));
+    } catch (_) {}
+}
+
+function localSearchIndex(channelId, dmChannelId, messageId, text, senderId, ts) {
+    if (!messageId || !text) return;
+    var entries = _localSearchLoad();
+    for (var i = 0; i < entries.length; i++) {
+        if (entries[i].id === messageId) return; // already indexed
+    }
+    entries.push({
+        id: messageId,
+        kind: channelId ? 'ch' : 'dm',
+        cid: channelId || dmChannelId,
+        sid: channelId ? currentServerId : null,
+        sender: senderId || null,
+        ts: ts || Date.now(),
+        text: String(text).slice(0, 200),
+    });
+    _localSearchSave();
+}
+
+function localSearchQuery(query, scope, limit) {
+    var q = String(query || '').toLowerCase().trim();
+    if (!q) return [];
+    var entries = _localSearchLoad();
+    var out = [];
+    for (var i = entries.length - 1; i >= 0 && out.length < (limit || 50); i--) {
+        var e = entries[i];
+        if (scope && scope.type === 'channel' && !(e.kind === 'ch' && e.cid === scope.channelId)) continue;
+        if (scope && scope.type === 'dm' && !(e.kind === 'dm' && e.cid === scope.dmChannelId)) continue;
+        if (e.text && e.text.toLowerCase().indexOf(q) !== -1) out.push(e);
+    }
+    return out;
+}
+
+// Test hook (R8): drive the on-device index directly. `queue` is the REAL
+// ingestion path (including the disappearing-message guard), so a test can
+// prove that guard rather than re-implementing it.
+window.__localSearchTest = {
+    queue: function (channelId, dmChannelId, messageId, plaintext, msgRow) {
+        queueSearchIndex(channelId, dmChannelId, messageId, plaintext, msgRow || {});
+    },
+    query: localSearchQuery,
+    count: function () { return _localSearchLoad().length; },
+    only: localSearchOnlyEnabled,
+    max: LOCAL_SEARCH_MAX,
+    key: LOCAL_SEARCH_KEY,
+    clear: function () {
+        _localSearch = null;   // drop the cache so the next read hits storage
+        try { localStorage.removeItem(LOCAL_SEARCH_KEY); } catch (_) {}
+    },
+    // The TRUE on-disk value (bypasses the secure-storage interceptor), so a
+    // test can prove the stored copy is ciphertext and not the message text.
+    raw: function () {
+        try {
+            if (window._secGetRaw) return window._secGetRaw(LOCAL_SEARCH_KEY);
+            return localStorage.getItem(LOCAL_SEARCH_KEY);
+        } catch (_) { return null; }
+    },
+};
+
+// Rows carry the SAME data attributes the palette's click handler already
+// understands, so jumping to a message works exactly as it does for server
+// results.
+function renderLocalSearchResults(entries, query) {
+    var list = document.getElementById('search-results');
+    if (!list) return;
+    var hint = document.getElementById('search-hint');
+    if (hint) hint.style.display = 'none';
+    if (!entries || !entries.length) {
+        list.innerHTML = '<div class="search-results-empty">No messages found on this device</div>';
+        return;
+    }
+    var html = '';
+    for (var i = 0; i < entries.length; i++) {
+        var e = entries[i];
+        var cached = userDisplayNameCache[e.sender] || {};
+        var name = cached.username || cached.display_name || e.sender || 'Unknown';
+        var avatar = '<div class="search-result-avatar">' + escapeHtml(String(name).charAt(0).toUpperCase()) + '</div>';
+        var context = '';
+        if (e.kind === 'dm') {
+            var conv = (dmConversations || []).find(function (c) { return c.dm_channel_id === e.cid; });
+            context = escapeHtml((conv && (conv.other_display_name || conv.other_username)) || 'Direct message');
+        } else {
+            var row = document.querySelector('.channel-item[data-id="' + e.cid + '"]');
+            var chName = row ? (row.textContent || '').trim() : '';
+            context = chName ? '#' + escapeHtml(chName) : 'Server channel';
+        }
+        var snippet = escapeHtml(e.text || '');
+        if (snippet.length > 140) snippet = snippet.substring(0, 140) + '…';
+        html += '<div class="search-result-item" data-mid="' + escapeAttr(e.id) + '" data-dm="' + (e.kind === 'dm' ? escapeAttr(e.cid) : '') + '" data-cid="' + (e.kind === 'ch' ? escapeAttr(e.cid) : '') + '" data-sid="' + (e.sid ? escapeAttr(e.sid) : '') + '">' +
+            avatar +
+            '<div class="search-result-body">' +
+                '<div class="search-result-head"><span class="search-result-name">' + escapeHtml(name) + '</span><span class="search-result-context">' + context + '</span><span class="search-result-time">device</span></div>' +
+                '<div class="search-result-snippet">' + snippet + '</div>' +
+            '</div>' +
+        '</div>';
+    }
+    list.innerHTML = html;
 }
 
 // ---- Search palette ----
@@ -2827,6 +2988,15 @@ function runSearch() {
 
 async function doSearch(query) {
     var seq = ++_searchSeq;
+    // 5.7 device-only mode: answer from the local index and send nothing.
+    if (localSearchOnlyEnabled()) {
+        if (query && query.trim().length < 2) {
+            renderSearchResults({ empty: true, reason: 'Type at least 2 characters to search' });
+            return;
+        }
+        renderLocalSearchResults(localSearchQuery(query, _searchScope, 50), query);
+        return;
+    }
     var params = [];
     if (_searchScope.type === 'channel') params.push('channel_id=' + encodeURIComponent(_searchScope.channelId));
     else if (_searchScope.type === 'dm') params.push('dm_channel_id=' + encodeURIComponent(_searchScope.dmChannelId));
@@ -3286,7 +3456,461 @@ async function decryptDmMessageForDisplay(m) {
     }
 }
 
+// ── 4.2: mini call window (?mini=1) — controls-only second view ────────
+// This window never boots the chat app (a second WS session with the same
+// device id would fight the main window — the guard in DOMContentLoaded
+// returns before the token gate). It renders status + three buttons; every
+// button emits `box:mini-control` for the MAIN window (which owns the call)
+// to act on, and the main window pushes `box:call-state` back. No decrypted
+// conversation content is ever rendered here, and no second identity exists
+// on the wire.
+var IS_MINI_WINDOW = /[?&]mini=1/.test(location.search);
+function bootMiniWindow() {
+    document.documentElement.classList.add('mini-window');
+    var st = document.createElement('style');
+    st.textContent = [
+        'html.mini-window, html.mini-window body { background:#111214 !important; overflow:hidden !important; }',
+        'html.mini-window body > * { display:none !important; }',
+        'html.mini-window #mini-call-bar { display:flex !important; }',
+        '#mini-call-bar { position:fixed; inset:0; display:none; flex-direction:column; gap:10px; align-items:center; justify-content:center; color:#fff; font-family:system-ui,sans-serif; background:#111214; }',
+        '#mini-call-bar .mini-status { font-size:12px; opacity:.85; text-align:center; padding:0 10px; }',
+        '#mini-call-bar .mini-row { display:flex; gap:8px; }',
+        '#mini-call-bar button { padding:7px 11px; border-radius:6px; border:1px solid #333; background:#1f2023; color:#eee; cursor:pointer; font-size:12px; }',
+        '#mini-call-bar button:hover { background:#2a2b2f; }',
+        '#mini-call-bar #mini-close { position:absolute; top:4px; right:6px; padding:1px 7px; font-size:11px; }',
+    ].join('\n');
+    document.head.appendChild(st);
+    var bar = document.createElement('div');
+    bar.id = 'mini-call-bar';
+    bar.innerHTML = [
+        '<button id="mini-close" title="Close mini window">✕</button>',
+        '<div class="mini-status" id="mini-status">Waiting for the main window…</div>',
+        '<div class="mini-row">',
+        '  <button id="mini-mute">Mute</button>',
+        '  <button id="mini-deafen">Deafen</button>',
+        '  <button id="mini-hangup">Leave</button>',
+        '</div>',
+    ].join('');
+    document.body.appendChild(bar);
+    var emit = function (name, payload) {
+        try {
+            var t = window.__TAURI__;
+            if (t && t.event && typeof t.event.emit === 'function') t.event.emit(name, payload);
+        } catch (_) {}
+    };
+    var setStatus = function (msg) { var el = document.getElementById('mini-status'); if (el) el.textContent = msg; };
+    var applyState = function (s) {
+        if (!s || typeof s !== 'object') return;
+        setStatus((s.in_call ? 'In call' : 'Not in a call')
+            + ' · ' + (s.muted ? 'muted' : 'live')
+            + (s.deafened ? ' · deafened' : '')
+            + (typeof s.peers === 'number' ? ' · ' + s.peers + ' peer(s)' : ''));
+        var mb = document.getElementById('mini-mute');
+        if (mb) mb.textContent = s.muted ? 'Unmute' : 'Mute';
+    };
+    window.__miniApplyState = applyState;
+    document.getElementById('mini-mute').addEventListener('click', function () { emit('box:mini-control', { action: 'mute' }); });
+    document.getElementById('mini-deafen').addEventListener('click', function () { emit('box:mini-control', { action: 'deafen' }); });
+    document.getElementById('mini-hangup').addEventListener('click', function () { emit('box:mini-control', { action: 'hangup' }); });
+    document.getElementById('mini-close').addEventListener('click', function () { emit('box:mini-window', { open: false }); });
+    try {
+        var tauri = window.__TAURI__;
+        if (tauri && tauri.event && typeof tauri.event.listen === 'function') {
+            tauri.event.listen('box:call-state', function (e) {
+                var p = e && e.payload;
+                if (p && typeof p === 'object' && typeof p.in_call === 'boolean') applyState(p);
+            });
+        }
+    } catch (_) {}
+}
+
+// ── 4.4: deep links (e2e-chat://channel/<id> | e2e-chat://dm/<id>) ──────
+// The shell hands us the raw URL; the ONLY thing accepted is one of our two
+// routes with id-shaped remainder. Anything else — a foreign scheme, a query,
+// credentials, a host — is dropped: the link target must never be something
+// the shell could be steered into loading behind the remote-origin IPC grant
+// (FEATURE_PLAN §4.4). Ids only; the server already knows every id mapping.
+window.__handleDeepLink = function (url) {
+    var m = /^e2e-chat:\/\/(channel|dm)\/([A-Za-z0-9_-]{1,64})$/.exec(String(url || ''));
+    if (!m) { console.warn('[deeplink] rejected: not an in-scope id route'); return false; }
+    var type = m[1], id = m[2];
+    var sel = type === 'channel'
+        ? '.channel-item[data-id="' + id + '"]'
+        : '.dm-item[data-dm-id="' + id + '"]';
+    var row = document.querySelector(sel);
+    if (row && typeof row.click === 'function') { row.click(); return true; }
+    // Not on screen yet (wrong server, list still rendering): remember it;
+    // _applyPendingDeepLink clicks it as soon as the row exists.
+    try { localStorage.setItem('pendingDeepLink', JSON.stringify({ type: type, id: id })); } catch (_) {}
+    if (typeof showToast === 'function') showToast('Opening that conversation as soon as the list loads…');
+    return true;
+};
+function _applyPendingDeepLink() {
+    var raw = null;
+    try { raw = localStorage.getItem('pendingDeepLink'); } catch (_) {}
+    if (!raw) return;
+    try {
+        var p = JSON.parse(raw);
+        var sel = p.type === 'channel'
+            ? '.channel-item[data-id="' + p.id + '"]'
+            : '.dm-item[data-dm-id="' + p.id + '"]';
+        var row = document.querySelector(sel);
+        if (!row) return; // keep waiting — another render may carry it
+        try { localStorage.removeItem('pendingDeepLink'); } catch (_) {}
+        row.click();
+    } catch (_) { try { localStorage.removeItem('pendingDeepLink'); } catch (_) {} }
+}
+setInterval(_applyPendingDeepLink, 3000);
+window.__deepLinkListen = function () {
+    try {
+        var t = window.__TAURI__;
+        if (!t || !t.event || typeof t.event.listen !== 'function') return;
+        t.event.listen('deep-link://new-url', function (e) {
+            var p = e && e.payload;
+            // The plugin emits an ARRAY of urls (`vec![url]`), a bare string,
+            // or an object — accept all three, use the first entry.
+            var url = typeof p === 'string' ? p
+                : (Array.isArray(p) ? p[0]
+                : (p && (p.url || p.primaryUrl))) || '';
+            window.__handleDeepLink(url);
+        });
+    } catch (_) {}
+};
+
+// ── 3.3: region snip ───────────────────────────────────────────────────
+// One frame from getDisplayMedia → drag a rectangle → the CROP goes into the
+// same file queue the picker feeds, so encryption/upload/preview are the
+// existing tested paths. The frame lives only in this page's memory while the
+// overlay is open — nothing is written outside the app sandbox (plan: avoid
+// saving to shared MediaStore). Tracks stop the moment the frame is drawn:
+// the screen itself is never held open.
+async function snipScreenRegion() {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+        if (typeof showToast === 'function') showToast('Screen snip is not available here.');
+        return;
+    }
+    var stream;
+    try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    } catch (_) {
+        if (typeof showToast === 'function') showToast('Screen pick declined — nothing snipped.');
+        return;
+    }
+    var video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    var frameReady = new Promise(function (resolve) {
+        var done = false;
+        var finish = function () { if (!done) { done = true; resolve(); } };
+        video.onloadeddata = finish;
+        setTimeout(finish, 2000); // some pickers never fire it — take what exists
+    });
+    try { await video.play(); } catch (_) {}
+    await frameReady;
+    var w = video.videoWidth || 1280, h = video.videoHeight || 720;
+    var src = document.createElement('canvas');
+    src.width = w; src.height = h;
+    try { src.getContext('2d').drawImage(video, 0, 0, w, h); } catch (_) {}
+    try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
+    try { video.srcObject = null; } catch (_) {}
+    openSnipOverlay(src, w, h);
+}
+
+function openSnipOverlay(srcCanvas, w, h) {
+    closeSnipOverlay();
+    var style = document.getElementById('snip-style');
+    if (!style) {
+        style = document.createElement('style');
+        style.id = 'snip-style';
+        style.textContent = [
+            '#snip-overlay { position:fixed; inset:0; z-index:10000; background:rgba(0,0,0,.82); cursor:crosshair; display:flex; align-items:center; justify-content:center; }',
+            '#snip-stage { position:relative; }',
+            '#snip-img { max-width:96vw; max-height:78vh; display:block; box-shadow:0 0 0 1px #444; }',
+            '#snip-rect { position:absolute; border:2px dashed #57f287; background:rgba(87,242,135,.12); pointer-events:none; display:none; }',
+            '#snip-hintbar { position:absolute; left:0; right:0; bottom:-42px; display:flex; gap:10px; justify-content:center; align-items:center; color:#eee; font-size:13px; }',
+            '#snip-hintbar button { padding:6px 12px; border-radius:6px; border:1px solid #444; background:#1f2023; color:#eee; cursor:pointer; }',
+            '#snip-hintbar button:disabled { opacity:.45; cursor:default; }',
+        ].join('\n');
+        document.head.appendChild(style);
+    }
+    var overlay = document.createElement('div');
+    overlay.id = 'snip-overlay';
+    var stage = document.createElement('div');
+    stage.id = 'snip-stage';
+    var img = document.createElement('canvas');
+    img.id = 'snip-img';
+    img.width = w; img.height = h;
+    img.getContext('2d').drawImage(srcCanvas, 0, 0);
+    var rect = document.createElement('div');
+    rect.id = 'snip-rect';
+    var bar = document.createElement('div');
+    bar.id = 'snip-hintbar';
+    bar.innerHTML = '<span>Drag a rectangle — Enter uses it, Esc cancels</span>'
+        + '<button id="snip-use" disabled>Use selection</button>'
+        + '<button id="snip-cancel">Cancel</button>';
+    stage.appendChild(img); stage.appendChild(rect); stage.appendChild(bar);
+    overlay.appendChild(stage);
+    document.body.appendChild(overlay);
+
+    var sel = null, dragging = false, start = null;
+    function imgRect() { return img.getBoundingClientRect(); }
+    function draw(a, b) {
+        var r = imgRect();
+        var x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y);
+        var x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+        rect.style.display = 'block';
+        rect.style.left = x0 + 'px';
+        rect.style.top = y0 + 'px';
+        rect.style.width = (x1 - x0) + 'px';
+        rect.style.height = (y1 - y0) + 'px';
+        var kx = w / r.width, ky = h / r.height;
+        sel = {
+            x: Math.round(x0 * kx), y: Math.round(y0 * ky),
+            w: Math.round((x1 - x0) * kx), h: Math.round((y1 - y0) * ky),
+        };
+        document.getElementById('snip-use').disabled = !(sel.w > 4 && sel.h > 4);
+    }
+    function localPoint(e) {
+        var r = imgRect();
+        return {
+            x: Math.max(0, Math.min(r.width, e.clientX - r.left)),
+            y: Math.max(0, Math.min(r.height, e.clientY - r.top)),
+        };
+    }
+    overlay.addEventListener('mousedown', function (e) {
+        if (e.target.tagName === 'BUTTON') return;
+        dragging = true; start = localPoint(e); draw(start, start);
+    });
+    overlay.addEventListener('mousemove', function (e) { if (dragging && start) draw(start, localPoint(e)); });
+    overlay.addEventListener('mouseup', function () { dragging = false; });
+    document.getElementById('snip-cancel').addEventListener('click', closeSnipOverlay);
+    document.getElementById('snip-use').addEventListener('click', commitSnip);
+    var keyHandler = function (e) {
+        if (e.key === 'Escape') { closeSnipOverlay(); document.removeEventListener('keydown', keyHandler, true); }
+        else if (e.key === 'Enter' && sel && sel.w > 4 && sel.h > 4) { commitSnip(); document.removeEventListener('keydown', keyHandler, true); }
+    };
+    document.addEventListener('keydown', keyHandler, true);
+
+    function commitSnip() {
+        if (!sel || sel.w <= 4 || sel.h <= 4) return;
+        var out = document.createElement('canvas');
+        out.width = sel.w; out.height = sel.h;
+        out.getContext('2d').drawImage(img, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h);
+        out.toBlob(function (blob) {
+            closeSnipOverlay();
+            if (!blob) { if (typeof showToast === 'function') showToast('Could not read the selection.'); return; }
+            queueFilesForComposer([new File([blob], 'snip-' + Date.now() + '.png', { type: 'image/png' })]);
+        }, 'image/png');
+    }
+}
+function closeSnipOverlay() {
+    var o = document.getElementById('snip-overlay');
+    if (o) o.remove();
+}
+
+// Hand files to the SAME queue the picker uses — DataTransfer → #file-input →
+// handleFileSelect — so snips and share-sheet imports share the upload
+// pipeline (and its encryption) exactly.
+function queueFilesForComposer(files) {
+    var input = document.getElementById('file-input');
+    if (!input || !files || !files.length) return false;
+    try {
+        var dt = new DataTransfer();
+        files.forEach(function (f) { dt.items.add(f); });
+        input.files = dt.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+    } catch (e) {
+        console.warn('[queue] could not queue files:', e);
+        return false;
+    }
+}
+
+// ── 3.4: share into the app (Android share sheet) ──────────────────────
+// The native side stages what was shared — text in process memory, files
+// copied into the APP's own cache — until this poll consumes it (boot + every
+// return to the foreground), then discards it: the inbound FIFO never keeps a
+// message body on disk (plan: file URIs only, never message text). What lands
+// goes into the composer of the conversation that is open; the user still
+// presses Send, and encryption happens on the normal send path.
+async function pollSharedIntoComposer() {
+    var t = window.__TAURI__;
+    if (!t || !t.core || typeof t.core.invoke !== 'function') return;
+    if (!/Android/i.test(navigator.userAgent || '')) return;
+    try {
+        var pending = await t.core.invoke('plugin:box-shell|sharedPending');
+        if (!pending || !pending.staged) return;
+        var files = [];
+        if (Array.isArray(pending.files)) {
+            for (var i = 0; i < pending.files.length; i++) {
+                var meta = pending.files[i] || {};
+                var read = await t.core.invoke('plugin:box-shell|sharedRead', { index: i });
+                if (!read || !read.dataB64) continue;
+                var bin = atob(read.dataB64);
+                var arr = new Uint8Array(bin.length);
+                for (var j = 0; j < bin.length; j++) arr[j] = bin.charCodeAt(j);
+                files.push(new File([arr], meta.name || ('shared-' + i), { type: meta.mime || 'application/octet-stream' }));
+            }
+        }
+        try { await t.core.invoke('plugin:box-shell|sharedDiscard'); } catch (_) {}
+        if (files.length) queueFilesForComposer(files);
+        if (pending.text) {
+            var ta = document.getElementById('message-input');
+            if (ta) {
+                ta.value = (ta.value ? ta.value + '\n' : '') + pending.text;
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+        if ((files.length || pending.text) && typeof showToast === 'function') {
+            showToast('Shared content added to the composer — press Send to send it encrypted.');
+        }
+    } catch (e) {
+        // The command exists only on the Android box; elsewhere it rejects.
+    }
+}
+
+// ── 5.6: the key vault lock screen ─────────────────────────────────────
+//
+// After the vault migration the storage key exists nowhere on the device in a
+// recoverable form: it is sealed in `e2e_key_vault` under an Argon2id key
+// derived from the password. A cold start therefore has no key, which is NOT
+// the same thing as having no session — the token is still there, just
+// unreadable — so this screen is what the boot shows instead of the "logged
+// out" redirect (which would run the login page's wipe and destroy the very
+// thing the vault protects).
+//
+// Two ways in, matching the two credentials the device is allowed to hold:
+//   * the password (always), and
+//   * the 5.1 fingerprint seal when it exists — the same Keystore ciphertext
+//     the login page uses, and it holds the password, so it can open the vault
+//     through the same live scan. Cancelled or failed scans simply do nothing.
+//
+// The escape hatch is deliberate and total: forget the device (the one wipe
+// path) and sign in again with the password.
+function _vkBridge() {
+    var t = window.__TAURI__;
+    return (t && t.core && typeof t.core.invoke === 'function') ? t : null;
+}
+
+function _vkFingerprintAvailable() {
+    if (!/Android/i.test(navigator.userAgent || '')) return false;
+    if (!_vkBridge()) return false;
+    try { return !!localStorage.getItem('e2e_bio_seal'); } catch (_) { return false; }
+}
+
+async function _vkUnsealPassword() {
+    var b = _vkBridge();
+    var blob = null;
+    try { blob = localStorage.getItem('e2e_bio_seal'); } catch (_) {}
+    if (!b || !blob) return null;
+    var res = await b.core.invoke('plugin:box-shell|biometricSeal', { mode: 'unwrap', data: blob });
+    if (!res || !res.data) return null;
+    var bytes = Uint8Array.from(atob(res.data), function (c) { return c.charCodeAt(0); });
+    var out = new TextDecoder().decode(bytes);
+    if (bytes.fill) bytes.fill(0);
+    return out || null;
+}
+
+function showVaultLockScreen() {
+    if (document.getElementById('vault-lock-overlay')) return;
+
+    var wrap = document.createElement('div');
+    wrap.id = 'vault-lock-overlay';
+    wrap.className = 'vault-lock-overlay';
+
+    var who = '';
+    try { who = localStorage.getItem('e2e_bio_user') || ''; } catch (_) {}
+    var bioOk = _vkFingerprintAvailable();
+
+    wrap.innerHTML =
+        '<div class="vault-lock-card">' +
+            '<div class="vault-lock-title">Unlock your key vault</div>' +
+            '<p class="vault-lock-hint">Your storage key is sealed with your password on this device — it is no longer kept in a form that can be read from disk. Enter your password to open it.</p>' +
+            (bioOk ? '<button type="button" class="vault-lock-bio" id="vault-lock-bio">' +
+                (who ? 'Unlock as ' + window.escapeHtml(who) + ' with fingerprint' : 'Unlock with fingerprint') +
+                '</button>' : '') +
+            '<input type="password" id="vault-lock-password" class="modal-input auth-code-input" placeholder="Password" autocomplete="current-password" style="width:100%;margin-top:10px" />' +
+            '<div class="vault-lock-error" id="vault-lock-error" style="display:none"></div>' +
+            '<button type="button" class="btn btn-primary" id="vault-lock-submit" style="width:100%;margin-top:10px">Unlock</button>' +
+            '<button type="button" class="vault-lock-forget" id="vault-lock-forget">Forget this device and sign in again</button>' +
+        '</div>';
+    document.body.appendChild(wrap);
+
+    // The boot spinner is behind this card and would never come down on its own
+    // (the boot returned at the lock screen, so nothing dismisses it) — it also
+    // sits at z-index 99999, over the card. While locked, THIS is the boot UI.
+    var boot = document.getElementById('loading-overlay');
+    if (boot) boot.style.display = 'none';
+
+    var input = document.getElementById('vault-lock-password');
+    var btn = document.getElementById('vault-lock-submit');
+    var err = document.getElementById('vault-lock-error');
+
+    function fail(msg) {
+        err.textContent = msg;
+        err.style.display = '';
+    }
+
+    async function attempt(password, label) {
+        if (!password) { fail('Enter your password.'); return; }
+        err.style.display = 'none';
+        btn.disabled = true;
+        var prev = btn.textContent;
+        btn.textContent = 'Unlocking…';
+        try {
+            var ok = await window._secUnlockVault(password);
+            if (ok) {
+                // The key is adopted for this tab; reload so every module reads
+                // its values under it from the start.
+                location.reload();
+                return;
+            }
+        } catch (_) {}
+        btn.disabled = false;
+        btn.textContent = prev;
+        fail(label || 'That password does not open the vault.');
+    }
+
+    btn.addEventListener('click', function () { attempt(input.value); });
+    input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); attempt(input.value); }
+    });
+
+    var bio = document.getElementById('vault-lock-bio');
+    if (bio) {
+        bio.addEventListener('click', async function () {
+            var label = bio.textContent;
+            bio.disabled = true;
+            bio.textContent = 'Waiting for your fingerprint…';
+            var pw = null;
+            try { pw = await _vkUnsealPassword(); } catch (_) { pw = null; }
+            bio.disabled = false;
+            bio.textContent = label;
+            if (!pw) { fail('The fingerprint scan was not completed.'); return; }
+            await attempt(pw, 'The sealed password no longer opens the vault — sign in with it instead.');
+        });
+    }
+
+    document.getElementById('vault-lock-forget').addEventListener('click', async function () {
+        if (await uiConfirm('Forget this device? All local data (keys, logins, the vault) is wiped and you will sign in again with your password.')) {
+            window.panicWipe('vault-lock');
+        }
+    });
+
+    if (input && !bioOk) input.focus();
+}
+
+window.__vaultShowLock = showVaultLockScreen;
+
 document.addEventListener('DOMContentLoaded', () => {
+    // 4.2: ?mini=1 boots ONLY the controls view — before the token gate and
+    // everything else, so the mini window never opens a second session.
+    if (IS_MINI_WINDOW) { bootMiniWindow(); return; }
+
+    // 5.6: a locked vault is not a missing session — see showVaultLockScreen().
+    if (window._secLocked) { showVaultLockScreen(); return; }
+
     checkTokenExpiry();
 
     let t = token();
@@ -3312,6 +3936,15 @@ document.addEventListener('DOMContentLoaded', () => {
     window.currentUserId = user ? user.id : null;
     document.getElementById("current-user").textContent = user.username;
     updateSidebarFooter();
+
+    // 4.4 + 3.4: the shell delivers e2e-chat:// links here, and shared content
+    // from the Android share sheet lands in the composer (once at boot, then
+    // on every return to the foreground — the native FIFO discards on read).
+    if (typeof __deepLinkListen === 'function') __deepLinkListen();
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') pollSharedIntoComposer();
+    });
+    pollSharedIntoComposer();
 
     // Scope the ringtone + notification-sound LOCAL caches to the current
     // user. The audio itself is stored encrypted on the server per-account
@@ -6342,6 +6975,412 @@ document.addEventListener('DOMContentLoaded', () => {
         window.location.href = '/login.html';
     });
 
+    // ── 5.3: panic wipe / auto-lock (FEATURE_PLAN.md) ──────────────────────
+    // ONE wipe path, and it is TOTAL: socket closed, session invalidated
+    // server-side, every at-rest copy dropped (localStorage except the benign
+    // session-duration preference, sessionStorage, cookies, the audio IDB,
+    // Cache Storage) plus the local search index (5.7) in the shell. A
+    // half-wipe that leaves an index or a cache behind is worse than none
+    // (R5), so everything wipeable is wiped HERE. No confirm dialog on the
+    // chord: it exists to be used in one motion under pressure.
+    window.panicWipe = async function (reason) {
+        try { console.warn('[wipe] local wipe:', reason || 'unspecified'); } catch (_) {}
+        try { if (window.VoiceManager && typeof VoiceManager.leaveVoiceChannel === 'function') VoiceManager.leaveVoiceChannel(); } catch (_) {}
+        if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+        try { await serverLogout(); } catch (_) {}
+        try { clearAllClientData(); } catch (_) {}
+        try {
+            if (window.caches && caches.keys) {
+                var _wc = await caches.keys();
+                for (var _wi = 0; _wi < _wc.length; _wi++) {
+                    try { await caches.delete(_wc[_wi]); } catch (_) {}
+                }
+            }
+        } catch (_) {}
+        try {
+            if (typeof indexedDB.databases === 'function') {
+                var _dbs = await indexedDB.databases();
+                for (var _di = 0; _di < _dbs.length; _di++) {
+                    if (_dbs[_di] && _dbs[_di].name) { try { indexedDB.deleteDatabase(_dbs[_di].name); } catch (_) {} }
+                }
+            }
+        } catch (_) {}
+        // 5.7's index is an ordinary localStorage key (encrypted at rest by
+        // secure-storage), so it went with everything else in
+        // clearAllClientData() above — there is no separate native store to
+        // drop. The in-memory copy dies with this page.
+        _localSearch = null;
+        window.location.href = '/login.html?wiped=1';
+    };
+
+    // Idle clock: ANY real input resets it. Default autoLockMinutes = 0 (off) —
+    // an auto-wipe that fires by surprise destroys data, so it is strictly
+    // opt-in, clamped to 0..1440 minutes.
+    var _autoLockMins = parseInt(localStorage.getItem('autoLockMinutes') || '0', 10);
+    if (isNaN(_autoLockMins) || _autoLockMins < 0) _autoLockMins = 0;
+    if (_autoLockMins > 1440) _autoLockMins = 1440;
+    var _lastActivityAt = Date.now();
+    ['pointerdown', 'keydown', 'wheel', 'touchstart', 'mousemove'].forEach(function (ev) {
+        window.addEventListener(ev, function () { _lastActivityAt = Date.now(); }, { passive: true, capture: true });
+    });
+    setInterval(function () {
+        if (!_autoLockMins || !token()) return;
+        if (Date.now() - _lastActivityAt >= _autoLockMins * 60000) window.panicWipe('auto-lock');
+    }, 15000);
+    // The hidden gesture: Alt+Shift+W. No confirmation, by design.
+    window.addEventListener('keydown', function (e) {
+        if (e.altKey && e.shiftKey && (e.key === 'W' || e.key === 'w') && !e.repeat) {
+            e.preventDefault();
+            window.panicWipe('panic-chord');
+        }
+    });
+    // Test hook (R8): the auto-lock DECISION on demand, against a controllable
+    // idle value — the timer wiring itself is the trivial setInterval above.
+    window.__autoLockTest = {
+        setMins: function (m) { _autoLockMins = Math.max(0, Math.min(1440, m | 0)); },
+        mins: function () { return _autoLockMins; },
+        tick: function (idleMinutes) {
+            if (!_autoLockMins || !token()) return false;
+            if (idleMinutes >= _autoLockMins) { window.panicWipe('auto-lock'); return true; }
+            return false;
+        },
+    };
+    // Settings → Privacy wiring.
+    var _alInput = document.getElementById('auto-lock-minutes');
+    if (_alInput) {
+        _alInput.value = String(_autoLockMins);
+        _alInput.addEventListener('change', function () {
+            var v = parseInt(this.value, 10);
+            if (isNaN(v) || v < 0) v = 0;
+            if (v > 1440) v = 1440;
+            this.value = String(v);
+            _autoLockMins = v;
+            localStorage.setItem('autoLockMinutes', String(v));
+            _lastActivityAt = Date.now();
+        });
+    }
+    var _wipeBtn = document.getElementById('panic-wipe-btn');
+    if (_wipeBtn) {
+        _wipeBtn.addEventListener('click', async function () {
+            if (await uiConfirm('Wipe ALL local data (keys, logins, settings) and sign out now? There is no undo.')) window.panicWipe('settings-button');
+        });
+    }
+
+    // 5.7: device-only search preference. Turning it ON stops token uploads
+    // entirely (flushSearchIndex / queueSearchIndex check this every time), and
+    // search then runs against the local index instead.
+    var _lsoToggle = document.getElementById('local-search-only-toggle');
+    if (_lsoToggle) {
+        _lsoToggle.checked = localSearchOnlyEnabled();
+        _lsoToggle.addEventListener('change', function () {
+            try { localStorage.setItem('localSearchOnly', this.checked ? '1' : '0'); } catch (_) {}
+            if (typeof showToast === 'function') {
+                showToast(this.checked
+                    ? 'Search stays on this device now — no query tokens are sent.'
+                    : 'Search uses the server index again.');
+            }
+        });
+    }
+
+    // ── 5.5: encrypted local export (FEATURE_PLAN.md) ──────────────────────
+    // ONE passphrase-encrypted file: identity keys, settings, conversation
+    // metadata and the most recent messages you can already read — sealed with
+    // libsodium (Argon2id pwhash → crypto_secretbox) and written under a name
+    // that says it is ciphertext (never a name implying plaintext). The server
+    // never sees any of it. Bounded per conversation so the export cannot
+    // become an unbounded plaintext sweep (R5).
+    var EXPORT_MSG_LIMIT = 100;
+
+    async function _exportSeal(passphrase, json) {
+        await sodium.ready;
+        var salt = sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES);
+        var key = sodium.crypto_pwhash(sodium.crypto_secretbox_KEYBYTES, passphrase, salt,
+            sodium.crypto_pwhash_OPSLIMIT_MODERATE, sodium.crypto_pwhash_MEMLIMIT_MODERATE,
+            sodium.crypto_pwhash_ALG_ARGON2ID13);
+        var nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+        var ct = sodium.crypto_secretbox_easy(sodium.from_string(JSON.stringify(json)), nonce, key);
+        var magic = new TextEncoder().encode('E2EXP1\0');
+        var out = new Uint8Array(magic.length + salt.length + nonce.length + ct.length);
+        out.set(magic, 0);
+        out.set(salt, magic.length);
+        out.set(nonce, magic.length + salt.length);
+        out.set(ct, magic.length + salt.length + nonce.length);
+        sodium.memzero(key);
+        return out;
+    }
+
+    // The paired reader — also how you verify an export before relying on it.
+    window.e2eExportOpen = async function (b64, passphrase) {
+        await sodium.ready;
+        var raw = sodium.from_base64(b64);
+        if (raw.length < 7 + sodium.crypto_pwhash_SALTBYTES + sodium.crypto_secretbox_NONCEBYTES + 16
+            || new TextDecoder().decode(raw.slice(0, 7)) !== 'E2EXP1\0') {
+            throw new Error('not an E2E Chat export');
+        }
+        var salt = raw.slice(7, 7 + sodium.crypto_pwhash_SALTBYTES);
+        var off = 7 + sodium.crypto_pwhash_SALTBYTES;
+        var nonce = raw.slice(off, off + sodium.crypto_secretbox_NONCEBYTES);
+        var ct = raw.slice(off + sodium.crypto_secretbox_NONCEBYTES);
+        var key = sodium.crypto_pwhash(sodium.crypto_secretbox_KEYBYTES, passphrase, salt,
+            sodium.crypto_pwhash_OPSLIMIT_MODERATE, sodium.crypto_pwhash_MEMLIMIT_MODERATE,
+            sodium.crypto_pwhash_ALG_ARGON2ID13);
+        try {
+            var pt = sodium.crypto_secretbox_open_easy(ct, nonce, key);
+            return JSON.parse(sodium.to_string(pt));
+        } catch (_) {
+            throw new Error('wrong passphrase or corrupted file');
+        } finally {
+            sodium.memzero(key);
+        }
+    };
+
+    async function _exportPayload() {
+        var payload = {
+            v: 1,
+            format: 'E2EXP1 (Argon2id + XSalsa20-Poly1305, libsodium)',
+            exportedAt: new Date().toISOString(),
+            user: { id: user && user.id, username: user && user.username },
+            identity: null,
+            settings: {},
+            conversations: { servers: [], channels: [], dms: [] },
+            messages: { channels: {}, dms: {} },
+        };
+        // Identity keys — the reason this file must be encrypted.
+        try {
+            var kp = E2ECrypto.getIdentityKeyPair(user && user.id);
+            if (kp) payload.identity = {
+                publicKey: E2ECrypto.arrayBufferToBase64(kp.publicKey),
+                privateKey: E2ECrypto.arrayBufferToBase64(kp.privateKey),
+            };
+        } catch (_) {}
+        // Settings mirror: anything that smells like auth material (session
+        // token, storage bootstrap, key blobs) is skipped by construction —
+        // the export is your data, not another copy of your credentials.
+        try {
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (!k) continue;
+                if (/token|password|secret|bootstrap|blob|session/i.test(k)) continue;
+                payload.settings[k] = localStorage.getItem(k);
+            }
+        } catch (_) {}
+        // Conversation metadata — ids + names, server-known, and this file is
+        // ciphertext anyway.
+        try {
+            dmConversations.forEach(function (c) {
+                payload.conversations.dms.push({
+                    id: c.dm_channel_id,
+                    name: (typeof userDisplayNameCache !== 'undefined' && userDisplayNameCache[c.other_user_id]) || null,
+                    other_user_id: c.other_user_id || null,
+                });
+            });
+        } catch (_) {}
+        try { servers.forEach(function (s) { payload.conversations.servers.push({ id: s.id, name: s.name }); }); } catch (_) {}
+        for (var si = 0; si < payload.conversations.servers.length; si++) {
+            try {
+                var cres = await authFetch('/api/servers/' + encodeURIComponent(payload.conversations.servers[si].id) + '/channels');
+                if (!cres.ok) continue;
+                var chs = await cres.json();
+                (Array.isArray(chs) ? chs : []).forEach(function (ch) {
+                    payload.conversations.channels.push({ id: ch.id, name: ch.name, server_id: payload.conversations.servers[si].id });
+                });
+            } catch (_) {}
+        }
+        // Recent messages, decrypted here and sealed into the file.
+        for (var ci = 0; ci < payload.conversations.channels.length; ci++) {
+            var ch2 = payload.conversations.channels[ci];
+            try {
+                var mres = await authFetch('/api/channels/' + encodeURIComponent(ch2.id) + '/messages?limit=' + EXPORT_MSG_LIMIT);
+                if (!mres.ok) continue;
+                var rows = await mres.json();
+                var out = [];
+                (Array.isArray(rows) ? rows : []).forEach(function (m) {
+                    var text = null;
+                    try { text = tryDecryptWithAllKeys(ch2.server_id, m.encrypted_content, m.nonce); } catch (_) {}
+                    out.push({ id: m.id, t: m.timestamp, sender: m.sender_user_id || null, text: text });
+                });
+                payload.messages.channels[ch2.id] = out;
+            } catch (_) {}
+        }
+        // DMs — X25519 with the OTHER party's identity works in both
+        // directions (same shared secret), so one identity fetch per DM.
+        for (var di = 0; di < payload.conversations.dms.length; di++) {
+            var dm = payload.conversations.dms[di];
+            try {
+                if (!dm.other_user_id) continue;
+                var ires = await authFetch('/api/identity/' + encodeURIComponent(dm.other_user_id));
+                if (!ires.ok) continue;
+                var idata = await ires.json();
+                var otherPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(idata.identity_public_key));
+                var myKp = E2ECrypto.getIdentityKeyPair(user && user.id);
+                if (!myKp) continue;
+                var dres = await authFetch('/api/dm/' + encodeURIComponent(dm.id) + '/messages?limit=' + EXPORT_MSG_LIMIT);
+                if (!dres.ok) continue;
+                var drows = await dres.json();
+                var dout = [];
+                (Array.isArray(drows) ? drows : []).forEach(function (m) {
+                    var text = null;
+                    try { text = E2ECrypto.decryptDm(m.encrypted_content, m.nonce, dm.id, myKp.privateKey, otherPub, m.message_nonce); } catch (_) {}
+                    dout.push({ id: m.id, t: m.timestamp, sender: m.sender_user_id || null, text: text });
+                });
+                payload.messages.dms[dm.id] = dout;
+            } catch (_) {}
+        }
+        return payload;
+    }
+
+    var _exportBtn = document.getElementById('export-data-btn');
+    if (_exportBtn) {
+        _exportBtn.addEventListener('click', async function () {
+            var st = document.getElementById('export-status');
+            function say(msg, kind) {
+                if (!st) return;
+                st.textContent = msg;
+                st.style.color = kind === 'error' ? 'var(--danger)' : (kind === 'success' ? '#43b581' : 'var(--text-muted)');
+            }
+            var p1 = (document.getElementById('export-passphrase') || {}).value || '';
+            var p2 = (document.getElementById('export-passphrase-confirm') || {}).value || '';
+            if (p1.length < 8) { say('Passphrase must be at least 8 characters.', 'error'); return; }
+            if (p1 !== p2) { say('Passphrases do not match.', 'error'); return; }
+            if (!(await uiConfirm('Export your data as ONE encrypted file (e2e-chat-export.enc)? It holds your keys, settings and recent messages, sealed with this passphrase. Nothing decrypted is written to disk.'))) return;
+            say('Collecting and encrypting…');
+            try {
+                var payload = await _exportPayload();
+                var bytes = await _exportSeal(p1, payload);
+                var blob = new Blob([bytes], { type: 'application/octet-stream' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = 'e2e-chat-export.enc';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+                (document.getElementById('export-passphrase') || {}).value = '';
+                (document.getElementById('export-passphrase-confirm') || {}).value = '';
+                say('Exported e2e-chat-export.enc — keep the passphrase with it; without it the file is unreadable.', 'success');
+            } catch (e) {
+                say('Export failed: ' + (e && e.message ? e.message : e), 'error');
+            }
+        });
+    }
+
+    // Test hooks (R8): the exact seal/open pair and payload builder the button
+    // uses — so the round-trip, the "ciphertext carries no plaintext" property
+    // and the "no credentials in the payload" rule are asserted directly.
+    window.__exportSealB64 = async function (passphrase, json) {
+        var bytes = await _exportSeal(passphrase, json);
+        return sodium.to_base64(bytes);
+    };
+    window.__exportPayload = function () { return _exportPayload(); };
+
+    // ── 5.1: fingerprint unlock (FEATURE_PLAN.md) ──────────────────────
+    // The biometric RELEASES the storage password; nothing else changes. On
+    // enable we wrap the password with a per-operation Keystore key (one
+    // BiometricPrompt) and keep ONLY the ciphertext (`e2e_bio_seal`) — the key
+    // never leaves the enclave and the blob is worthless without a live scan.
+    // The login page then offers "Unlock with fingerprint", which unwraps that
+    // same ciphertext through the same prompt. A failed, cancelled or locked-out
+    // prompt REJECTS and the password form is untouched: there is deliberately
+    // no path that lands in an unlocked state, and the password is always
+    // still accepted (plan: keep the password path as fallback).
+    var BIOMETRIC_SEAL_KEY = 'e2e_bio_seal';
+    var BIOMETRIC_USER_KEY = 'e2e_bio_user';
+
+    // The Android box only: the desktop box has the bridge but no
+    // BiometricPrompt, and a plain browser has neither bridge nor Keystore.
+    function _biometricBridge() {
+        if (!/Android/i.test(navigator.userAgent || '')) return null;
+        var t = window.__TAURI__;
+        return (t && t.core && typeof t.core.invoke === 'function') ? t : null;
+    }
+
+    function _bioSealed() {
+        try { return localStorage.getItem(BIOMETRIC_SEAL_KEY); } catch (_) { return null; }
+    }
+
+    async function biometricStatus() {
+        var enabled = !!_bioSealed();
+        var b = _biometricBridge();
+        if (!b) return { available: false, reason: 'not-android', enabled: enabled };
+        try {
+            var r = await b.core.invoke('plugin:box-shell|biometricAvailable');
+            return { available: !!(r && r.available), reason: r && r.available ? '' : 'no-sensor', enabled: enabled };
+        } catch (e) {
+            return { available: false, reason: 'bridge-error', enabled: enabled };
+        }
+    }
+
+    async function biometricEnable() {
+        var b = _biometricBridge();
+        if (!b) throw new Error('Fingerprint unlock is only available in the Android app.');
+        var st = await biometricStatus();
+        if (!st.available) throw new Error('No fingerprint is set up on this device.');
+        var password = loadDecryptedPassword();
+        if (!password) throw new Error('Sign in with your password first so it can be sealed.');
+        var bytes = new TextEncoder().encode(password);
+        var res = await b.core.invoke('plugin:box-shell|biometricSeal', {
+            mode: 'wrap',
+            data: E2ECrypto.arrayBufferToBase64(bytes),
+        });
+        if (!res || !res.data) throw new Error('The fingerprint prompt was not completed.');
+        try { localStorage.setItem(BIOMETRIC_SEAL_KEY, res.data); } catch (_) {}
+        // The username is not a secret — it just saves typing it again.
+        try { localStorage.setItem(BIOMETRIC_USER_KEY, (user && user.username) || ''); } catch (_) {}
+        return true;
+    }
+
+    async function biometricDisable() {
+        try { localStorage.removeItem(BIOMETRIC_SEAL_KEY); } catch (_) {}
+        try { localStorage.removeItem(BIOMETRIC_USER_KEY); } catch (_) {}
+        return true;
+    }
+
+    async function refreshBiometricUi() {
+        var box = document.getElementById('biometric-unlock-toggle');
+        var line = document.getElementById('biometric-status-line');
+        if (!box) return;
+        var st = await biometricStatus();
+        box.checked = !!st.enabled;
+        box.disabled = !st.available;
+        if (line) {
+            line.textContent = !st.available
+                ? (st.reason === 'not-android'
+                    ? 'Only the Android app can use the phone\u2019s fingerprint sensor.'
+                    : 'No fingerprint is set up on this device.')
+                : (st.enabled
+                    ? 'Enabled \u2014 the login page can unlock with your fingerprint.'
+                    : 'Not enabled.');
+        }
+    }
+
+    var _bioToggle = document.getElementById('biometric-unlock-toggle');
+    if (_bioToggle) {
+        _bioToggle.addEventListener('change', async function () {
+            var want = this.checked;
+            try {
+                if (want) await biometricEnable();
+                else await biometricDisable();
+            } catch (e) {
+                // Failed/cancelled scan: the box goes back to the real state and
+                // the reason stays on screen (refresh FIRST — it rewrites the
+                // status line — then put our message over it).
+                var line = document.getElementById('biometric-status-line');
+                await refreshBiometricUi();
+                if (line) line.textContent = (e && e.message) ? e.message : 'Failed.';
+                return;
+            }
+            refreshBiometricUi();
+        });
+    }
+    refreshBiometricUi();
+    window.__biometric = {
+        status: biometricStatus,
+        enable: biometricEnable,
+        disable: biometricDisable,
+        refresh: refreshBiometricUi,
+    };
+
     // Security tab - session countdown
     function updateSessionCountdown() {
         const countdownEl = document.getElementById('session-countdown');
@@ -6651,6 +7690,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     localStorage.setItem('e2e_encrypted_password', E2ECrypto.encodeEncryptedFileKey(btoa(newPw), dk));
                 }
             }
+            // 5.6: re-seal the vault under the NEW password. Without this the
+            // vault would still open with the old password and yield the old
+            // key — a cold start would look empty even to the person who just
+            // changed it. _kvMigrate() reads the key synchronously before it
+            // awaits anything, so calling it here sees the freshly re-keyed
+            // storage, and it deletes the bootstrap the line above just wrote.
+            if (window._kvMigrate) {
+                Promise.resolve(window._kvMigrate(newPw)).catch(function () {});
+            }
         } catch (_) {}
     }
 
@@ -6709,13 +7757,11 @@ document.addEventListener('DOMContentLoaded', () => {
             saveBackupNowBtn.innerHTML = icon('refresh') + ' Saving...';
             if (saveBackupStatus) { saveBackupStatus.textContent = 'Encrypting keys...'; saveBackupStatus.style.color = 'var(--text-muted)'; }
             try {
-                var encPw = localStorage.getItem('e2e_encrypted_password');
-                var devKeyStr = localStorage.getItem('e2e_device_key');
-                if (!encPw || !devKeyStr) throw new Error('Not logged in');
-                var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-                var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-                if (!pwB64) throw new Error('Could not decode password');
-                var pw = atob(pwB64);
+                // The password no longer lives in a localStorage bootstrap
+                // (the vault owns it now) — read it through the one accessor
+                // that knows about both the legacy blob and the session ticket.
+                var pw = (typeof loadDecryptedPassword === 'function') ? loadDecryptedPassword() : null;
+                if (!pw) throw new Error('Enter your password to save a backup');
                 var t = localStorage.getItem('token');
                 if (!t) throw new Error('No auth token');
                 var bundle = E2ECrypto.buildKeyBundle();
@@ -8006,6 +9052,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 openScheduleModal();
             } else if (action === 'vault-send') {
                 openVaultSendPicker();
+            } else if (action === 'snip') {
+                snipScreenRegion();
             }
             // 'record-audio' is handled by the record-audio click handler below
         });
@@ -9497,6 +10545,39 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('media-viewer-close').addEventListener('click', closeMediaViewer);
     document.getElementById('media-viewer-backdrop').addEventListener('click', closeMediaViewer);
+
+    // 3.5: drag a decrypted file out to the desktop (see warmDragOut above).
+    // Armed on press — a drag always starts with one — and attached at
+    // dragstart, where the data transfer is snapshotted.
+    (function setupDragOut() {
+        const list = document.getElementById('message-list');
+        if (!list) return;
+        list.addEventListener('pointerdown', (e) => {
+            const card = e.target.closest ? e.target.closest('.file-card, .audio-file-card') : null;
+            if (!card) return;
+            card.draggable = true;
+            warmDragOut(card); // fire and forget: ready by the time the drag starts
+        });
+        list.addEventListener('dragstart', (e) => {
+            const card = e.target.closest ? e.target.closest('.file-card, .audio-file-card') : null;
+            if (!card || !e.dataTransfer) return;
+            const cached = _dragOutCache[card.dataset.fileId];
+            if (!cached) {
+                // Still decrypting: refuse THIS drag rather than hand a drop
+                // target an empty payload, and say so once.
+                warmDragOut(card);
+                e.preventDefault();
+                if (typeof showToast === 'function') showToast('Preparing that file \u2014 drag it again in a moment.');
+                return;
+            }
+            try {
+                e.dataTransfer.effectAllowed = 'copy';
+                // Chromium's OS drop format: mime:filename:url
+                e.dataTransfer.setData('DownloadURL', cached.mime + ':' + cached.name + ':' + cached.url);
+                e.dataTransfer.setData('text/uri-list', cached.url);
+            } catch (_) {}
+        });
+    })();
 
     // Event delegation for file download buttons
     document.getElementById('message-list').addEventListener('click', (e) => {
@@ -11527,42 +12608,6 @@ function showDmStripContextMenu(e) {
     setTimeout(function () { document.addEventListener('click', closeMenu); }, 0);
 }
 
-// ── Per-channel screenshot blocking (5.2, FEATURE_PLAN.md) ─────────────
-// The on-device copy of "no screenshots in here": `FLAG_SECURE` via the
-// box-shell plugin. Stored as a plain id list — the ids are metadata the
-// server already holds, and the SET is device-local preference (like mutes).
-function secureChannelIds() {
-    try {
-        var v = JSON.parse(localStorage.getItem('secureChannels') || '[]');
-        return Array.isArray(v) ? v : [];
-    } catch (_) { return []; }
-}
-
-function isSecureChannel(channelId) {
-    return !!channelId && secureChannelIds().indexOf(channelId) !== -1;
-}
-
-function setSecureChannel(channelId, on) {
-    var list = secureChannelIds().filter(function (id) { return id !== channelId; });
-    if (on) list.push(channelId);
-    try { localStorage.setItem('secureChannels', JSON.stringify(list)); } catch (_) {}
-    // Re-apply for whatever is being viewed right now.
-    applySecureCapture(viewMode === 'servers');
-}
-
-// `inChannelView` says whether a text-channel view is on screen: FLAG_SECURE
-// is window-wide, so the flag follows the VIEWED channel. Everything here is
-// a no-op outside the Android box (a desktop screenshot is the user's own
-// OS capture of their own screen — same exposure as the app being visible).
-function applySecureCapture(inChannelView) {
-    var tauri = window.__TAURI__;
-    if (!tauri || !tauri.core || typeof tauri.core.invoke !== 'function') return;
-    if (!/Android/i.test(navigator.userAgent || '')) return;
-    var active = !!inChannelView && isSecureChannel(currentChannelId);
-    tauri.core.invoke('plugin:box-shell|setSecureMode', { active: active })
-        .catch(function (err) { console.warn('[box] setSecureMode failed:', err); });
-}
-
 function showChannelContextMenu(e, channelId, channelName) {
     // Remove any existing context menu
     var existing = document.querySelector('.channel-context-menu');
@@ -11585,23 +12630,6 @@ function showChannelContextMenu(e, channelId, channelName) {
         menu.remove();
     });
     menu.appendChild(chItem);
-
-    // 5.2 (FEATURE_PLAN.md) — per-channel screenshot blocking (FLAG_SECURE).
-    // For the server where "no screenshots" is the point: the pixels on
-    // screen are decrypted by definition, so a screenshot bypasses everything
-    // below the display. Per-channel, never global — a global flag would also
-    // block the user's own screenshots everywhere.
-    var isSecureChannelNow = isSecureChannel(channelId);
-    var secItem = document.createElement('div');
-    secItem.className = 'context-menu-item';
-    secItem.textContent = isSecureChannelNow
-        ? 'Allow screenshots in #' + channelName
-        : 'Block screenshots in #' + channelName;
-    secItem.addEventListener('click', function () {
-        setSecureChannel(channelId, !isSecureChannelNow);
-        menu.remove();
-    });
-    menu.appendChild(secItem);
 
     // Server mute toggle
     if (currentServerId) {
@@ -12777,26 +13805,22 @@ function connectWebSocket(t) {
                     if (data.device_id === _myWsDeviceId()) break;
                 }
                 try {
-                    // Re-fetch the key blob from server and re-apply groups
-                    var encPw = localStorage.getItem('e2e_encrypted_password');
-                    var devKeyStr = localStorage.getItem('e2e_device_key');
-                    if (encPw && devKeyStr) {
-                        var dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(devKeyStr));
-                        var pwB64 = E2ECrypto.decodeEncryptedFileKey(encPw, dk);
-                        if (pwB64) {
-                            var pw = atob(pwB64);
-                            var t = localStorage.getItem('token');
-                            var blobResp = await fetch('/api/key-blob', { headers: { 'Authorization': 'Bearer ' + t } });
-                            if (blobResp.ok) {
-                                var blobData = await blobResp.json();
-                                if (blobData.encrypted_blob) {
-                                    var bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, pw, blobData.salt, blobData.nonce);
-                                    if (bundle) {
-                                        E2ECrypto.restoreKeyBundle(bundle);
-                                        loadServerGroupsLocal();
-                                        renderServerList();
-                                        // No re-save needed: restoreKeyBundle is additive.
-                                    }
+                    // Re-fetch the key blob from server and re-apply groups.
+                    // The vault owns the password now; loadDecryptedPassword()
+                    // hands it back to a live session (session ticket).
+                    var pw = (typeof loadDecryptedPassword === 'function') ? loadDecryptedPassword() : null;
+                    if (pw) {
+                        var t = localStorage.getItem('token');
+                        var blobResp = await fetch('/api/key-blob', { headers: { 'Authorization': 'Bearer ' + t } });
+                        if (blobResp.ok) {
+                            var blobData = await blobResp.json();
+                            if (blobData.encrypted_blob) {
+                                var bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, pw, blobData.salt, blobData.nonce);
+                                if (bundle) {
+                                    E2ECrypto.restoreKeyBundle(bundle);
+                                    loadServerGroupsLocal();
+                                    renderServerList();
+                                    // No re-save needed: restoreKeyBundle is additive.
                                 }
                             }
                         }
@@ -12810,13 +13834,10 @@ function connectWebSocket(t) {
                 if (data.device_id && data.device_id === _myWsDeviceId()) break;
                 (async function() {
                     try {
-                        var _encPw = localStorage.getItem('e2e_encrypted_password');
-                        var _devKeyStr = localStorage.getItem('e2e_device_key');
-                        if (!_encPw || !_devKeyStr) return;
-                        var _dk = new Uint8Array(E2ECrypto.base64ToArrayBuffer(_devKeyStr));
-                        var _pwB64 = E2ECrypto.decodeEncryptedFileKey(_encPw, _dk);
-                        if (!_pwB64) return;
-                        var _pw = atob(_pwB64);
+                        // The vault owns the password now; loadDecryptedPassword()
+                        // hands it back to a live session (session ticket).
+                        var _pw = (typeof loadDecryptedPassword === 'function') ? loadDecryptedPassword() : null;
+                        if (!_pw) return;
                         var _t = localStorage.getItem('token');
                         var _blobResp = await fetch('/api/key-blob', { headers: { 'Authorization': 'Bearer ' + _t } });
                         if (!_blobResp.ok) return;
@@ -13653,18 +14674,43 @@ function connectWebSocket(t) {
         // Use the reconnection guard to avoid cascading reconnections
         // when multiple close events fire in quick succession.
         if (!_wsReconnectTimer) {
-            _wsReconnectTimer = setTimeout(function() {
-                _wsReconnectTimer = null;
-                // Reconnect with the CURRENT token from localStorage, not the
-                // stale `t` captured at page load: after a re-auth (which mints
-                // a NEW server-side session and revokes the old one on this
-                // device), a reconnect with the old token would be rejected.
-                var fresh = token();
-                if (fresh) connectWebSocket(fresh);
-            }, 1000);
+            // 6.5 (FEATURE_PLAN.md): while the OS says the network is gone,
+            // stop hammering a dead socket every second — the `online` listener
+            // below reconnects the instant it returns. (navigator.onLine is a
+            // local radio fact; a captive portal can lie, so we still retry
+            // promptly whenever it claims to be up.)
+            var offlineNow = (typeof navigator !== 'undefined' && navigator.onLine === false);
+            if (!offlineNow) {
+                _wsReconnectTimer = setTimeout(function() {
+                    _wsReconnectTimer = null;
+                    // Reconnect with the CURRENT token from localStorage, not the
+                    // stale `t` captured at page load: after a re-auth (which mints
+                    // a NEW server-side session and revokes the old one on this
+                    // device), a reconnect with the old token would be rejected.
+                    var fresh = token();
+                    if (fresh) connectWebSocket(fresh);
+                }, 1000);
+            }
         }
     };
 }
+
+// ── 6.5 (FEATURE_PLAN.md): smarter reconnect ────────────────────────────
+// The network coming back — or the app returning to the foreground after the
+// radio dropped — reconnects NOW instead of waiting out a timer that may not
+// even be scheduled (the offline path above deliberately skips it). Guarded
+// exactly like the onclose timer so the three triggers can't cascade, and a
+// no-op before login (no token) or when the socket is already live.
+function _reconnectNowIfDown() {
+    if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    var fresh = token();
+    if (fresh) connectWebSocket(fresh);
+}
+window.addEventListener('online', _reconnectNowIfDown);
+document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') _reconnectNowIfDown();
+});
 
 // --- E2E Key Management ---
 
@@ -13729,6 +14775,13 @@ async function ensureIdentityKeys() {
         // (instead of the random fallback key that _secInit() uses when no password is available).
         if (window._secReKey) {
             try { window._secReKey(); } catch (_) {}
+        }
+
+        // 5.6: the key is password-derived again, so seal it back into the vault
+        // and drop the password blob this recovery had to recreate. _kvMigrate()
+        // reads the key synchronously, so it must come after _secReKey().
+        if (window._kvMigrate) {
+            Promise.resolve(window._kvMigrate(password)).catch(function () {});
         }
 
         return !!E2ECrypto.getIdentityKeyPair(user.id);
@@ -13873,6 +14926,12 @@ async function restoreKeysFromBackup(password, onStatus) {
         // Re-key secure-storage onto the password-derived key
         if (window._secReKey) { try { window._secReKey(); } catch (_) {} }
         storeEncryptedPassword(password);
+        // 5.6: fold the password blob back into the vault (see the note in
+        // _recoverFromBlob): it exists only because the vault no longer keeps a
+        // readable copy of the password.
+        if (window._kvMigrate) {
+            Promise.resolve(window._kvMigrate(password)).catch(function () {});
+        }
         if (bundle['e2e_friend_code']) myFriendCode = bundle['e2e_friend_code'];
 
         // The blob can predate the current server key (rotation) or omit a key
@@ -16039,8 +17098,6 @@ function markChannelRead(channelId) {    // Mark channel as read: clear unread 
 async function selectChannel(channelId, channelName, element) {    markChannelRead(channelId);
 
     currentChannelId = channelId;
-    // 5.2: entering a channel applies its screenshot policy (no-op on desktop).
-    applySecureCapture(true);
 
     document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
     element.classList.add('active');
@@ -16935,9 +17992,9 @@ async function appendMessage(msg) {
     // Backfill the E2E search index for history we've just decrypted.
     // Polls index their question text so polls are searchable too.
     if (pollData) {
-        queueSearchIndex(currentChannelId, null, msg.id, JSON.stringify({ type: 'text', text: pollData.question || '' }));
+        queueSearchIndex(currentChannelId, null, msg.id, JSON.stringify({ type: 'text', text: pollData.question || '' }), msg);
     } else {
-        queueSearchIndex(currentChannelId, null, msg.id, textContent);
+        queueSearchIndex(currentChannelId, null, msg.id, textContent, msg);
     }
 
     // Disappearing message: server-enforced wall-clock expiry. A row that
@@ -19549,8 +20606,6 @@ function renderDmSidebar() {
 
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
     currentDmChannelId = dmChannelId;
-    // 5.2: a DM view is never a server channel — release any channel policy.
-    applySecureCapture(false);
     // Save last active DM channel so it can be restored after page refresh
     try { localStorage.setItem('last_dm_channel_id', dmChannelId); } catch (_) {}
     // Look up the user's display name
@@ -20219,9 +21274,9 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     // Backfill the E2E search index for DM history we've just decrypted.
     // Polls index their question text so polls are searchable too.
     if (pollData) {
-        queueSearchIndex(null, currentDmChannelId, msg.id, JSON.stringify({ type: 'text', text: pollData.question || '' }));
+        queueSearchIndex(null, currentDmChannelId, msg.id, JSON.stringify({ type: 'text', text: pollData.question || '' }), msg);
     } else {
-        queueSearchIndex(null, currentDmChannelId, msg.id, textContent);
+        queueSearchIndex(null, currentDmChannelId, msg.id, textContent, msg);
     }
 
     // Disappearing message: server-enforced wall-clock expiry (see appendMessage).
@@ -21748,6 +22803,14 @@ async function _recoverFromBlob(password, errorEl, successEl) {
         // password-derived key (not the pre-rekey fallback key). Otherwise
         // saveKeyBlobToServer() reads it via secure-storage and silently fails.
         storeEncryptedPassword(password);
+
+        // 5.6: seal the re-keyed storage key into the vault and delete the
+        // password blob again — the plan's rule is that the two never sit side
+        // by side, and this recovery is the one flow that legitimately has to
+        // recreate it (the user typed the password a moment ago).
+        if (window._kvMigrate) {
+            Promise.resolve(window._kvMigrate(password)).catch(function () {});
+        }
         
         // Also set myFriendCode if the bundle had one
         if (bundle['e2e_friend_code']) {
@@ -26414,9 +27477,66 @@ function buildFileCardHtml(fileData) {
 
 let blobUrls = []; // Track blob URLs for cleanup
 
+// ── 3.5 (FEATURE_PLAN.md): drag a file OUT of the app ───────────────────
+// The data type that makes an OS drop target (Explorer/Finder, a mail client,
+// an editor) receive a real FILE instead of a URL string is Chromium's
+// `DownloadURL`; the page supplies a blob: URL it already holds after
+// decrypting. Decryption is async while dragstart must answer synchronously,
+// so the URL is warmed on pointerdown — every drag starts with a press — and
+// attached at dragstart. A cold drag (first touch of a file still being
+// fetched) has nothing to attach: it is cancelled with a word to the user
+// rather than silently producing a broken drop. The same decryption path as
+// Save-as, so nothing new is trusted; bytes only leave through the drop
+// target the user chose, and the URL is revoked with the other blob URLs when
+// the view changes.
+let _dragOutCache = {};    // fileId -> { url, name, mime }
+let _dragOutPending = {};  // fileId -> Promise
+
+function _dragOutCardInfo(card) {
+    if (!card || !card.dataset) return null;
+    var fid = card.dataset.fileId;
+    if (!fid) return null;
+    return {
+        id: fid,
+        key: card.dataset.fileKey || '',
+        name: card.dataset.fileName || 'download',
+        mime: card.dataset.fileMime || 'application/octet-stream',
+        size: parseInt(card.dataset.fileSize, 10) || 0,
+    };
+}
+
+function warmDragOut(card) {
+    var info = _dragOutCardInfo(card);
+    if (!info) return Promise.resolve(null);
+    if (_dragOutCache[info.id]) return Promise.resolve(_dragOutCache[info.id]);
+    if (_dragOutPending[info.id]) return _dragOutPending[info.id];
+    _dragOutPending[info.id] = (async function () {
+        var key = info.key;
+        // Same key-recovery fallback the download button uses.
+        if (!key) { try { key = await recoverAttachmentFileKey(info.id, card); } catch (_) {} }
+        if (!key) return null;
+        var blob = await downloadAndDecryptFile(info.id, key, info.mime, info.size);
+        if (!blob) return null;
+        _dragOutCache[info.id] = { url: URL.createObjectURL(blob), name: info.name, mime: info.mime };
+        return _dragOutCache[info.id];
+    })().catch(function () { return null; }).then(function (r) {
+        delete _dragOutPending[info.id];
+        return r;
+    });
+    return _dragOutPending[info.id];
+}
+
 function revokeBlobUrls() {
     for (const u of blobUrls) { try { URL.revokeObjectURL(u); } catch (_) {} }
     blobUrls = [];
+    // 3.5: the drag-out cache holds decrypted bytes behind blob URLs too, so it
+    // has exactly the same lifetime as the blobUrls list.
+    try {
+        for (var _dk in _dragOutCache) {
+            if (_dragOutCache[_dk] && _dragOutCache[_dk].url) URL.revokeObjectURL(_dragOutCache[_dk].url);
+        }
+    } catch (_) {}
+    _dragOutCache = {};
 }
 
 /**
@@ -31731,6 +32851,110 @@ function decryptOwnProfileFileKeys(data) {
 }
 
 // Open profile modal for a given user ID
+// ── 5.4 (FEATURE_PLAN.md): device verification (SAS) ────────────────────
+// TOFU already pins a fingerprint per user; this is the part two humans can
+// actually compare out loud. The string mixes BOTH identity keys, so neither
+// side can pick it alone, and it comes out identical on both devices because
+// the two fingerprints are sorted before hashing. Everything here renders IN
+// APP ONLY — never a notification, a widget or a log (a verification code on a
+// lock screen is readable by the very shoulder-surfer it defeats).
+var SAS_EMOJI = ['\uD83D\uDC36','\uD83D\uDC31','\uD83E\uDD8A','\uD83D\uDC3B','\uD83D\uDC3C','\uD83D\uDC28','\uD83D\uDC2F','\uD83E\uDD81','\uD83D\uDC2E','\uD83D\uDC37','\uD83D\uDC38','\uD83D\uDC35','\uD83D\uDC14','\uD83D\uDC27','\uD83D\uDC26','\uD83E\uDD86','\uD83E\uDD89','\uD83E\uDD87','\uD83D\uDC3A','\uD83D\uDC37','\uD83D\uDC34','\uD83E\uDD84','\uD83D\uDC1D','\uD83D\uDC1B','\uD83E\uDD8B','\uD83D\uDC0C','\uD83D\uDC1E','\uD83D\uDC22','\uD83D\uDC0D','\uD83D\uDC19','\uD83E\uDD91','\uD83E\uDD80','\uD83E\uDD9E','\uD83D\uDC20','\uD83D\uDC1F','\uD83D\uDC2C','\uD83D\uDC33','\uD83D\uDC0A','\uD83E\uDD93','\uD83D\uDC18','\uD83E\uDD8F','\uD83D\uDC2A','\uD83E\uDD92','\uD83D\uDC06','\uD83D\uDC07','\uD83D\uDC3F','\uD83E\uDD94','\uD83D\uDC30','\uD83C\uDF35','\uD83C\uDF32','\uD83C\uDF33','\uD83C\uDF34','\uD83C\uDF31','\uD83C\uDF3F','\u2618\uFE0F','\uD83C\uDF40','\uD83C\uDF41','\uD83C\uDF42','\uD83C\uDF43','\uD83C\uDF44','\uD83C\uDF38','\uD83C\uDF3C','\uD83C\uDF3B'];
+
+// Pure: derived from the two fingerprints alone, so it is trivially testable
+// and provably order-independent.
+function sasFromFingerprints(fpA, fpB) {
+    var pair = [String(fpA || ''), String(fpB || '')].sort().join('|');
+    var hash = sodium.crypto_generichash(32, new TextEncoder().encode(pair));
+    var emoji = [];
+    for (var i = 0; i < 6; i++) emoji.push(SAS_EMOJI[hash[i] % SAS_EMOJI.length]);
+    var digits = '';
+    for (var d = 0; d < 6; d++) digits += String(hash[6 + d] % 10);
+    return { emoji: emoji, digits: digits };
+}
+
+async function computeDeviceSas(peerPubB64) {
+    if (!peerPubB64 || !E2ECrypto || typeof sodium === 'undefined') return null;
+    var kp = E2ECrypto.getIdentityKeyPair(user && user.id);
+    if (!kp || !kp.publicKey) return null;
+    var mineBytes = kp.publicKey instanceof Uint8Array ? kp.publicKey : new Uint8Array(kp.publicKey);
+    var mine = E2ECrypto.computeFingerprint(mineBytes);
+    var theirs = E2ECrypto.computeFingerprint(new Uint8Array(E2ECrypto.base64ToArrayBuffer(peerPubB64)));
+    var sas = sasFromFingerprints(mine, theirs);
+    sas.mine = mine;
+    sas.theirs = theirs;
+    return sas;
+}
+
+var _verifyTarget = null; // { userId, name, fingerprint }
+
+function _renderDeviceVerifyStatus(userId) {
+    var el = document.getElementById('profile-verify-status');
+    if (!el) return;
+    var stored = E2ECrypto.getVerifiedFingerprint(userId);
+    el.textContent = stored
+        ? 'Verified \u2014 ' + stored.slice(0, 4) + '\u2026'
+        : 'Not verified yet.';
+}
+
+async function openDeviceVerify(userId, displayName) {
+    var modal = document.getElementById('device-verify-modal');
+    if (!modal || !userId) return;
+    var nameEl = document.getElementById('device-verify-name');
+    if (nameEl) nameEl.textContent = displayName || 'this device';
+    var emojiEl = document.getElementById('device-verify-emoji');
+    var digitsEl = document.getElementById('device-verify-digits');
+    if (emojiEl) emojiEl.textContent = '\u2026';
+    if (digitsEl) digitsEl.textContent = '';
+    modal.style.display = 'flex';
+    try {
+        var res = await authFetch('/api/identity/' + encodeURIComponent(userId));
+        if (!res || !res.ok) throw new Error('identity unavailable');
+        var data = await res.json();
+        var sas = await computeDeviceSas(data && data.identity_public_key);
+        if (!sas) throw new Error('no identity key');
+        _verifyTarget = { userId: userId, name: displayName || '', fingerprint: sas.theirs };
+        if (emojiEl) emojiEl.textContent = sas.emoji.join(' ');
+        if (digitsEl) digitsEl.textContent = sas.digits;
+        var mineEl = document.getElementById('device-verify-mine');
+        var theirsEl = document.getElementById('device-verify-theirs');
+        if (mineEl) mineEl.textContent = sas.mine;
+        if (theirsEl) theirsEl.textContent = sas.theirs;
+    } catch (e) {
+        if (emojiEl) emojiEl.textContent = '\u26A0';
+        if (digitsEl) digitsEl.textContent = 'Could not load their identity key.';
+    }
+}
+
+(function setupDeviceVerify() {
+    var btn = document.getElementById('profile-verify-btn');
+    if (btn) {
+        btn.addEventListener('click', function () {
+            var nameEl = document.getElementById('profile-modal-display-name');
+            openDeviceVerify(profileModalUserId, nameEl ? nameEl.textContent : '');
+        });
+    }
+    var cancel = document.getElementById('device-verify-cancel');
+    if (cancel) cancel.addEventListener('click', function () {
+        document.getElementById('device-verify-modal').style.display = 'none';
+    });
+    var confirm = document.getElementById('device-verify-confirm');
+    if (confirm) confirm.addEventListener('click', function () {
+        if (_verifyTarget) {
+            // Pin the fingerprint we just showed. This is the SAME store the TOFU
+            // check reads, so a later key change now raises its warning here.
+            E2ECrypto.verifyFingerprint(_verifyTarget.userId, _verifyTarget.fingerprint);
+        }
+        document.getElementById('device-verify-modal').style.display = 'none';
+        if (_verifyTarget) _renderDeviceVerifyStatus(_verifyTarget.userId);
+        if (typeof showToast === 'function') showToast('Device verified \u2014 you will be warned if that key ever changes.');
+    });
+})();
+window.__deviceVerify = {
+    sasFromFingerprints: sasFromFingerprints,
+    compute: computeDeviceSas,
+    open: openDeviceVerify,
+};
+
 async function openProfileModal(userId) {
     profileModalUserId = userId;
     profileEditMode = false;
@@ -31753,6 +32977,14 @@ async function openProfileModal(userId) {
     document.getElementById('profile-modal-avatar').innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">...</div>';
     document.getElementById('profile-modal-username-tag').textContent = '';
     document.getElementById('profile-edit-btn').style.display = 'none';
+
+    // 5.4: verifying a device key is about OTHER people's keys.
+    var _verifyRow = document.getElementById('profile-verify-row');
+    if (_verifyRow) {
+        var _isOwnProfile = (userId === (user && user.id));
+        _verifyRow.style.display = _isOwnProfile ? 'none' : 'flex';
+        if (!_isOwnProfile) _renderDeviceVerifyStatus(userId);
+    }
     
     // Fetch profile data
     try {
@@ -32445,7 +33677,25 @@ function storeEncryptedPassword(password) {
 }
 
 function loadDecryptedPassword() {
-    // Try encrypted password first
+    // 5.6: after the vault migration the password is not stored on the device
+    // any more, so the only copy for the rest of THIS page load is the one the
+    // user just typed — the vault unlock (or the migration itself) keeps it in
+    // memory. Nothing is written down: a reload asks again, which is the point
+    // of the vault.
+    if (window._vaultSessionPassword) return window._vaultSessionPassword;
+    // 5.6: the session ticket — the password re-read from the vault-era copy
+    // that secure-storage encrypts under the live storage key. This is what
+    // keeps the key-blob mirror (and every other in-page consumer above) working
+    // after a reload, WITHOUT an at-rest plaintext bootstrap existing: while the
+    // vault is locked there is no key, so the ticket reads as null and callers
+    // fall through to asking the user.
+    try {
+        if (typeof window._kvTicketRead === 'function') {
+            var ticket = window._kvTicketRead();
+            if (ticket) return ticket;
+        }
+    } catch (_) {}
+    // Try encrypted password first (legacy bootstrap, pre-5.6 devices)
     var encrypted = localStorage.getItem('e2e_encrypted_password');
     if (encrypted) {
         var deviceKey = getDeviceWrappingKey();
@@ -32453,6 +33703,9 @@ function loadDecryptedPassword() {
         if (decryptedB64) {
             try { return atob(decryptedB64); } catch (_) {}
         }
+        // Present but undecryptable: say so (dev diagnostics only — the
+        // message names the storage key, never the password itself).
+        if (window.__DEV_LOGS) console.error('failed to decode password from e2e_encrypted_password');
     }
     // Fall back to legacy plaintext password and auto-migrate to encrypted
     var legacy = localStorage.getItem('e2e_password');

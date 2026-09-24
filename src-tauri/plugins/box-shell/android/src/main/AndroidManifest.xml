@@ -27,4 +27,62 @@
       the user decides; nothing is granted silently.
     -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+      1.7 on-device live captions. RECORD_AUDIO is already asked for by the
+      voice call itself; captions re-check it (and refuse to start without it)
+      rather than assuming the call is what turned it on.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+      Package visibility (API 30+): without this the app cannot see the
+      installed offline speech recognizer at all, and
+      `isOnDeviceRecognitionAvailable` would report false on devices that do
+      have one — quietly disabling captions. This asks about the recognition
+      service, nothing broader.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
+    <application>
+        <!--
+          3.4: share-into-app (Gallery → Share → this app). The activity lives
+          HERE, in the committed plugin manifest, because the generated
+          MainActivity's home (`src-tauri/gen/`) is not tracked and would not
+          survive `tauri android init`. Theme.NoDisplay: it stages and hops
+          forward without ever showing a window. exported=true is the point —
+          other apps invoke it. Text shares stay in process memory (staged by
+          BoxShellPlugin.stageShared), file bytes land in the app's own cache
+          and are dropped on read; see android-plugin-startup.spec for the
+          assertions that keep it that way.
+        -->
+        <activity
+            android:name="com.e2echat.boxshell.SharedContentActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+    </application>
 </manifest>
