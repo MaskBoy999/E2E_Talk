@@ -24,9 +24,9 @@
  * bootstrap readable alongside the new vault").
  *
  * The consequence is deliberate: a cold start must be unlocked with the
- * password (or the 5.1 fingerprint seal, which the lock screen offers when it
- * exists). A key that could be recovered without the password would be the old
- * bootstrap again.
+ * password — the only way in, and the lock screen offers nothing else. A key
+ * that could be recovered without the password would be the old bootstrap
+ * again.
  *
  * The vault blob is a BOOTSTRAP key in secure-storage.js — it is stored as
  * written, because it needs no key from secure-storage to be understood (it
@@ -115,8 +115,7 @@
         var b = _read();
         if (!b) return { exists: false };
         // The sealed payload (and so the account label) is only readable with
-        // the password, so it is not exposed here — the lock screen names the
-        // account from the 5.1 seal (`e2e_bio_user`), which is already public.
+        // the password, so nothing about the account is exposed here.
         return { exists: true, v: b.v, kdf: b.kdf, ops: b.ops, mem: b.mem };
     };
 

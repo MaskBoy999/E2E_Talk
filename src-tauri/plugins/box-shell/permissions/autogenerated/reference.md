@@ -28,8 +28,6 @@ which is what stops Doze from quietly ending an ongoing call.
 - `allow-batteryRequest`
 - `allow-audioRoutes`
 - `allow-setAudioRoute`
-- `allow-biometricAvailable`
-- `allow-biometricSeal`
 - `allow-sharedPending`
 - `allow-sharedRead`
 - `allow-sharedDiscard`
@@ -120,58 +118,6 @@ Enables the batteryStatus command without any pre-configured scope.
 <td>
 
 Denies the batteryStatus command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`box-shell:allow-biometricAvailable`
-
-</td>
-<td>
-
-Enables the biometricAvailable command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`box-shell:deny-biometricAvailable`
-
-</td>
-<td>
-
-Denies the biometricAvailable command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`box-shell:allow-biometricSeal`
-
-</td>
-<td>
-
-Enables the biometricSeal command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`box-shell:deny-biometricSeal`
-
-</td>
-<td>
-
-Denies the biometricSeal command without any pre-configured scope.
 
 </td>
 </tr>

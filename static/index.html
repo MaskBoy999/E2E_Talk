@@ -17,7 +17,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=26">
+    <link rel="stylesheet" href="style.css?v=27">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -212,7 +212,7 @@
                 <button class="hamburger" id="hamburger"><svg class="ui-icon" width="16" height="16"><use href="#icon-menu"/></svg></button>
                 <h3 id="channel-name">Select a channel</h3>
                 <button class="pins-btn" id="pins-btn" style="display:none" title="Pinned messages"><svg class="ui-icon" width="16" height="16"><use href="#icon-pin"/></svg></button>
-                <button class="search-header-btn" id="search-header-btn" style="display:none" title="Search this conversation (Ctrl+K for all)"><svg class="ui-icon" width="16" height="16"><use href="#icon-search"/></svg></button>
+                <button class="search-header-btn" id="search-header-btn" style="display:none" data-shortcut-title="search" data-shortcut-template="Search this conversation (%s for all)" title="Search this conversation"><svg class="ui-icon" width="16" height="16"><use href="#icon-search"/></svg></button>
                 <button class="members-toggle" id="members-toggle" title="Members"><svg class="ui-icon" width="16" height="16"><use href="#icon-menu"/></svg></button>
             </div>
             <!-- Persistent DM-call waiting banner: shows when someone is waiting
@@ -463,7 +463,7 @@
                     </div>
                 </div>
                 <div class="settings-group" id="server-settings-joins-section" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
-                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer">
+                    <label class="settings-toggle">
                         <input type="checkbox" id="disable-joins-toggle">
                         <span class="toggle-slider"></span>
                         <span class="toggle-label" style="font-size:14px;color:var(--text-primary)">Disable new joins</span>
@@ -497,7 +497,7 @@
                             <button class="btn btn-sm" id="role-move-up" title="Move up (stronger)">&#9650;</button>
                             <button class="btn btn-sm" id="role-move-down" title="Move down (weaker)">&#9660;</button>
                         </div>
-                        <label class="settings-toggle" style="display:flex;align-items:center;gap:8px;margin:8px 0">
+                        <label class="settings-toggle" style="margin:8px 0">
                             <input type="checkbox" id="role-all-perms">
                             <span class="toggle-slider"></span>
                             <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Grant all permissions</span>
@@ -633,19 +633,18 @@
 
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
                     <h4>Privacy</h4>
-                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:8px">
+                    <label class="settings-toggle" style="margin-top:8px">
                         <input type="checkbox" id="disable-friend-requests-toggle">
                         <span class="toggle-slider"></span>
                         <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Block incoming friend requests</span>
                     </label>
                     <p class="settings-hint">When enabled, other users cannot send you friend requests.</p>
                     <div style="display:flex;align-items:center;gap:8px;margin-top:14px">
-                        <label for="auto-lock-minutes" style="font-size:13px;color:var(--text-primary)">Auto-lock after (idle minutes, 0 = off):</label>
-                        <input type="number" id="auto-lock-minutes" min="0" max="1440" step="1" style="width:80px;padding:5px 7px;background:var(--bg-input,#2f3136);color:var(--text-primary);border:1px solid var(--bg-border);border-radius:4px" />
+                        <label class="settings-row-label" for="auto-lock-minutes">Auto-lock after (idle minutes, 0 = off):</label>
+                        <input type="number" id="auto-lock-minutes" min="0" max="1440" step="1" class="settings-field settings-field-narrow" />
                     </div>
-                    <p class="settings-hint">With a value above 0, that many minutes without mouse/keyboard/touch activity wipes ALL local data (keys, logins, settings) and signs you out. The panic chord <b>Alt+Shift+W</b> does the same instantly, with no confirmation — there is one total wipe path, and caches, stored audio and the local search index go with it.</p>
-                    <button class="btn-delete-account" id="panic-wipe-btn" style="margin-top:8px">Wipe everything now</button>
-                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:14px">
+                    <p class="settings-hint">With a value above 0, that many minutes without mouse/keyboard/touch activity wipes ALL local data (keys, logins, settings) and signs you out. The panic chord <b>Alt+Shift+W</b> does the same instantly, with no confirmation — there is one total wipe path, and caches, stored audio and the local search index go with it. To wipe by hand, use the chord or <b>Clear All Data &amp; Sign Out</b> below.</p>
+                    <label class="settings-toggle" style="margin-top:14px">
                         <input type="checkbox" id="local-search-only-toggle">
                         <span class="toggle-slider"></span>
                         <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Search only this device</span>
@@ -658,11 +657,9 @@
                         <button class="btn-delete-account" id="clear-all-data-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-trash"/></svg> Clear All Data &amp; Sign Out</button>
                 </div>
                 <div class="settings-group">
-                    <h4>Export my data (encrypted)</h4>
-                    <p class="settings-hint">Downloads ONE file — <b>e2e-chat-export.enc</b> — containing your identity keys, settings, conversation metadata and the most recent 100 messages per conversation, sealed with Argon2id + a passphrase you choose. The server never sees the export, and nothing decrypted is written to disk. Without the passphrase the file is unreadable.</p>
-                    <input type="password" id="export-passphrase" placeholder="Passphrase (min 8 characters)" autocomplete="new-password" style="display:block;width:100%;max-width:280px;margin-top:8px;padding:6px 8px;background:var(--bg-input,#2f3136);color:var(--text-primary);border:1px solid var(--bg-border);border-radius:4px" />
-                    <input type="password" id="export-passphrase-confirm" placeholder="Repeat passphrase" autocomplete="new-password" style="display:block;width:100%;max-width:280px;margin-top:6px;padding:6px 8px;background:var(--bg-input,#2f3136);color:var(--text-primary);border:1px solid var(--bg-border);border-radius:4px" />
-                    <button class="btn-delete-account" id="export-data-btn" style="margin-top:8px;background:var(--accent,#5865f2);color:#fff;">Export encrypted file</button>
+                    <h4>Export my data</h4>
+                    <p class="settings-hint">Downloads ONE file holding your identity keys, settings, conversation metadata and the most recent 100 messages per conversation — collected and decrypted <b>on this device</b>. The server never sees the export. You choose whether it is encrypted: with a passphrase it is sealed with Argon2id + AEAD (the same strength as the rest of the app), and without one it is plain, readable JSON.</p>
+                    <button class="btn btn-primary" id="export-data-btn" style="margin-top:8px"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Export my data&hellip;</button>
                     <div id="export-status" class="settings-hint" style="margin-top:6px"></div>
                 </div>
                 <div class="settings-group">
@@ -794,10 +791,10 @@
                 </div>
                 <div class="settings-group">
                     <h4>Keyboard Shortcuts</h4>
-                    <div class="shortcuts-list">
-                        <div class="shortcut-row"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> <span>Toggle Streamer Mode</span></div>
-                        <div class="shortcut-row"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>M</kbd> <span>Toggle Media Previews</span></div>
-                    </div>
+                    <p class="settings-hint">Remap any of these in the <b>Shortcuts</b> tab — this list follows what you set there, always.</p>
+                    <!-- Filled by renderShortcutLabels() (thread_categories_shortcuts.js)
+                         from the live bindings, so a remap shows up here at once. -->
+                    <div class="shortcuts-list" id="display-shortcuts-list"></div>
                 </div>
             </div>
 
@@ -805,12 +802,9 @@
             <div class="settings-panel" id="notification-settings" style="display:none">
                 <div class="settings-group">
                     <h4>Notification Privacy</h4>
-                    <label class="settings-checkbox-label" style="margin-top:6px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
-                        <input type="checkbox" id="notif-hide-preview" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
-                        Hide message content in notifications
-                    </label>
-                    <p class="settings-hint">When on, every notification says only <strong>that</strong> something happened — no sender name, no channel or server, and no message text. Your operating system stores whatever a notification says (Windows keeps it in its notification database; a phone keeps it in the notification shade, and can show it on the lock screen), so a decrypted preview handed to the OS outlives the app. This keeps decrypted content out of the OS entirely, while notifications still arrive and still open the right conversation.</p>
-                    <p class="settings-hint" style="color:var(--text-muted)">On Android the content is already hidden on the lock screen until you unlock. Streamer mode blanks notifications too, regardless of this setting.</p>
+                    <p class="settings-hint" id="notif-privacy-line" style="font-weight:600">Always on for every notification, on every device.</p>
+                    <p class="settings-hint">Every notification says only <strong>that</strong> something happened — no sender name, no channel or server, and no message text. Your operating system stores whatever a notification says (Windows keeps it in its notification database; a phone keeps it in the notification shade, and can show it on the lock screen), so a decrypted preview handed to the OS outlives the app. Keeping decrypted content out of the OS is not optional here: notifications still arrive, still buzz with your chosen sound, and still open the right conversation.</p>
+                    <p class="settings-hint" style="color:var(--text-muted)">The incoming-call card obeys the same rule: it says a call is coming in, never who is calling, and the phone's own lock screen gets no name either.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Notification Sound</h4>
@@ -859,7 +853,7 @@
                         <span id="notif-volume-label">50%</span>
                     </div>
                     <canvas class="notif-visualizer" id="notif-visualizer" width="280" height="50" style="display:none;margin-top:8px;border-radius:6px;"></canvas>
-                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:10px">
+                    <label class="settings-toggle" style="margin-top:10px">
                         <input type="checkbox" id="notif-background-only">
                         <span class="toggle-slider"></span>
                         <span class="toggle-label" style="font-size:13px;color:var(--text-muted)">Only play sound when app is in background</span>
@@ -870,9 +864,9 @@
                     <h4>Haptic Alerts <span style="color:var(--text-muted);font-weight:400;font-size:12px">(mobile)</span></h4>
                     <p class="settings-hint">Vibrate when a notification arrives, independently configurable for the notification box and for DM conversations. <strong>Pulse</strong> is how long each buzz lasts (intensity), <strong>Gap</strong> the pause between buzzes, <strong>Pulses</strong> how many buzzes per cue.</p>
 
-                    <div style="margin-top:8px;font-size:12px;color:var(--text-secondary);font-weight:600">Notification box <span style="color:var(--text-muted,#888);font-weight:400">(mentions &amp; replies)</span></div>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:4px">
-                        <input type="checkbox" id="notif-haptic-inbox" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <div class="settings-subhead">Notification box <span>(mentions &amp; replies)</span></div>
+                    <label class="settings-check" style="margin-top:4px">
+                        <input type="checkbox" id="notif-haptic-inbox">
                         Vibrate on new mentions &amp; replies
                     </label>
                     <div class="settings-slider-row">
@@ -887,12 +881,12 @@
                         <input type="range" id="notif-haptic-inbox-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
                         <span class="settings-slider-value" id="notif-haptic-inbox-pulses-val">2×</span>
                     </div>
-                    <button type="button" id="notif-haptic-inbox-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
-                    <button type="button" id="notif-haptic-inbox-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+                    <button type="button" id="notif-haptic-inbox-test" class="settings-small-btn">Test pattern</button>
+                    <button type="button" id="notif-haptic-inbox-reset" class="settings-small-btn">Reset</button>
 
-                    <div style="margin-top:16px;font-size:12px;color:var(--text-secondary);font-weight:600">DM conversations</div>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:4px">
-                        <input type="checkbox" id="notif-haptic-dm" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <div class="settings-subhead">DM conversations</div>
+                    <label class="settings-check" style="margin-top:4px">
+                        <input type="checkbox" id="notif-haptic-dm">
                         Vibrate on new DM messages
                     </label>
                     <div class="settings-slider-row">
@@ -907,8 +901,8 @@
                         <input type="range" id="notif-haptic-dm-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
                         <span class="settings-slider-value" id="notif-haptic-dm-pulses-val">2×</span>
                     </div>
-                    <button type="button" id="notif-haptic-dm-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
-                    <button type="button" id="notif-haptic-dm-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+                    <button type="button" id="notif-haptic-dm-test" class="settings-small-btn">Test pattern</button>
+                    <button type="button" id="notif-haptic-dm-reset" class="settings-small-btn">Reset</button>
                 </div>
                 <div class="settings-group" style="margin-top:16px;border-top:1px solid var(--bg-border);padding-top:16px">
                     <h4>Muted Servers &amp; Channels</h4>
@@ -926,7 +920,7 @@
                     <p class="settings-hint">Your session expires in: <strong id="session-countdown">...</strong></p>
                     <p class="settings-hint" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Re-authenticate to extend your session. You choose how long it lasts (max 30 days).</p>
                     <label class="settings-checkbox-label" style="margin-top:6px;"><span style="font-size:12px;color:var(--text-muted)">Session duration (applies to login, registration &amp; re-auth; default 30 days):</span></label>
-                    <select id="reauth-duration-select" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <select id="reauth-duration-select" class="settings-field">
                         <option value="3600">1 hour</option>
                         <option value="21600">6 hours</option>
                         <option value="43200">12 hours</option>
@@ -939,7 +933,7 @@
                     <button class="btn-reauth" id="reauth-btn" style="margin-top:10px;">Re-authenticate</button>
                     <div style="margin-top:16px;">
                         <p class="settings-hint" style="font-size:12px;color:var(--text-muted)">Refresh heartbeat interval:</p>
-                        <select id="heartbeat-interval-select" class="modal-input" style="margin-top:4px;">
+                        <select id="heartbeat-interval-select" class="settings-field">
                             <option value="0" selected>Disabled</option>
                             <option value="15000">Every 15 seconds</option>
                             <option value="30000">Every 30 seconds</option>
@@ -989,6 +983,18 @@
                     </div>
                     <p id="change-pw-status" style="margin-top:8px;font-size:13px;"></p>
                 </div>
+                <div class="settings-group" id="vault-prompt-group">
+                    <h4>Key Vault</h4>
+                    <p class="settings-hint">Your storage key — the one that decrypts everything this app keeps on this device — is sealed with your password (Argon2id). This setting decides whether the app asks for that password again after a restart.</p>
+                    <label class="settings-toggle" style="margin-top:8px">
+                        <input type="checkbox" id="vault-ask-password-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label">Ask for my password after a restart</span>
+                    </label>
+                    <p class="settings-hint" id="vault-prompt-status" style="font-weight:600">Checking&hellip;</p>
+                    <p class="settings-hint">Changing this asks for your password first, and it is checked against the vault: everything this app has stored on this device is then encrypted with the key that password releases, so the setting cannot be flipped without it.</p>
+                    <p class="settings-hint">On (recommended): a new tab or a restarted app shows <b>Unlock your key vault</b> and nothing is readable from this device's storage until your password is typed. Off: the app keeps that same key on this device, so a restart opens straight into the app — convenient, but anyone who can read this browser profile or app storage (a local attacker, another app on a rooted phone, a device backup) can decrypt your stored session <b>without</b> your password. Your messages are still end-to-end encrypted in transit and the server still sees only ciphertext, and the vault blob is kept either way, so you can turn this back on at any time.</p>
+                </div>
                 <div class="settings-group">
                     <h4>Two-Factor Authentication (2FA)</h4>
                     <p class="settings-hint">Protect your account with a one-time code from an authenticator app (Google Authenticator, Authy, 1Password, &hellip;). You&rsquo;ll need it at every login, or one of your 8 one-time recovery codes.</p>
@@ -997,12 +1003,6 @@
                         <button class="btn-reauth" id="enable-2fa-btn">Enable 2FA</button>
                         <button class="btn-delete-account" id="disable-2fa-btn" style="background:var(--danger,#ed4245);color:#fff;display:none;">Disable 2FA</button>
                     </div>
-                </div>
-                <div class="settings-group">
-                    <h4>Fingerprint Unlock</h4>
-                    <p class="settings-hint">Skip typing your password on this phone. Your password is sealed by a key that lives in the phone's secure hardware; only a fingerprint scan can release it (a fresh scan every time — no timed window). The password path is always still there, and a failed or cancelled scan changes nothing.</p>
-                    <label class="settings-checkbox-label"><input type="checkbox" id="biometric-unlock-toggle"> <span>Unlock with fingerprint</span></label>
-                    <p class="settings-hint" id="biometric-status-line" style="font-weight:600;">Checking&hellip;</p>
                 </div>
                 <div class="settings-group">
                     <h4>Kill Switch</h4>
@@ -1122,7 +1122,6 @@
             </div>
             <div class="settings-panel" id="shortcut-settings" style="display:none">
                 <div class="settings-group">
-                    <h3 style="color:var(--text-primary);margin:0 0 8px">Keyboard Shortcuts</h3>
                     <div id="shortcut-settings-container"></div>
                 </div>
             </div>
@@ -1159,35 +1158,35 @@
                 </div>
                 <div class="settings-group">
                     <h4>Voice Activation</h4>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
-                        <input type="checkbox" id="voice-speak-only" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <label class="settings-check">
+                        <input type="checkbox" id="voice-speak-only">
                         Only transmit while you speak
                     </label>
                     <p class="settings-hint">Runs the energy gate that is already part of the RNNoise chain: below the speech threshold your mic sends silence instead of your room. Keeps keyboards, TVs and other people off the call and uses less bandwidth. Needs an RNNoise mode — it does nothing with "Browser built-in" or "Off".</p>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:10px">
-                        <input type="checkbox" id="voice-hold-to-talk" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <label class="settings-check" style="margin-top:10px">
+                        <input type="checkbox" id="voice-hold-to-talk">
                         Hold to talk (push to talk)
                     </label>
                     <p class="settings-hint">Your mic stays closed until you hold a call's mic button, in any call view. Nothing is transmitted while the button is up, and the button lights up for as long as you hold it.</p>
-                    <label class="settings-checkbox-label" style="margin-top:10px;"><span style="font-size:12px;color:var(--text-muted)">Push-to-talk key (desktop box):</span></label>
-                    <input type="text" id="voice-ptt-shortcut" class="modal-input" placeholder="Ctrl+Shift+Space" autocomplete="off" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Push-to-talk key (desktop box):</label>
+                    <input type="text" id="voice-ptt-shortcut" class="settings-field" placeholder="Ctrl+Shift+Space" autocomplete="off">
                     <p class="settings-hint">A global key, so it talks to the same gate while the app sits in the background. Leave it blank for Ctrl+Shift+Space. It only registers while "Hold to talk" is on.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Audio Output</h4>
-                    <select id="audio-output-select" class="settings-slider" style="margin-top:8px;padding:7px 9px;border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color)">
+                    <select id="audio-output-select" class="settings-field">
                         <option value="">System default output</option>
                     </select>
                     <p class="settings-hint">Where call audio comes out: speakers, headphones, a wired headset or Bluetooth. On Android this uses the phone's own call-audio routing (earpiece / speaker / Bluetooth); on desktop it picks the output device per audio element. Applied live — remote audio re-routes without rejoining.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Live Captions</h4>
-                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:8px">
+                    <label class="settings-toggle" style="margin-top:8px">
                         <input type="checkbox" id="captions-toggle">
                         <span class="toggle-slider"></span>
                         <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">On-device captions</span>
                     </label>
-                    <label class="settings-toggle" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:10px">
+                    <label class="settings-toggle" style="margin-top:10px">
                         <input type="checkbox" id="captions-publish-toggle" disabled>
                         <span class="toggle-slider"></span>
                         <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Publish my captions to the call</span>
@@ -1215,16 +1214,16 @@
                 </div>
                 <div class="settings-group">
                     <h4>Soundboard</h4>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
-                        <input type="checkbox" id="voice-disable-soundboard" style="width:16px;height:16px;accent-color:var(--danger,#f44)">
+                    <label class="settings-check">
+                        <input type="checkbox" id="voice-disable-soundboard">
                         Disable soundboard sounds
                     </label>
                     <p class="settings-hint">You won't play or hear any soundboard sounds in any server or DM call.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Echo Cancellation</h4>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
-                        <input type="checkbox" id="voice-echo-cancellation" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <label class="settings-check">
+                        <input type="checkbox" id="voice-echo-cancellation">
                         Use the browser's echo cancellation on the mic
                     </label>
                     <p class="settings-hint">Off by default — Chrome's AEC can gate the mic when it hears the same sound it is also playing (e.g. testing on one device with two windows, or a voice changer/external mixer). Turn it on if the other side hears their own voice echoed back.</p>
@@ -1232,31 +1231,31 @@
                 <div class="settings-group">
                     <h4>Audio Quality</h4>
                     <p class="settings-hint"><strong>Send</strong> = the sample rate you capture at (applies to both mesh and relay). <strong>Receive</strong> = the Opus bitrate others send you at (mesh P2P only — in server-relay mode, you receive at whatever the sender chose). Higher quality uses more bandwidth.</p>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Send quality (your mic):</span></label>
-                    <select id="voice-send-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Send quality (your mic):</label>
+                    <select id="voice-send-audio-quality" class="settings-field">
                         <option value="low">Low (8 kHz, ~16 kbps)</option>
                         <option value="medium" selected>Medium (16 kHz, ~32 kbps)</option>
                         <option value="high">High (24 kHz, ~64 kbps)</option>
                         <option value="ultra">Ultra (48 kHz, ~128 kbps)</option>
                     </select>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive quality (others' audio):</span></label>
-                    <select id="voice-recv-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Receive quality (others' audio):</label>
+                    <select id="voice-recv-audio-quality" class="settings-field">
                         <option value="low">Low (8 kHz)</option>
                         <option value="medium" selected>Medium (16 kHz)</option>
                         <option value="high">High (24 kHz)</option>
                         <option value="ultra">Ultra (48 kHz)</option>
                     </select>
                     <p class="settings-hint" style="margin-top:4px;color:var(--warning,#f0b232);">⚠ Receive quality only affects mesh P2P calls (the default). If you switch audio to server relay, you get whatever the sender sends.</p>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Screen share audio quality (relay):</span></label>
-                    <select id="voice-send-screen-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Screen share audio quality (relay):</label>
+                    <select id="voice-send-screen-audio-quality" class="settings-field">
                         <option value="low">Low (8 kHz, ~16 kbps)</option>
                         <option value="medium" selected>Medium (16 kHz, ~32 kbps)</option>
                         <option value="high">High (24 kHz, ~64 kbps)</option>
                         <option value="ultra">Ultra (48 kHz, ~128 kbps)</option>
                     </select>
                     <p class="settings-hint" style="margin-top:4px;">Sample rate for screen share audio sent via server relay. Only affects the sender's capture quality; screen audio volume is controlled separately per-member via right-click on the screen tile.</p>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive screen audio quality (mesh):</span></label>
-                    <select id="voice-recv-screen-audio-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Receive screen audio quality (mesh):</label>
+                    <select id="voice-recv-screen-audio-quality" class="settings-field">
                         <option value="low">Low (8 kHz)</option>
                         <option value="medium" selected>Medium (16 kHz)</option>
                         <option value="high">High (24 kHz)</option>
@@ -1266,17 +1265,17 @@
                 </div>
 <div class="settings-group">
                     <h4>Haptics</h4>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
-                        <input type="checkbox" id="voice-haptic-incoming" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <label class="settings-check">
+                        <input type="checkbox" id="voice-haptic-incoming">
                         Vibrate on incoming calls
                     </label>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer;margin-top:8px">
-                        <input type="checkbox" id="voice-haptic-waiting" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <label class="settings-check" style="margin-top:8px">
+                        <input type="checkbox" id="voice-haptic-waiting">
                         Vibrate when a call becomes waiting
                     </label>
                     <p class="settings-hint">Mobile only. The first vibrates the moment someone calls you, so you notice even on silent; while the call is unanswered it repeats once per ringtone cycle. The second is a short buzz when the ring times out and the call moves to the waiting room (the green ring badge flips to red). Both work even if the screen is off or you're in another tab. Tune each cue below — <strong>Pulse</strong> is how long each buzz lasts (intensity), <strong>Gap</strong> the pause between buzzes, <strong>Pulses</strong> how many buzzes per cue.</p>
 
-                    <div style="margin-top:14px;font-size:12px;color:var(--text-secondary);font-weight:600">Incoming call pattern <span style="color:var(--text-muted,#888);font-weight:400">(repeats once per ringtone cycle while ringing)</span></div>
+                    <div class="settings-subhead">Incoming call pattern <span>(repeats once per ringtone cycle while ringing)</span></div>
                     <div class="settings-slider-row">
                         <input type="range" id="voice-haptic-ring-pulse" min="10" max="500" step="10" value="150" class="settings-slider">
                         <span class="settings-slider-value" id="voice-haptic-ring-pulse-val">150ms</span>
@@ -1289,8 +1288,8 @@
                         <input type="range" id="voice-haptic-ring-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
                         <span class="settings-slider-value" id="voice-haptic-ring-pulses-val">2×</span>
                     </div>
-                    <button type="button" id="voice-haptic-ring-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
-                    <button type="button" id="voice-haptic-ring-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+                    <button type="button" id="voice-haptic-ring-test" class="settings-small-btn">Test pattern</button>
+                    <button type="button" id="voice-haptic-ring-reset" class="settings-small-btn">Reset</button>
 
                     <div style="margin-top:16px;font-size:12px;color:var(--text-secondary);font-weight:600">Waiting pattern <span style="color:var(--text-muted,#888);font-weight:400">(when the ring times out)</span></div>
                     <div class="settings-slider-row">
@@ -1305,12 +1304,12 @@
                         <input type="range" id="voice-haptic-waiting-pulses" min="1" max="5" step="1" value="2" class="settings-slider">
                         <span class="settings-slider-value" id="voice-haptic-waiting-pulses-val">2×</span>
                     </div>
-                    <button type="button" id="voice-haptic-waiting-test" style="margin-top:8px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-primary,#fff);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Test pattern</button>
-                    <button type="button" id="voice-haptic-waiting-reset" style="margin-top:8px;margin-left:6px;border:1px solid var(--bg-border,#2a2a4a);background:var(--bg-tertiary,#23233c);color:var(--text-muted,#aaa);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">Reset</button>
+                    <button type="button" id="voice-haptic-waiting-test" class="settings-small-btn">Test pattern</button>
+                    <button type="button" id="voice-haptic-waiting-reset" class="settings-small-btn">Reset</button>
 
-                    <div style="margin-top:16px;font-size:12px;color:var(--text-secondary);font-weight:600">Battery-friendly <span style="color:var(--text-muted,#888);font-weight:400">(skip repeating buzzes to save battery)</span></div>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
-                        <input type="checkbox" id="voice-haptic-battery-friendly" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <div class="settings-subhead">Battery-friendly <span>(skip repeating buzzes to save battery)</span></div>
+                    <label class="settings-check">
+                        <input type="checkbox" id="voice-haptic-battery-friendly">
                         Skip repeating ring buzzes while the device is low on battery or backgrounded
                     </label>
                     <div class="settings-slider-row">
@@ -1333,7 +1332,7 @@
                     <h4>Video Quality</h4>
                     <p class="settings-hint"><strong>Send</strong> = the resolution you capture at. <strong>Receive</strong> = the resolution others send you (mesh P2P only — in server-relay mode, you receive at whatever the sender chose). Lower resolutions use less bandwidth. Defaults are deliberately low.</p>
                     <label class="settings-checkbox-label" style="margin-top:4px;"><span style="font-size:12px;color:var(--text-muted)">Send — camera:</span></label>
-                    <select id="voice-send-camera-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <select id="voice-send-camera-res" class="settings-field">
                         <option value="144">144p</option>
                         <option value="240">240p</option>
                         <option value="360" selected>360p</option>
@@ -1343,8 +1342,8 @@
                         <option value="1440">1440p</option>
                         <option value="2160">2160p (4K)</option>
                     </select>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Send — screen share:</span></label>
-                    <select id="voice-send-screen-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Send — screen share:</label>
+                    <select id="voice-send-screen-res" class="settings-field">
                         <option value="144">144p</option>
                         <option value="240">240p</option>
                         <option value="360">360p</option>
@@ -1354,8 +1353,8 @@
                         <option value="1440">1440p</option>
                         <option value="2160">2160p (4K)</option>
                     </select>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive — camera:</span></label>
-                    <select id="voice-recv-camera-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Receive — camera:</label>
+                    <select id="voice-recv-camera-res" class="settings-field">
                         <option value="144">144p</option>
                         <option value="240">240p</option>
                         <option value="360" selected>360p</option>
@@ -1365,8 +1364,8 @@
                         <option value="1440">1440p</option>
                         <option value="2160">2160p (4K)</option>
                     </select>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Receive — screen share:</span></label>
-                    <select id="voice-recv-screen-res" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Receive — screen share:</label>
+                    <select id="voice-recv-screen-res" class="settings-field">
                         <option value="144">144p</option>
                         <option value="240">240p</option>
                         <option value="360">360p</option>
@@ -1377,8 +1376,8 @@
                         <option value="2160">2160p (4K)</option>
                     </select>
                     <p class="settings-hint" style="margin-top:4px;color:var(--warning,#f0b232);">⚠ Receive resolutions only affect mesh P2P mode (the default). If you switch a feed to server relay, you receive at whatever the sender sends.</p>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Send — frame rate (camera, screen share &amp; relay):</span></label>
-                    <select id="voice-relay-video-fps" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Send — frame rate (camera, screen share &amp; relay):</label>
+                    <select id="voice-relay-video-fps" class="settings-field">
                         <option value="5">5 FPS</option>
                         <option value="10">10 FPS</option>
                         <option value="15">15 FPS</option>
@@ -1388,8 +1387,8 @@
                         <option value="60">60 FPS</option>
                     </select>
                     <p class="settings-hint">The frame rate every feed is <strong>sent</strong> at: the camera, your screen share (including the Android screen capture), the mesh encoders and the server relay all read this one value. Higher = smoother but uses more bandwidth. Changing it applies to every sender immediately; a live camera restarts at the new rate, while a live screen share keeps its rate until it is next started.</p>
-                    <label class="settings-checkbox-label" style="margin-top:8px;"><span style="font-size:12px;color:var(--text-muted)">Relay JPEG quality (server-relayed mode):</span></label>
-                    <select id="voice-relay-jpeg-quality" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Relay JPEG quality (server-relayed mode):</label>
+                    <select id="voice-relay-jpeg-quality" class="settings-field">
                         <option value="0.3">Low (0.3) — small blobs, more compression</option>
                         <option value="0.5">Medium (0.5)</option>
                         <option value="0.6" selected>Balanced (0.6) — default</option>
@@ -1397,13 +1396,13 @@
                         <option value="1.0">Lossless (1.0) — largest blobs</option>
                     </select>
                     <p class="settings-hint">JPEG compression for relayed video frames. Lower = smaller blobs = less bandwidth but more blocky artifacts. Only affects server-relayed video, not mesh P2P.</p>
-                    <label class="settings-checkbox-label" style="margin-top:12px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text-primary);cursor:pointer">
-                        <input type="checkbox" id="voice-manual-video-load" style="width:16px;height:16px;accent-color:var(--accent,#5865f2)">
+                    <label class="settings-check" style="margin-top:12px">
+                        <input type="checkbox" id="voice-manual-video-load">
                         Load each camera / screen share manually
                     </label>
                     <p class="settings-hint">When on, every camera and screen share shows a <strong>Load</strong> button until you click it — independently per person and per feed. You decide which feeds to load; senders keep sending regardless. Right-click (volume, mirror/rotate, owner controls) works everywhere, even on unloaded feeds.</p>
-                    <label class="settings-checkbox-label" style="margin-top:12px;"><span style="font-size:12px;color:var(--text-muted)">Black-feed auto-recovery (video watchdog):</span></label>
-                    <select id="voice-video-watchdog-secs" class="modal-input" style="margin-top:4px;max-width:200px;">
+                    <label class="settings-field-label">Black-feed auto-recovery (video watchdog):</label>
+                    <select id="voice-video-watchdog-secs" class="settings-field">
                         <option value="0">Off</option>
                         <option value="4">4 seconds</option>
                         <option value="6">6 seconds</option>
@@ -1422,7 +1421,7 @@
                         <button type="button" id="voice-diag-refresh" class="btn btn-secondary">Refresh now</button>
                         <button type="button" id="voice-diag-heal" class="btn btn-secondary" style="border-color:var(--danger,#ed4245)">Rejoin &amp; heal</button>
                         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer">
-                            <input type="checkbox" id="voice-diag-auto" checked style="width:15px;height:15px;accent-color:var(--accent,#5865f2)">
+                            <input type="checkbox" id="voice-diag-auto" checked>
                             Auto-refresh (every 2.5s)
                         </label>
                     </div>
@@ -1884,6 +1883,63 @@
 
     <!-- Friend Code Password Modal (Recover/Regenerate) -->
     <!-- Appearance backup password modal (export needs set+confirm, import one field) -->
+    <!-- Key vault: the password is checked before the device's storage is
+         re-settled onto the key it releases (both directions). -->
+    <div class="modal" id="vault-pw-modal" style="display:none">
+        <div class="modal-content" style="max-width:430px">
+            <h3 style="margin-bottom:12px;color:var(--accent)" id="vault-pw-title">Confirm your password</h3>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px" id="vault-pw-hint">
+                Your password is checked against this device's key vault, and everything stored here is then encrypted with the key it releases.
+            </p>
+            <div style="margin-bottom:16px">
+                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Your password</label>
+                <div class="auth-input-row" style="margin-bottom:0">
+                    <input type="password" id="vault-pw-input" placeholder="Password" autocomplete="current-password" class="modal-input auth-code-input" />
+                    <button type="button" class="toggle-visibility-btn" id="toggle-vault-pw" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
+                </div>
+            </div>
+            <div id="vault-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions" style="gap:8px;flex-wrap:wrap">
+                <button class="btn-cancel" id="vault-pw-cancel-btn">Cancel</button>
+                <button class="btn-invite" id="vault-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export my data: encrypted with a passphrase, or deliberately plain. -->
+    <div class="modal" id="export-pw-modal" style="display:none">
+        <div class="modal-content" style="max-width:440px">
+            <h3 style="margin-bottom:12px;color:var(--accent)" id="export-pw-title">Export my data</h3>
+            <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px" id="export-pw-hint">
+                The file is encrypted on your device with a passphrase you choose (Argon2id + AEAD — the same scheme that protects your key vault). Keep the passphrase safe: without it the file is unreadable, and there is no recovery.
+            </p>
+            <div id="export-pw-fields">
+                <div style="margin-bottom:16px">
+                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Passphrase (min 8 characters)</label>
+                    <input type="password" id="export-pw-input" placeholder="Enter a passphrase" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+                </div>
+                <div id="export-pw-confirm-wrap" style="margin-bottom:16px">
+                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm passphrase</label>
+                    <input type="password" id="export-pw-confirm-input" placeholder="Repeat the passphrase" autocomplete="new-password" class="modal-input" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box;">
+                </div>
+            </div>
+            <div id="export-pw-nopw-wrap" style="margin-bottom:16px;display:none">
+                <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer">
+                    <input type="checkbox" id="export-pw-nopw" style="width:15px;height:15px;accent-color:var(--accent,#5865f2)">
+                    Export without a passphrase (not encrypted)
+                </label>
+            </div>
+            <div id="export-pw-nopw-note" style="display:none;margin-bottom:16px;padding:10px 12px;border:1px solid var(--bg-border);border-radius:8px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13px">
+                This export has no passphrase — it is <b>not encrypted</b>. It contains your identity keys and recent message text in the clear (plain JSON, <b>e2e-chat-export.json</b>), so anyone who gets the file can read all of it and can impersonate you with the keys inside. Store it somewhere safe.
+            </div>
+            <div id="export-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="modal-actions" style="gap:8px;flex-wrap:wrap">
+                <button class="btn-cancel" id="export-pw-cancel-btn">Cancel</button>
+                <button class="btn-invite" id="export-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Export</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal" id="appearance-pw-modal" style="display:none">
         <div class="modal-content" style="max-width:420px">
             <h3 style="margin-bottom:12px;color:var(--accent)" id="appearance-pw-title">Export appearance</h3>
@@ -2489,14 +2545,14 @@
     </div>
 
 <script src="ui-dialog.js?v=1"></script>
-<script src="keyvault.js?v=1"></script>
-<script src="secure-storage.js?v=4"></script>
-    <script src="voice.js?v=32"></script>
+<script src="keyvault.js?v=2"></script>
+<script src="secure-storage.js?v=5"></script>
+    <script src="voice.js?v=33"></script>
     <script src="soundboard-pairing.js?v=12"></script>
-    <script src="thread_categories_shortcuts.js?v=9"></script>
+    <script src="thread_categories_shortcuts.js?v=10"></script>
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=2"></script>
-    <script src="chat.js?v=66"></script>
+    <script src="chat.js?v=68"></script>
 <script src="captions.js?v=1"></script>
     <!-- Android shell: immersive system bars, Back closing the top layer, the
          real-vibrator haptic bridge and notification clearing. Inert in a

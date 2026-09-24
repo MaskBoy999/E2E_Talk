@@ -16,8 +16,6 @@ permissions = [
     "allow-batteryRequest",
     "allow-audioRoutes",
     "allow-setAudioRoute",
-    "allow-biometricAvailable",
-    "allow-biometricSeal",
     "allow-sharedPending",
     "allow-sharedRead",
     "allow-sharedDiscard",

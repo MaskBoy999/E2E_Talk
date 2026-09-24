@@ -2095,6 +2095,162 @@
 
 
 
+    // ─── One source of truth for how a shortcut READS ────────────────────
+
+    // The Shortcuts tab used to be the only place a remap showed up: the
+
+    // read-only list in Display, the search button's tooltip and anything else
+
+    // that names a key were hand-written, so they kept claiming the old
+
+    // binding. Everything that names a shortcut now renders from the LIVE
+
+    // binding (getShortcut), and renderShortcutLabels() re-renders all of it
+
+    // after a remap or a reset.
+
+
+
+    /** The key parts of a binding, as words: ['Ctrl','Shift','K']. */
+
+    function shortcutParts(combo) {
+
+        if (!combo) return [];
+
+        var parts = [];
+
+        if (combo.ctrl) parts.push('Ctrl');
+
+        if (combo.alt) parts.push('Alt');
+
+        if (combo.shift) parts.push('Shift');
+
+        var k = combo.key || '';
+
+        if (k === ' ' || k === 'Spacebar') k = 'Space';
+
+        else if (k === 'ArrowUp') k = '↑';
+
+        else if (k === 'ArrowDown') k = '↓';
+
+        else if (k === 'ArrowLeft') k = '←';
+
+        else if (k === 'ArrowRight') k = '→';
+
+        else if (k.length === 1) k = k.toUpperCase();
+
+        if (k) parts.push(k);
+
+        return parts;
+
+    }
+
+
+
+    /** 'Ctrl+Shift+K' — the plain-text form (tooltips, prose, buttons). */
+
+    function formatShortcut(combo) {
+
+        return shortcutParts(combo).join('+');
+
+    }
+
+
+
+    /** 'Ctrl + Shift + K' as <kbd> chips — the form the lists use. */
+
+    function shortcutKeysHtml(combo) {
+
+        var parts = shortcutParts(combo);
+
+        if (!parts.length) return '';
+
+        var out = [];
+
+        for (var i = 0; i < parts.length; i++) out.push('<kbd>' + parts[i] + '</kbd>');
+
+        return out.join(' + ');
+
+    }
+
+
+
+    /**
+
+     * Re-render EVERY mention of a shortcut from the live bindings.
+
+     *
+
+     * Targets:
+
+     *   * `#display-shortcuts-list` — the read-only list in Settings → Display;
+
+     *   * `[data-shortcut-key="action"]` — any inline mention (text is set);
+
+     *   * `[data-shortcut-title="action"]` — a tooltip; an optional
+
+     *     `data-shortcut-template` (with %s) wraps the binding in a sentence.
+
+     *
+
+     * Safe to call at any time: a missing element is simply skipped, so this
+
+     * runs on boot, after a remap and after a reset.
+
+     */
+
+    function renderShortcutLabels() {
+
+        var list = document.getElementById('display-shortcuts-list');
+
+        if (list) {
+
+            var html = '';
+
+            Object.keys(DEFAULT_SHORTCUTS).forEach(function (action) {
+
+                var s = getShortcut(action);
+
+                if (!s) return;
+
+                html += '<div class="shortcut-row">' + shortcutKeysHtml(s) +
+
+                    ' <span>' + DEFAULT_SHORTCUTS[action].label + '</span></div>';
+
+            });
+
+            list.innerHTML = html;
+
+        }
+
+        try {
+
+            document.querySelectorAll('[data-shortcut-key]').forEach(function (el) {
+
+                var s = getShortcut(el.getAttribute('data-shortcut-key'));
+
+                if (s) el.textContent = formatShortcut(s);
+
+            });
+
+            document.querySelectorAll('[data-shortcut-title]').forEach(function (el) {
+
+                var s = getShortcut(el.getAttribute('data-shortcut-title'));
+
+                if (!s) return;
+
+                var tmpl = el.getAttribute('data-shortcut-template');
+
+                el.setAttribute('title', tmpl ? tmpl.replace('%s', formatShortcut(s)) : formatShortcut(s));
+
+            });
+
+        } catch (_) {}
+
+    }
+
+
+
     function renderShortcutSettings(container) {
 
         var custom = loadShortcuts();
@@ -2113,7 +2269,7 @@
 
             var current = custom[action] || def;
 
-            var display = (current.ctrl ? 'Ctrl+' : '') + (current.shift ? 'Shift+' : '') + (current.key ? current.key.toUpperCase() : '');
+            var display = formatShortcut(current);
 
 
 
@@ -2187,7 +2343,7 @@
 
 
 
-                    var display = (combo.ctrl ? 'Ctrl+' : '') + (combo.shift ? 'Shift+' : '') + combo.key.toUpperCase();
+                    var display = formatShortcut(combo);
 
                     btn.textContent = display;
 
@@ -2197,9 +2353,13 @@
 
 
 
-                    // Rebind shortcuts
+                    // Rebind shortcuts, and repaint every other place that names
+
+                    // one (Display tab list, tooltips) from the new binding.
 
                     bindAllShortcuts();
+
+                    renderShortcutLabels();
 
                 }
 
@@ -2226,6 +2386,8 @@
                 renderShortcutSettings(container);
 
                 bindAllShortcuts();
+
+                renderShortcutLabels();
 
             });
 
@@ -2550,6 +2712,14 @@
     window.renderShortcutSettings = renderShortcutSettings;
 
     window.getShortcut = getShortcut;
+
+    window.renderShortcutLabels = renderShortcutLabels;
+
+    window.formatShortcut = formatShortcut;
+
+    // Boot: fill the Display list and any inline mention with the live bindings.
+
+    renderShortcutLabels();
 
 
 

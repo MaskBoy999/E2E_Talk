@@ -69,24 +69,24 @@ object IncomingCallNotifier {
     /**
      * Show (or refresh) the ring notification.
      *
-     * `hideIdentity` (F2, FEATURE_PLAN.md) is the page's "hide message content
-     * in notifications" preference: when true the card names NOBODY (title
-     * only), the notification channel is locked to the private lock-screen
-     * visibility, and the notification itself is VISIBILITY_PRIVATE — so the
-     * caller's identity never lands on the lock screen or in Android's
-     * notification history (the durable OS-held copies the FBI recovered
-     * Signal previews from on iOS). When false the ring is unchanged: the
-     * caller is named with the plaintext @username, which is metadata the
-     * server already holds.
+     * The card names NOBODY (F2, FEATURE_PLAN.md; unconditional since 0.2.30),
+     * the notification channel is locked to the private lock-screen visibility,
+     * and the notification itself is VISIBILITY_PRIVATE — so no identity ever
+     * lands on the lock screen or in Android's notification history (the
+     * durable OS-held copies the FBI recovered Signal previews from on iOS).
+     *
+     * This is enforced HERE, not only in the page: the web layer no longer
+     * sends a caller name at all, and even if an older cached page sent one,
+     * there is no code path left in this notifier that would render it. The
+     * caller's name is still shown in the app's own in-call ring bar, which
+     * never crosses the OS boundary.
      */
     fun show(
         context: Context,
-        callerName: String,
         dmChannelId: String,
-        vibratePattern: LongArray,
-        hideIdentity: Boolean = false
+        vibratePattern: LongArray
     ) {
-        val channelId = ensureChannel(context, vibratePattern, hideIdentity)
+        val channelId = ensureChannel(context, vibratePattern)
 
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
         val fullScreenIntent = PendingIntent.getActivity(
@@ -121,14 +121,8 @@ object IncomingCallNotifier {
 
         val builder = NotificationCompat.Builder(context, channelId)
             .setContentTitle("Incoming call")
-            .apply {
-                if (hideIdentity) {
-                    // F2: name-free — see the show() doc comment.
-                    setContentText("Tap to answer in E2E Chat")
-                } else {
-                    setContentText("$callerName is calling…")
-                }
-            }
+            // F2: name-free — see the show() doc comment.
+            .setContentText("Tap to answer in E2E Chat")
             // The app's own mark, in silhouette — NOT applicationInfo.icon.
             // Android renders a small icon as an alpha mask, so handing it the
             // full-colour (and adaptive) launcher icon produced a shapeless
@@ -142,12 +136,8 @@ object IncomingCallNotifier {
             // The full-screen intent is what makes this ring over the lock
             // screen instead of waiting quietly in the shade.
             .setFullScreenIntent(fullScreenIntent, true)
-            // F2: private when hiding identity — never painted on a locked
-            // phone. Public otherwise (the @username is server-known metadata).
-            .setVisibility(
-                if (hideIdentity) NotificationCompat.VISIBILITY_PRIVATE
-                else NotificationCompat.VISIBILITY_PUBLIC
-            )
+            // F2: always private — never painted on a locked phone.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .addAction(0, "Answer", answerIntent)
             .addAction(0, "Decline", declineIntent)
 
@@ -181,11 +171,14 @@ object IncomingCallNotifier {
      * pattern's. Falls back to the plain prefix on anything unexpected, which
      * is still a working (if default-vibrating) channel.
      */
-    private fun ensureChannel(context: Context, vibratePattern: LongArray, hideIdentity: Boolean): String {
+    private fun ensureChannel(context: Context, vibratePattern: LongArray): String {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return CHANNEL_PREFIX
         val pattern = vibratePattern.filter { it > 0 }
         val patternPart = if (pattern.isEmpty()) "novibe" else pattern.joinToString("-")
-        val id = "$CHANNEL_PREFIX-$patternPart" + if (hideIdentity) "-priv" else ""
+        // The privacy suffix stays in the id (it is what distinguishes this
+        // channel from the pre-0.2.30 public ones), but it is no longer
+        // conditional: every ring channel this app creates is private.
+        val id = "$CHANNEL_PREFIX-$patternPart-priv"
         try {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                 ?: return id
@@ -200,11 +193,9 @@ object IncomingCallNotifier {
             ).apply {
                 description = "Rings when someone calls you"
                 // F2: the channel locks the lock-screen visibility for every
-                // notification posted on it, so the hide-identity mode must be
-                // baked in here (hence the mode suffix in the id above).
-                lockscreenVisibility =
-                    if (hideIdentity) Notification.VISIBILITY_PRIVATE
-                    else Notification.VISIBILITY_PUBLIC
+                // notification posted on it, so the private mode has to be
+                // baked in here (hence the suffix in the id above).
+                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
                 if (pattern.isEmpty()) {
                     // Settings → Voice → Haptics turned the cue off: the ring is
                     // the notification's job, the buzz is not.

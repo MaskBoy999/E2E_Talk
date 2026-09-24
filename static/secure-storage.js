@@ -78,6 +78,32 @@
     // This is a BOOTSTRAP key (kept unencrypted) so _ensureKey() can find it
     // even without the password.
     var LOCAL_KEY_NAME = 'e2e_local_storage_key';
+
+    // 5.6 (option): "ask for my password after a restart".
+    //
+    // The vault seals the storage key under the password, which is why a cold
+    // start shows the lock screen. That is the strongest setting and the
+    // default, but typing the password on every new tab/restart is a real cost,
+    // so it is a preference now:
+    //
+    //   '1' / absent (default) — password required; the device holds no copy of
+    //                            the storage key (this is the behaviour the
+    //                            vault replaced the old plaintext bootstrap
+    //                            with).
+    //   '0'                    — the app keeps the storage key in the
+    //                            device-local bootstrap slot so a cold start
+    //                            opens without a password. Honest consequence:
+    //                            anyone who can read this origin's storage
+    //                            (a local attacker, a compromised browser
+    //                            profile, a backup) can decrypt the stored
+    //                            session WITHOUT the password. The vault blob
+    //                            is kept, so switching back to '1' is instant.
+    //
+    // Deliberately NOT e2e_-prefixed: that prefix is "sensitive", and the
+    // interceptor would encrypt this flag under the very key its value decides
+    // whether to keep on the device. It is a one-character preference, not a
+    // secret.
+    var VAULT_ASK_KEY = 'vaultAskPassword';
     var MAGIC = '~';  // single magic byte prepended to encrypted values
 
     // Length of the plaintext checksum tag in hex chars (8 bytes → 16 nibbles)
@@ -503,6 +529,52 @@
         catch (_) { return false; }
     }
 
+    /** Does this device require the password after a restart? (Default: yes.) */
+    function _vaultAsksPassword() {
+        try { return _realOrigGet.call(localStorage, VAULT_ASK_KEY) !== '0'; }
+        catch (_) { return true; }
+    }
+
+    /**
+     * Keep the device-local key copy in step with the preference.
+     *
+     * Called wherever a real key is adopted from the password. When the
+     * preference is ON this is the existing behaviour — drop the stale
+     * plaintext-key slot. When it is OFF the slot is rewritten with the key in
+     * use now, so a cold start finds it (that is the whole feature) and so a
+     * re-keyed/re-logged-in session does not leave a stale key that opens
+     * nothing.
+     */
+    function _settleLocalKeyCopy() {
+        if (!_key || _key.length !== 32) return false;
+        if (!_vaultAsksPassword()) {
+            try {
+                _realOrigSet.call(localStorage, LOCAL_KEY_NAME, _bytesToBase64(_key));
+                return true;
+            } catch (_) { return false; }
+        }
+        try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+        return true;
+    }
+
+    window._secVaultAsksPassword = _vaultAsksPassword;
+
+    /**
+     * Turn "ask for my password after a restart" on or off.
+     *
+     * Turning it OFF mirrors the current key into the device-local slot (and
+     * fails if there is no key in hand — the caller keeps the old setting
+     * then). Turning it ON deletes that copy, so the vault is once again the
+     * only way in. The vault blob itself is never touched either way: the
+     * setting is about WHERE the key is kept, not about re-sealing it.
+     */
+    // There is deliberately NO unverified setter for this preference: the two
+    // functions below are the only way to change it, and both check a password
+    // against the vault and settle the whole store onto the key it releases. An
+    // earlier revision had a plain `_secSetVaultAskPassword(on)` flag-flipper;
+    // it is gone, so "the setting cannot be moved without your password" is a
+    // property of the code rather than a convention.
+
     /**
      * A key can be produced on this load when EITHER the legacy password
      * bootstrap is intact OR a 5.6 vault is present. Both mean the key is
@@ -551,7 +623,7 @@
             if (derivedNow) {
                 _key = derivedNow;
                 try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
-                try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+                _settleLocalKeyCopy();
                 window._secDerivationPending = false;
                 return _key;
             }
@@ -571,7 +643,15 @@
                 var fbKey = _realOrigGet.call(localStorage, LOCAL_KEY_NAME);
                 if (fbKey) {
                     var fk = _base64ToBytes(fbKey);
-                    if (fk.length === 32) { _key = fk; return _key; }
+                    // 5.6 (option): a device set to open without asking for the
+                    // password keeps the key in this bootstrap slot on purpose,
+                    // so finding it here is the intended path — not a stale
+                    // random fallback.
+                    if (fk.length === 32) {
+                        _key = fk;
+                        window._secDerivationPending = false;
+                        return _key;
+                    }
                 }
             } catch (_) {}
             // 5.6: a vault with no derivable bootstrap means the key is sealed
@@ -904,8 +984,10 @@
         if (!derived) return false;
         _key = derived;
         try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
-        // The random fallback is now definitively stale.
-        try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+        // The random fallback is now definitively stale — unless the device is
+        // keeping the key on purpose (see VAULT_ASK_KEY), in which case the
+        // slot is rewritten with the key this session actually uses.
+        _settleLocalKeyCopy();
         window._secDerivationPending = false;
         return true;
     };
@@ -945,6 +1027,7 @@
             // the wipes — see keyvault.js for why it is not the old bootstrap.
             window._vaultSessionPassword = password;
             try { if (typeof window._kvTicketWrite === 'function') window._kvTicketWrite(password); } catch (_) {}
+            _settleLocalKeyCopy();
             window._secLocked = false;
             window._secVaultUnlocked = true;
             return true;
@@ -958,7 +1041,141 @@
             vault: _vaultPresent(),
             passwordBootstrap: _hasPasswordBootstrap(),
             hasKey: !!(_key || _currentKeyRaw()),
+            // false = this device keeps the key on the device and opens without
+            // asking for the password (the Security setting below).
+            asksPassword: _vaultAsksPassword(),
+            keyOnDevice: !!_realOrigGet.call(localStorage, LOCAL_KEY_NAME),
         };
+    };
+
+    /**
+     * Re-encrypt every sensitive value from the CURRENT key to `targetKey`, then
+     * adopt `targetKey`.
+     *
+     * This is what makes the key-vault toggle a real "everything is encrypted
+     * with the key your password releases" rather than a flag flip:
+     *
+     *   * turning "ask for my password after a restart" ON — the target is the
+     *     key the vault hands back for the password just typed, so nothing can
+     *     be left under a key the vault does not hold (and the device-local copy
+     *     is removed);
+     *   * turning it OFF — the same target, plus the device-local copy, so the
+     *     store this device keeps IS the store the password released.
+     *
+     * Re-keying is skipped when the target is already the current key (the
+     * normal case, since the vault is kept in step with the session), and the
+     * session ticket is re-encrypted with the rest — it is a sensitive key — so
+     * password-consuming flows keep working afterwards.
+     *
+     * Returns true when the store is settled under `targetKey`.
+     */
+    window._secReKeyTo = function (targetKey) {
+        try {
+            if (!targetKey || targetKey.length !== 32) return false;
+            var current = _currentKeyRaw();
+            var same = false;
+            if (current && current.length === 32) {
+                same = true;
+                for (var bit = 0; bit < 32; bit++) {
+                    if (current[bit] !== targetKey[bit]) { same = false; break; }
+                }
+            }
+            if (same) {
+                _key = targetKey;
+                try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
+                _settleLocalKeyCopy();
+                window._secLocked = false;
+                return true;
+            }
+
+            // Collect plaintexts under the key the data is ACTUALLY under.
+            var plaintexts = {};
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (!k || !isSensitive(k)) continue;
+                var raw = _realOrigGet.call(localStorage, k);
+                if (raw === null) continue;
+                if (_isEncrypted(raw)) {
+                    try {
+                        var dec = current ? _decryptInnerWithKey(raw.substring(1), current) : null;
+                        if (dec !== null) plaintexts[k] = dec;
+                    } catch (_) {}
+                } else {
+                    plaintexts[k] = raw;
+                }
+            }
+
+            _key = targetKey;
+            try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
+            for (var key in plaintexts) {
+                if (!plaintexts.hasOwnProperty(key)) continue;
+                try {
+                    _realOrigSet.call(localStorage, key, MAGIC + _aeadEncryptWithKey(String(plaintexts[key]), targetKey));
+                } catch (_) {}
+            }
+            _settleLocalKeyCopy();
+            window._secLocked = false;
+            window._secDerivationPending = false;
+            return true;
+        } catch (_) { return false; }
+    };
+
+    /**
+     * Turn "ask for my password after a restart" ON, verified.
+     *
+     * The password is not taken on trust: it has to open THIS device's vault,
+     * and the key that comes out becomes the storage key for everything (see
+     * _secReKeyTo). A wrong password changes nothing at all — no flag, no key,
+     * no re-encryption.
+     */
+    window._secVaultRequirePassword = function (password) {
+        if (!password) return Promise.resolve({ ok: false, reason: 'no-password' });
+        if (typeof window._kvUnlock !== 'function') return Promise.resolve({ ok: false, reason: 'no-vault' });
+        return Promise.resolve(window._kvUnlock(password)).then(function (opened) {
+            if (!opened || !opened.k) return { ok: false, reason: 'wrong-password' };
+            var target;
+            try { target = _base64ToBytes(opened.k); } catch (_) { return { ok: false, reason: 'bad-key' }; }
+            if (!target || target.length !== 32) return { ok: false, reason: 'bad-key' };
+            // Flag first: _settleLocalKeyCopy() inside the re-key reads it, and
+            // the answer must be "do not keep a copy on this device".
+            try { _realOrigSet.call(localStorage, VAULT_ASK_KEY, '1'); } catch (_) {}
+            if (!window._secReKeyTo(target)) {
+                try { _realOrigSet.call(localStorage, VAULT_ASK_KEY, '0'); } catch (_) {}
+                return { ok: false, reason: 'rekey-failed' };
+            }
+            try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+            window._vaultSessionPassword = password;
+            try { if (typeof window._kvTicketWrite === 'function') window._kvTicketWrite(password); } catch (_) {}
+            return { ok: true, rekeyed: true };
+        }).catch(function () { return { ok: false, reason: 'failed' }; });
+    };
+
+    /**
+     * Turn "ask for my password after a restart" OFF, verified the same way.
+     *
+     * The password is checked against the vault, the key it releases is adopted
+     * for every stored value, and only then does this device start keeping that
+     * key so a restart can open without asking. A wrong password changes
+     * nothing.
+     */
+    window._secVaultDropRequirement = function (password) {
+        if (!password) return Promise.resolve({ ok: false, reason: 'no-password' });
+        if (typeof window._kvUnlock !== 'function') return Promise.resolve({ ok: false, reason: 'no-vault' });
+        return Promise.resolve(window._kvUnlock(password)).then(function (opened) {
+            if (!opened || !opened.k) return { ok: false, reason: 'wrong-password' };
+            var target;
+            try { target = _base64ToBytes(opened.k); } catch (_) { return { ok: false, reason: 'bad-key' }; }
+            if (!target || target.length !== 32) return { ok: false, reason: 'bad-key' };
+            try { _realOrigSet.call(localStorage, VAULT_ASK_KEY, '0'); } catch (_) {}
+            if (!window._secReKeyTo(target)) {
+                try { _realOrigSet.call(localStorage, VAULT_ASK_KEY, '1'); } catch (_) {}
+                try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+                return { ok: false, reason: 'rekey-failed' };
+            }
+            window._vaultSessionPassword = password;
+            try { if (typeof window._kvTicketWrite === 'function') window._kvTicketWrite(password); } catch (_) {}
+            return { ok: true, rekeyed: true };
+        }).catch(function () { return { ok: false, reason: 'failed' }; });
     };
 
     window._secReKey = function () {
@@ -1008,8 +1225,9 @@
         sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key));
 
         // Remove any stale localStorage fallback key (we now have a proper
-        // password-derived key that will be found first by _ensureKey).
-        try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+        // password-derived key that will be found first by _ensureKey) — or
+        // rewrite it when this device is set not to ask for the password.
+        _settleLocalKeyCopy();
 
         // Re-encrypt all values with the new key using AEAD.
         // Use _realOrigSet (saved before interception) to bypass the interceptor.
@@ -1069,7 +1287,7 @@
             _key = null;
             sessionStorage.removeItem(SESSION_KEY_NAME);
             if (!_tryDeriveFromEncryptedPassword()) return false;
-            try { _realOrigRemove.call(localStorage, LOCAL_KEY_NAME); } catch (_) {}
+            _settleLocalKeyCopy();
 
             // 4. Re-write the collected plaintexts using AEAD.
             for (var key in plaintexts) {

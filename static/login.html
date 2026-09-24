@@ -6,7 +6,7 @@
     <title>E2E Chat - Login</title>
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=5">
+    <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
@@ -30,10 +30,6 @@
                     <button type="button" class="toggle-visibility-btn" id="toggle-login-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
                 <button type="submit">Login</button>
-                <!-- 5.1: only shown when a sealed password exists AND this is the
-                     Android box (see auth.js). It unwraps through the fingerprint
-                     prompt; a failed scan leaves this form exactly as it was. -->
-                <button type="button" id="biometric-unlock-btn" style="display:none;margin-top:8px;background:transparent;border:1px solid var(--border-color,#4f545c);color:var(--text-primary,#fff);cursor:pointer;">Unlock with fingerprint</button>
                 <p class="toggle">Don't have an account? <a href="#" id="show-register">Register</a></p>
                 <p class="toggle"><a href="admin.html" class="admin-link-login">Host Admin</a></p>
             </form>
@@ -70,10 +66,10 @@
     <script src="libsodium-sumo.js"></script>
     <script src="libsodium-wrappers.js"></script>
 <script src="crypto.js?v=10"></script>
-<script src="keyvault.js?v=1"></script>
+<script src="keyvault.js?v=2"></script>
 <script src="secure-storage.js?v=4"></script>
     <script src="ui-dialog.js?v=1"></script>
-    <script src="auth.js?v=11"></script>
+    <script src="auth.js?v=12"></script>
     <!-- Android shell: immersive system bars + Back closing the top layer.
          Inert in a browser and on desktop (see the file's header). -->
     <script src="box-shell.js?v=2"></script>

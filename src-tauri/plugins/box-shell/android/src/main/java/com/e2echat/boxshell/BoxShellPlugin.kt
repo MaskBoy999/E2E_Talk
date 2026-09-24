@@ -6,13 +6,11 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.hardware.biometrics.BiometricPrompt
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -24,8 +22,6 @@ import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.view.Window
 import android.view.WindowManager
@@ -42,11 +38,6 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 
 import java.io.File
-import java.security.KeyStore
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 @InvokeArg
 class BackHandlerArgs {
@@ -103,18 +94,6 @@ class AudioRouteArgs {
     var id: String? = null
 }
 
-/**
- * `biometricSeal` arguments (5.1): the operation and a base64 payload — the
- * plaintext password on the way in (`wrap`), the Keystore ciphertext on the
- * way out (and the reverse for `unwrap`).
- */
-@InvokeArg
-class BiometricSealArgs {
-    var mode: String? = null
-    var data: String? = null
-    var title: String? = null
-}
-
 /** Arguments for `sharedRead` (3.4): which staged file (index into the FIFO). */
 @InvokeArg
 class SharedReadArgs {
@@ -133,9 +112,6 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
          * numbers in step if the call notification id ever moves.
          */
         private const val ONGOING_CALL_NOTIFICATION_ID = 4711
-
-        /** Alias of the per-operation biometric key (5.1) — AndroidKeyStore. */
-        private const val BIOMETRIC_KEY_ALIAS = "e2e_storage_unlock"
 
         /**
          * 3.4 (FEATURE_PLAN.md): the inbound share FIFO.
@@ -533,123 +509,6 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
         AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth"
         else -> "Audio output"
-    }
-
-    // ── 5.1 (FEATURE_PLAN.md): biometric unlock ────────────────────────────
-    // The biometric RELEASES the Keystore-wrapped storage password: an AES-GCM
-    // key in the Android Keystore with setUserAuthenticationRequired +
-    // AUTH_BIOMETRIC_STRONG (per-operation), used THROUGH a BiometricPrompt
-    // CryptoObject — the cipher literally cannot produce output without a
-    // successful biometric match, a failed/cancelled prompt rejects, and
-    // onAuthenticationFailed resolves NOTHING (plan: failed auth must never
-    // reset to an unlocked state). The password path stays untouched as the
-    // fallback; the key never leaves the enclave.
-
-    @Command
-    fun biometricAvailable(invoke: Invoke) {
-        val out = JSObject()
-        val pm = activity.packageManager
-        val has = pm.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)
-            || pm.hasSystemFeature(PackageManager.FEATURE_FACE)
-        out.put("available", has)
-        invoke.resolve(out)
-    }
-
-    @Command
-    fun biometricSeal(invoke: Invoke) {
-        val args = invoke.parseArgs(BiometricSealArgs::class.java)
-        val mode = args.mode ?: "unwrap"
-        val payload = args.data ?: ""
-        val out = JSObject()
-        try {
-            val key = biometricSecretKey()
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val plain: ByteArray?
-            var ct: ByteArray? = null
-            if (mode == "wrap") {
-                plain = Base64.decode(payload, Base64.NO_WRAP)
-                cipher.init(Cipher.ENCRYPT_MODE, key)
-            } else {
-                plain = null
-                val all = Base64.decode(payload, Base64.NO_WRAP)
-                if (all.size <= 12) { invoke.reject("biometric blob is malformed"); return }
-                cipher.init(
-                    Cipher.DECRYPT_MODE,
-                    key,
-                    GCMParameterSpec(128, all.copyOfRange(0, 12))
-                )
-                ct = all.copyOfRange(12, all.size)
-            }
-            val sealedCt = ct
-            val crypto = BiometricPrompt.CryptoObject(cipher)
-            val prompt = BiometricPrompt.Builder(activity)
-                .setTitle(args.title ?: "Confirm it's you")
-                .setSubtitle(
-                    if (mode == "wrap") "Store your password for fingerprint unlock"
-                    else "Unlock with your fingerprint"
-                )
-                .setConfirmationRequired(false)
-                .build()
-            val callback = object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    try {
-                        if (mode == "wrap") {
-                            val enc = cipher.doFinal(plain)
-                            val joined = ByteArray(12 + enc.size)
-                            System.arraycopy(cipher.iv, 0, joined, 0, 12)
-                            System.arraycopy(enc, 0, joined, 12, enc.size)
-                            out.put("data", Base64.encodeToString(joined, Base64.NO_WRAP))
-                        } else {
-                            val dec = cipher.doFinal(sealedCt)
-                            out.put("data", Base64.encodeToString(dec, Base64.NO_WRAP))
-                        }
-                        invoke.resolve(out)
-                    } catch (e: Exception) {
-                        invoke.reject("biometric operation failed: ${e.message}")
-                    }
-                }
-
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    invoke.reject("biometric: $errString")
-                }
-
-                override fun onAuthenticationFailed() {
-                    // A partial non-match: the error callback follows for real
-                    // failures. Deliberately resolves NOTHING — see the doc
-                    // above (no fallback to an unlocked state, ever).
-                }
-            }
-            prompt.authenticate(crypto, CancellationSignal(), activity.mainExecutor, callback)
-        } catch (e: Exception) {
-            invoke.reject("biometric unavailable: ${e.message}")
-        }
-    }
-
-    private fun biometricSecretKey(): SecretKey {
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (ks.containsAlias(BIOMETRIC_KEY_ALIAS)) {
-            (ks.getKey(BIOMETRIC_KEY_ALIAS, null) as? SecretKey)?.let { return it }
-        }
-        val spec = KeyGenParameterSpec.Builder(
-            BIOMETRIC_KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .setUserAuthenticationRequired(true)
-            .apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    // 0 = authenticated for EVERY operation, biometric-strength.
-                    setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-                } else {
-                    setUserAuthenticationValidityDurationSeconds(-1)
-                }
-            }
-            .build()
-        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        gen.init(spec)
-        return gen.generateKey()
     }
 
     // ── 3.4 (FEATURE_PLAN.md): share-into-app consumption ────────────────

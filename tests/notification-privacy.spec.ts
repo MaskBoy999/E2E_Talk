@@ -29,15 +29,18 @@ async function register(page: Page, username: string) {
  * boundary and outlives it — the class of leak behind the reports of an OS
  * handing over another messenger's notifications.
  *
- * So a notification may name only the plaintext metadata the server already
- * holds (the sender's @username). It must never carry:
+ * Since 0.2.30 that is enforced unconditionally: a notification says only THAT
+ * something happened. It must never carry:
  *   * message content,
+ *   * a sender's name of any kind (the @username is plaintext server metadata,
+ *     but it is still identity handed to the OS, and the setting that used to
+ *     choose is gone),
  *   * a display name / nickname (end-to-end encrypted),
  *   * a server, channel or category name (also end-to-end encrypted),
  * while the in-app inbox may still show all of them (it never leaves the app).
  */
 test.describe('notifications never carry end-to-end encrypted data', () => {
-    test('the sender is the plaintext @username — a display name is never used', async ({ page }) => {
+    test('a notification names nobody — not the sender, not a nickname', async ({ page }) => {
         await register(page, unique('notifpriv'));
 
         const result = await page.evaluate(() => {
@@ -56,21 +59,25 @@ test.describe('notifications never carry end-to-end encrypted data', () => {
                 reply: w.notifText('reply', { username: 'bob', dm: false }),
                 call: w.notifText('call', { username: 'bob', dm: true }),
                 unknown: w.notifText('dm', { userId: 'nobody', dm: true }),
+                known: w.notifText('dm', { userId: 'u-secret', dm: true }),
             };
         });
 
-        expect(result.dm.title).toContain('@bob');
-        expect(result.mention.title).toContain('@bob');
-        expect(result.reply.title).toContain('@bob');
-        expect(result.call.title).toContain('@bob');
+        expect(result.dm.title).toBe('E2E Chat');
+        expect(result.mention.title).toBe('E2E Chat');
+        expect(result.reply.title).toBe('E2E Chat');
+        expect(result.call.title).toBe('E2E Chat');
 
-        // The display name must not appear anywhere in any of them, in any form.
+        // Nothing about the sender — known or unknown, nickname or @username.
         const all = JSON.stringify(result);
         expect(all).not.toContain('TopSecretNickname');
         expect(all).not.toContain('display_name');
-
-        // An unknown sender degrades to a generic word, never to a leaked name.
-        expect(result.unknown.title).toBe('New DM from Someone');
+        expect(all).not.toContain('@bob');
+        expect(all).not.toContain('bob');
+        // A sender we know and one we do not produce byte-identical text: the
+        // notification cannot be used to tell anything about who sent it.
+        expect(result.unknown).toEqual(result.known);
+        expect(result.unknown).toEqual(result.dm);
     });
 
     test('server, channel and category names never reach the notification text', async ({ page }) => {
@@ -86,41 +93,54 @@ test.describe('notifications never carry end-to-end encrypted data', () => {
             };
         });
 
-        // Only the sender and the two SAFE place words may be named.
-        expect(result.mention.body).toBe('You were mentioned in a channel');
-        expect(result.reply.body).toBe('New reply in a channel');
-        expect(result.dmMention.body).toBe('You were mentioned in a direct message');
+        // Only the two SAFE place words may appear — no sender at all.
+        expect(result.mention.body).toBe('You were mentioned in a server');
+        expect(result.reply.body).toBe('New reply in a server');
+        expect(result.dmMention.body).toBe('You were mentioned in a server');
         for (const text of [result.mention, result.reply, result.dmMention]) {
             expect(JSON.stringify(text)).not.toContain('#');
             expect(JSON.stringify(text)).not.toContain('NicknameLeak');
+            expect(JSON.stringify(text)).not.toContain('carol');
         }
     });
 
-    test('"hide message content in notifications" blanks the sender too', async ({ page }) => {
+    test('there is no switch to turn it off, and no stale preference can', async ({ page }) => {
         await register(page, unique('notifhide'));
 
         const result = await page.evaluate(() => {
             const w = window as any;
+            // Every value the old toggle could have left behind. None of them
+            // may change what a notification says: the setting is gone, so the
+            // only safe reading of a leftover key is "ignore it" (and boot
+            // deletes it).
+            localStorage.setItem('notifHidePreview', 'false');
+            const withFalse = w.notifText('dm', { username: 'bob', dm: true });
             localStorage.setItem('notifHidePreview', 'true');
-            const hidden = {
-                dm: w.notifText('dm', { username: 'bob', dm: true }),
-                mention: w.notifText('mention', { username: 'bob', dm: false }),
-                reply: w.notifText('reply', { username: 'bob', dm: false }),
-                call: w.notifText('call', { username: 'bob', dm: true }),
+            const withTrue = w.notifText('dm', { username: 'bob', dm: true });
+            localStorage.removeItem('streamerMode');
+            const withStreamerOff = w.notifText('dm', { username: 'bob', dm: true });
+            return {
+                withFalse,
+                withTrue,
+                withStreamerOff,
+                toggle: !!document.getElementById('notif-hide-preview'),
+                hiddenFn: w.notifContentHidden(),
             };
-            // The toggle in Settings must be the same switch the notifier reads.
-            const toggle = document.getElementById('notif-hide-preview') as HTMLInputElement | null;
-            localStorage.removeItem('notifHidePreview');
-            return { hidden, hasToggle: !!toggle, streamsHidden: w.notifText('dm', { username: 'bob', dm: true }) };
         });
 
-        for (const text of Object.values(result.hidden)) {
-            expect(JSON.stringify(text)).not.toContain('@bob');
-            expect((text as any).title).toBe('E2E Chat');
+        for (const text of [result.withFalse, result.withTrue, result.withStreamerOff]) {
+            expect(text.title).toBe('E2E Chat');
+            expect(text.body).toBe('New direct message');
         }
-        expect(result.hasToggle, 'Settings → Notifications must expose the switch').toBe(true);
-        // With the setting off again, the sender is named once more.
-        expect(result.streamsHidden.title).toContain('@bob');
+        expect(result.toggle, 'Settings must not expose the removed switch').toBe(false);
+        expect(result.hiddenFn).toBe(true);
+
+        // A leftover preference is deleted at boot, so an old device cannot even
+        // keep a "hide content = false" around to be picked up again.
+        await page.evaluate(() => localStorage.setItem('notifHidePreview', 'false'));
+        await page.reload();
+        await page.waitForSelector('#current-user', { timeout: 20000 });
+        expect(await page.evaluate(() => localStorage.getItem('notifHidePreview'))).toBeNull();
     });
 
     test('the Android box gets a silhouette drawable as the notification icon, not the launcher icon', async ({ page }) => {
@@ -219,7 +239,7 @@ test.describe('notifications never carry end-to-end encrypted data', () => {
         expect(result.everything).not.toContain('DecryptedSecretChannel');
     });
 
-    test('F2: the native ring carries the hide-preview flag, in both states', async ({ page }) => {
+    test('F2: the native ring is name-free, with nothing left to override it', async ({ page }) => {
         await mockAndroidBox(page);
         await register(page, unique('f2ring'));
 
@@ -234,31 +254,25 @@ test.describe('notifications never carry end-to-end encrypted data', () => {
                 return hits.length ? hits[hits.length - 1].args : {};
             };
 
-            w.localStorage.removeItem('notifHidePreview');
+            // The old preference, in the state that used to make the ring name
+            // the caller. It must change nothing now.
+            w.localStorage.setItem('notifHidePreview', 'false');
             w.__invokes.length = 0;
             vm.showIncomingCall(call);
-            const visibleArgs = lastIncoming();
+            const args = lastIncoming();
             vm.hideIncomingCall();
-
-            w.localStorage.setItem('notifHidePreview', 'true');
-            w.__invokes.length = 0;
-            vm.showIncomingCall(call);
-            const hiddenArgs = lastIncoming();
-            vm.hideIncomingCall();
-
             w.localStorage.removeItem('notifHidePreview');
             // document.hidden override is page-local; nothing to restore.
             await new Promise((r) => setTimeout(r, 50));
-            return { visibleArgs, hiddenArgs };
+            return { args, everything: JSON.stringify(w.__invokes) };
         });
 
-        // Visible mode: the named ring still goes out (plaintext @username is
-        // server-known metadata) but the flag must say so explicitly…
-        expect(result.visibleArgs.hideIdentity).toBe(false);
-        expect(result.visibleArgs.callerName).toBe('bob');
-        // …and with "hide message content" on, native must be told to post a
-        // name-free, lock-screen-private card.
-        expect(result.hiddenArgs.hideIdentity).toBe(true);
+        // The caller's name is not sent at all — not as a flag to ignore, and
+        // not as a name for native to hold: the notifier has no named branch.
+        expect(result.args.callerName).toBeUndefined();
+        expect(result.args.hideIdentity).toBeUndefined();
+        expect(result.everything).not.toContain('bob');
+        expect(result.args.dmChannelId).toBe('dm-f2');
     });
 
     test('F3 desktop: the box asks Rust for an expiring toast instead of the shim', async ({ page }) => {

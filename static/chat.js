@@ -3780,36 +3780,15 @@ async function pollSharedIntoComposer() {
 // out" redirect (which would run the login page's wipe and destroy the very
 // thing the vault protects).
 //
-// Two ways in, matching the two credentials the device is allowed to hold:
-//   * the password (always), and
-//   * the 5.1 fingerprint seal when it exists — the same Keystore ciphertext
-//     the login page uses, and it holds the password, so it can open the vault
-//     through the same live scan. Cancelled or failed scans simply do nothing.
+// One way in: the password. The device holds no other recoverable credential —
+// there is no fingerprint seal and no plaintext key — so a cold start means
+// typing the password, and nothing else can land the app in an unlocked state.
 //
 // The escape hatch is deliberate and total: forget the device (the one wipe
 // path) and sign in again with the password.
 function _vkBridge() {
     var t = window.__TAURI__;
     return (t && t.core && typeof t.core.invoke === 'function') ? t : null;
-}
-
-function _vkFingerprintAvailable() {
-    if (!/Android/i.test(navigator.userAgent || '')) return false;
-    if (!_vkBridge()) return false;
-    try { return !!localStorage.getItem('e2e_bio_seal'); } catch (_) { return false; }
-}
-
-async function _vkUnsealPassword() {
-    var b = _vkBridge();
-    var blob = null;
-    try { blob = localStorage.getItem('e2e_bio_seal'); } catch (_) {}
-    if (!b || !blob) return null;
-    var res = await b.core.invoke('plugin:box-shell|biometricSeal', { mode: 'unwrap', data: blob });
-    if (!res || !res.data) return null;
-    var bytes = Uint8Array.from(atob(res.data), function (c) { return c.charCodeAt(0); });
-    var out = new TextDecoder().decode(bytes);
-    if (bytes.fill) bytes.fill(0);
-    return out || null;
 }
 
 function showVaultLockScreen() {
@@ -3819,17 +3798,10 @@ function showVaultLockScreen() {
     wrap.id = 'vault-lock-overlay';
     wrap.className = 'vault-lock-overlay';
 
-    var who = '';
-    try { who = localStorage.getItem('e2e_bio_user') || ''; } catch (_) {}
-    var bioOk = _vkFingerprintAvailable();
-
     wrap.innerHTML =
         '<div class="vault-lock-card">' +
             '<div class="vault-lock-title">Unlock your key vault</div>' +
             '<p class="vault-lock-hint">Your storage key is sealed with your password on this device — it is no longer kept in a form that can be read from disk. Enter your password to open it.</p>' +
-            (bioOk ? '<button type="button" class="vault-lock-bio" id="vault-lock-bio">' +
-                (who ? 'Unlock as ' + window.escapeHtml(who) + ' with fingerprint' : 'Unlock with fingerprint') +
-                '</button>' : '') +
             '<input type="password" id="vault-lock-password" class="modal-input auth-code-input" placeholder="Password" autocomplete="current-password" style="width:100%;margin-top:10px" />' +
             '<div class="vault-lock-error" id="vault-lock-error" style="display:none"></div>' +
             '<button type="button" class="btn btn-primary" id="vault-lock-submit" style="width:100%;margin-top:10px">Unlock</button>' +
@@ -3876,21 +3848,6 @@ function showVaultLockScreen() {
     input.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') { e.preventDefault(); attempt(input.value); }
     });
-
-    var bio = document.getElementById('vault-lock-bio');
-    if (bio) {
-        bio.addEventListener('click', async function () {
-            var label = bio.textContent;
-            bio.disabled = true;
-            bio.textContent = 'Waiting for your fingerprint…';
-            var pw = null;
-            try { pw = await _vkUnsealPassword(); } catch (_) { pw = null; }
-            bio.disabled = false;
-            bio.textContent = label;
-            if (!pw) { fail('The fingerprint scan was not completed.'); return; }
-            await attempt(pw, 'The sealed password no longer opens the vault — sign in with it instead.');
-        });
-    }
 
     document.getElementById('vault-lock-forget').addEventListener('click', async function () {
         if (await uiConfirm('Forget this device? All local data (keys, logins, the vault) is wiped and you will sign in again with your password.')) {
@@ -4605,14 +4562,22 @@ document.addEventListener('DOMContentLoaded', () => {
             if (tab.dataset.tab !== 'voice-settings' && window._stopHearSelfTest) {
                 window._stopHearSelfTest();
             }
-            // Fetch backup status when security tab opens.
-            if (tab.dataset.tab === 'security-settings') fetchBackupStatus();
+            // Fetch backup status when security tab opens, and re-read the
+            // vault setting so the switch always shows this device's truth.
+            if (tab.dataset.tab === 'security-settings') {
+                fetchBackupStatus();
+                if (typeof refreshVaultPromptUi === 'function') refreshVaultPromptUi();
+            }
             if (tab.dataset.tab === 'user-settings') renderSecurityScheduledList();
             // F13: Render keyboard shortcut settings when shortcuts tab opens.
             if (tab.dataset.tab === 'shortcut-settings' && typeof renderShortcutSettings === 'function') {
                 var sc = document.getElementById('shortcut-settings-container');
                 if (sc) renderShortcutSettings(sc);
             }
+            // Every tab is repainted from the live bindings on open, so a remap
+            // made in the Shortcuts tab is already correct wherever it is named
+            // (the Display tab's list, the search tooltip) with no reload.
+            if (typeof renderShortcutLabels === 'function') renderShortcutLabels();
             if (tab.dataset.tab === 'custom-css-settings' && typeof renderCustomCssSettings === 'function') {
                 var cc = document.getElementById('custom-css-editor-container');
                 if (cc) renderCustomCssSettings(cc);
@@ -4923,18 +4888,12 @@ document.addEventListener('DOMContentLoaded', () => {
         updateComposerVisibility();
     })();
 
-    // Notification privacy: "Hide message content in notifications". A local
-    // preference that syncs with the account bundle (crypto.js
-    // BUNDLE_EXACT_KEYS), so it follows the user to every device. Nothing else
-    // has to be re-rendered — notifText() reads it when a notification is
-    // raised.
-    const notifHidePreviewToggle = document.getElementById('notif-hide-preview');
-    if (notifHidePreviewToggle) {
-        notifHidePreviewToggle.checked = localStorage.getItem('notifHidePreview') === 'true';
-        notifHidePreviewToggle.addEventListener('change', () => {
-            localStorage.setItem('notifHidePreview', notifHidePreviewToggle.checked);
-        });
-    }
+    // Notification privacy is no longer a preference: hiding message content
+    // from the OS is unconditional (see notifContentHidden). The old
+    // `notifHidePreview` key is deleted outright so a device that had the
+    // toggle switched OFF cannot carry a stale "false" forward, and so a synced
+    // key bundle from an older build cannot resurrect one.
+    try { localStorage.removeItem('notifHidePreview'); } catch (_) {}
 
     // Streamer mode toggle
     const streamerToggle = document.getElementById('streamer-mode-toggle');
@@ -7059,12 +7018,12 @@ document.addEventListener('DOMContentLoaded', () => {
             _lastActivityAt = Date.now();
         });
     }
-    var _wipeBtn = document.getElementById('panic-wipe-btn');
-    if (_wipeBtn) {
-        _wipeBtn.addEventListener('click', async function () {
-            if (await uiConfirm('Wipe ALL local data (keys, logins, settings) and sign out now? There is no undo.')) window.panicWipe('settings-button');
-        });
-    }
+    // 5.3: there is deliberately no "wipe everything now" button in the user
+    // tab any more. The wipe paths are the panic chord (Alt+Shift+W, instant,
+    // no confirmation) and the auto-lock timer above; the manual, confirmed
+    // route is "Clear All Data & Sign Out", which runs the same
+    // window.panicWipe() and therefore cannot leave anything behind that the
+    // removed button would have caught.
 
     // 5.7: device-only search preference. Turning it ON stops token uploads
     // entirely (flushSearchIndex / queueSearchIndex check this every time), and
@@ -7229,43 +7188,140 @@ document.addEventListener('DOMContentLoaded', () => {
         return payload;
     }
 
+    // ── 5.5: export my data — with or without a passphrase ─────────────────
+    // The user picks, exactly like the appearance backup and the admin database
+    // export: encrypted (Argon2id + crypto_secretbox, `e2e-chat-export.enc`) or
+    // deliberately plain (`e2e-chat-export.json`). The plain path is not a
+    // convenience back door: it is behind its own checkbox, it says in the
+    // modal what it exposes (identity keys + message text, readable by anyone),
+    // and it is confirmed once more before a byte is written.
     var _exportBtn = document.getElementById('export-data-btn');
-    if (_exportBtn) {
-        _exportBtn.addEventListener('click', async function () {
-            var st = document.getElementById('export-status');
-            function say(msg, kind) {
-                if (!st) return;
-                st.textContent = msg;
-                st.style.color = kind === 'error' ? 'var(--danger)' : (kind === 'success' ? '#43b581' : 'var(--text-muted)');
-            }
-            var p1 = (document.getElementById('export-passphrase') || {}).value || '';
-            var p2 = (document.getElementById('export-passphrase-confirm') || {}).value || '';
-            if (p1.length < 8) { say('Passphrase must be at least 8 characters.', 'error'); return; }
-            if (p1 !== p2) { say('Passphrases do not match.', 'error'); return; }
-            if (!(await uiConfirm('Export your data as ONE encrypted file (e2e-chat-export.enc)? It holds your keys, settings and recent messages, sealed with this passphrase. Nothing decrypted is written to disk.'))) return;
-            say('Collecting and encrypting…');
-            try {
-                var payload = await _exportPayload();
-                var bytes = await _exportSeal(p1, payload);
-                var blob = new Blob([bytes], { type: 'application/octet-stream' });
-                var url = URL.createObjectURL(blob);
-                var a = document.createElement('a');
-                a.href = url;
-                a.download = 'e2e-chat-export.enc';
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
-                (document.getElementById('export-passphrase') || {}).value = '';
-                (document.getElementById('export-passphrase-confirm') || {}).value = '';
-                say('Exported e2e-chat-export.enc — keep the passphrase with it; without it the file is unreadable.', 'success');
-            } catch (e) {
-                say('Export failed: ' + (e && e.message ? e.message : e), 'error');
-            }
-        });
+    var _exportModal = document.getElementById('export-pw-modal');
+    var _exportStatus = document.getElementById('export-status');
+
+    function exportSay(msg, kind) {
+        if (!_exportStatus) return;
+        _exportStatus.textContent = msg;
+        _exportStatus.style.color = kind === 'error' ? 'var(--danger)' : (kind === 'success' ? '#43b581' : 'var(--text-muted)');
     }
 
-    // Test hooks (R8): the exact seal/open pair and payload builder the button
+    function exportPwError(msg) {
+        var el = document.getElementById('export-pw-error');
+        if (!el) return;
+        el.textContent = msg || '';
+        el.style.display = msg ? '' : 'none';
+    }
+
+    function exportPlainChosen() {
+        var cb = document.getElementById('export-pw-nopw');
+        return !!(cb && cb.checked);
+    }
+
+    function updateExportEncryptionUI() {
+        var plain = exportPlainChosen();
+        var fields = document.getElementById('export-pw-fields');
+        var note = document.getElementById('export-pw-nopw-note');
+        if (fields) fields.style.display = plain ? 'none' : '';
+        if (note) note.style.display = plain ? '' : 'none';
+        exportPwError('');
+    }
+
+    function closeExportModal() {
+        if (_exportModal) _exportModal.style.display = 'none';
+        exportPwError('');
+        var a = document.getElementById('export-pw-input');
+        var b = document.getElementById('export-pw-confirm-input');
+        if (a) a.value = '';
+        if (b) b.value = '';
+    }
+
+    function openExportModal() {
+        if (!_exportModal) return;
+        var cb = document.getElementById('export-pw-nopw');
+        if (cb) cb.checked = false;
+        updateExportEncryptionUI();
+        _exportModal.style.display = 'flex';
+        var a = document.getElementById('export-pw-input');
+        if (a) { try { a.focus(); } catch (_) {} }
+    }
+
+    /** The plain file's bytes: the payload, said out loud for whoever opens it. */
+    function exportPlainText(payload) {
+        payload.encrypted = false;
+        payload.note = 'UNENCRYPTED export — identity keys and message text are readable by anyone with this file.';
+        return JSON.stringify(payload, null, 2);
+    }
+
+    function downloadExport(blob, filename) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+    }
+
+    async function confirmExport() {
+        var plain = exportPlainChosen();
+        var passphrase = '';
+        if (!plain) {
+            passphrase = (document.getElementById('export-pw-input') || {}).value || '';
+            var again = (document.getElementById('export-pw-confirm-input') || {}).value || '';
+            if (passphrase.length < 8) { exportPwError('Passphrase must be at least 8 characters.'); return; }
+            if (passphrase !== again) { exportPwError('Passphrases do not match.'); return; }
+        } else if (!(await uiConfirm('Export WITHOUT a passphrase? The file (e2e-chat-export.json) is plain JSON: your identity keys and recent message text in the clear, readable by anyone who gets it.'))) {
+            return;
+        }
+        closeExportModal();
+        exportSay(plain ? 'Collecting data (no encryption)…' : 'Collecting and encrypting…');
+        try {
+            var payload = await _exportPayload();
+            if (plain) {
+                // A marker INSIDE the file, so opening it in any editor states
+                // what it is. Nothing else about the payload changes.
+                downloadExport(new Blob([exportPlainText(payload)], { type: 'application/json' }), 'e2e-chat-export.json');
+                exportSay('Exported e2e-chat-export.json — NOT encrypted. Keep it somewhere safe.', 'error');
+            } else {
+                payload.encrypted = true;
+                var bytes = await _exportSeal(passphrase, payload);
+                downloadExport(new Blob([bytes], { type: 'application/octet-stream' }), 'e2e-chat-export.enc');
+                exportSay('Exported e2e-chat-export.enc — keep the passphrase with it; without it the file is unreadable.', 'success');
+            }
+        } catch (e) {
+            exportSay('Export failed: ' + (e && e.message ? e.message : e), 'error');
+        }
+    }
+
+    if (_exportBtn) _exportBtn.addEventListener('click', openExportModal);
+    var _exportCancelBtn = document.getElementById('export-pw-cancel-btn');
+    if (_exportCancelBtn) _exportCancelBtn.addEventListener('click', closeExportModal);
+    var _exportConfirmBtn = document.getElementById('export-pw-confirm-btn');
+    if (_exportConfirmBtn) _exportConfirmBtn.addEventListener('click', confirmExport);
+    var _exportNopw = document.getElementById('export-pw-nopw');
+    if (_exportNopw) _exportNopw.addEventListener('change', updateExportEncryptionUI);
+    if (_exportModal) {
+        _exportModal.addEventListener('click', function (e) {
+            if (e.target === _exportModal) closeExportModal();
+        });
+    }
+    var _exportConfirmInput = document.getElementById('export-pw-confirm-input');
+    if (_exportConfirmInput) {
+        _exportConfirmInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); confirmExport(); }
+        });
+    }
+    // Test hooks: the modal flow is what the tests drive, so expose the two
+    // decisions (plain vs sealed) without a click-through.
+    window.__exportUi = {
+        open: openExportModal,
+        close: closeExportModal,
+        plainChosen: exportPlainChosen,
+        confirm: confirmExport,
+    };
+
+    // Test hooks (R8): the exact seal/open pair and payload builder the modal
     // uses — so the round-trip, the "ciphertext carries no plaintext" property
     // and the "no credentials in the payload" rule are asserted directly.
     window.__exportSealB64 = async function (passphrase, json) {
@@ -7273,113 +7329,171 @@ document.addEventListener('DOMContentLoaded', () => {
         return sodium.to_base64(bytes);
     };
     window.__exportPayload = function () { return _exportPayload(); };
-
-    // ── 5.1: fingerprint unlock (FEATURE_PLAN.md) ──────────────────────
-    // The biometric RELEASES the storage password; nothing else changes. On
-    // enable we wrap the password with a per-operation Keystore key (one
-    // BiometricPrompt) and keep ONLY the ciphertext (`e2e_bio_seal`) — the key
-    // never leaves the enclave and the blob is worthless without a live scan.
-    // The login page then offers "Unlock with fingerprint", which unwraps that
-    // same ciphertext through the same prompt. A failed, cancelled or locked-out
-    // prompt REJECTS and the password form is untouched: there is deliberately
-    // no path that lands in an unlocked state, and the password is always
-    // still accepted (plan: keep the password path as fallback).
-    var BIOMETRIC_SEAL_KEY = 'e2e_bio_seal';
-    var BIOMETRIC_USER_KEY = 'e2e_bio_user';
-
-    // The Android box only: the desktop box has the bridge but no
-    // BiometricPrompt, and a plain browser has neither bridge nor Keystore.
-    function _biometricBridge() {
-        if (!/Android/i.test(navigator.userAgent || '')) return null;
-        var t = window.__TAURI__;
-        return (t && t.core && typeof t.core.invoke === 'function') ? t : null;
-    }
-
-    function _bioSealed() {
-        try { return localStorage.getItem(BIOMETRIC_SEAL_KEY); } catch (_) { return null; }
-    }
-
-    async function biometricStatus() {
-        var enabled = !!_bioSealed();
-        var b = _biometricBridge();
-        if (!b) return { available: false, reason: 'not-android', enabled: enabled };
-        try {
-            var r = await b.core.invoke('plugin:box-shell|biometricAvailable');
-            return { available: !!(r && r.available), reason: r && r.available ? '' : 'no-sensor', enabled: enabled };
-        } catch (e) {
-            return { available: false, reason: 'bridge-error', enabled: enabled };
-        }
-    }
-
-    async function biometricEnable() {
-        var b = _biometricBridge();
-        if (!b) throw new Error('Fingerprint unlock is only available in the Android app.');
-        var st = await biometricStatus();
-        if (!st.available) throw new Error('No fingerprint is set up on this device.');
-        var password = loadDecryptedPassword();
-        if (!password) throw new Error('Sign in with your password first so it can be sealed.');
-        var bytes = new TextEncoder().encode(password);
-        var res = await b.core.invoke('plugin:box-shell|biometricSeal', {
-            mode: 'wrap',
-            data: E2ECrypto.arrayBufferToBase64(bytes),
-        });
-        if (!res || !res.data) throw new Error('The fingerprint prompt was not completed.');
-        try { localStorage.setItem(BIOMETRIC_SEAL_KEY, res.data); } catch (_) {}
-        // The username is not a secret — it just saves typing it again.
-        try { localStorage.setItem(BIOMETRIC_USER_KEY, (user && user.username) || ''); } catch (_) {}
-        return true;
-    }
-
-    async function biometricDisable() {
-        try { localStorage.removeItem(BIOMETRIC_SEAL_KEY); } catch (_) {}
-        try { localStorage.removeItem(BIOMETRIC_USER_KEY); } catch (_) {}
-        return true;
-    }
-
-    async function refreshBiometricUi() {
-        var box = document.getElementById('biometric-unlock-toggle');
-        var line = document.getElementById('biometric-status-line');
-        if (!box) return;
-        var st = await biometricStatus();
-        box.checked = !!st.enabled;
-        box.disabled = !st.available;
-        if (line) {
-            line.textContent = !st.available
-                ? (st.reason === 'not-android'
-                    ? 'Only the Android app can use the phone\u2019s fingerprint sensor.'
-                    : 'No fingerprint is set up on this device.')
-                : (st.enabled
-                    ? 'Enabled \u2014 the login page can unlock with your fingerprint.'
-                    : 'Not enabled.');
-        }
-    }
-
-    var _bioToggle = document.getElementById('biometric-unlock-toggle');
-    if (_bioToggle) {
-        _bioToggle.addEventListener('change', async function () {
-            var want = this.checked;
-            try {
-                if (want) await biometricEnable();
-                else await biometricDisable();
-            } catch (e) {
-                // Failed/cancelled scan: the box goes back to the real state and
-                // the reason stays on screen (refresh FIRST — it rewrites the
-                // status line — then put our message over it).
-                var line = document.getElementById('biometric-status-line');
-                await refreshBiometricUi();
-                if (line) line.textContent = (e && e.message) ? e.message : 'Failed.';
-                return;
-            }
-            refreshBiometricUi();
-        });
-    }
-    refreshBiometricUi();
-    window.__biometric = {
-        status: biometricStatus,
-        enable: biometricEnable,
-        disable: biometricDisable,
-        refresh: refreshBiometricUi,
+    // The plain path, spelled out as bytes: what the download actually contains.
+    window.__exportPlainBytes = async function () {
+        var payload = await _exportPayload();
+        return { text: exportPlainText(payload), filename: 'e2e-chat-export.json' };
     };
+
+    // ── 5.6 (option): "ask for my password after a restart" ─────────────────
+    // The vault always seals the storage key under the password; this setting
+    // only decides whether the device ALSO keeps a copy of that key so a cold
+    // start can open without asking (see VAULT_ASK_KEY in secure-storage.js).
+    // Turning it off is a deliberate reduction in at-rest protection, so it is
+    // confirmed out loud, and turning it back on deletes the key copy
+    // immediately — the vault blob is never touched either way.
+    var _vaultToggle = document.getElementById('vault-ask-password-toggle');
+    var _vaultStatusLine = document.getElementById('vault-prompt-status');
+
+    function refreshVaultPromptUi() {
+        if (typeof window._secVaultStatus !== 'function') return;
+        var st = window._secVaultStatus();
+        if (!st) return;
+        var asks = st.asksPassword !== false;
+        if (_vaultToggle) {
+            _vaultToggle.checked = asks;
+            // Meaningless without a vault — nothing to unlock — so the switch
+            // says so instead of pretending to do something.
+            _vaultToggle.disabled = !st.vault;
+        }
+        if (_vaultStatusLine) {
+            _vaultStatusLine.textContent = !st.vault
+                ? 'This device has no key vault yet — it is created when you sign in.'
+                : (asks
+                    ? 'On — your password is required after a restart, and no readable copy of the key is kept on this device.'
+                    : 'Off — this device keeps the storage key, so a restart opens without your password.');
+            _vaultStatusLine.style.color = (st.vault && !asks) ? 'var(--warning,#f0b232)' : '';
+        }
+    }
+    window.__vaultPrompt = { refresh: refreshVaultPromptUi };
+
+    // ── The password gate on that setting ────────────────────────────────
+    // Flipping the switch is not a flag write: the password is typed into a
+    // modal, checked against THIS device's vault, and everything stored on the
+    // device is then re-encrypted with the key that password releases
+    // (secure-storage.js `_secVaultRequirePassword` / `_secVaultDropRequirement`).
+    // Turning it on takes the key off the device; turning it off keeps that
+    // same key. A wrong password leaves the setting, the key and every stored
+    // value exactly as they were.
+    var _vaultModal = document.getElementById('vault-pw-modal');
+    var _vaultPending = null;      // 'on' | 'off' — what the switch asked for
+
+    function vaultPwError(msg) {
+        var el = document.getElementById('vault-pw-error');
+        if (!el) return;
+        el.textContent = msg || '';
+        el.style.display = msg ? '' : 'none';
+    }
+
+    function openVaultPwModal(direction) {
+        if (!_vaultModal) return false;
+        _vaultPending = direction;
+        var title = document.getElementById('vault-pw-title');
+        var hint = document.getElementById('vault-pw-hint');
+        if (title) title.textContent = direction === 'on' ? 'Require your password after a restart' : 'Open without asking for your password';
+        if (hint) {
+            hint.textContent = direction === 'on'
+                ? 'Your password is checked against this device\u2019s key vault, everything stored here is re-encrypted with the key it releases, and the copy of that key this device keeps is deleted. After this, a new tab or a restart will ask for your password.'
+                : 'Your password is checked against this device\u2019s key vault, everything stored here is re-encrypted with the key it releases, and this device then keeps that key so a restart can open without asking. Anyone who can read this device\u2019s storage will be able to decrypt your stored session without your password.';
+        }
+        var input = document.getElementById('vault-pw-input');
+        if (input) input.value = '';
+        vaultPwError('');
+        _vaultModal.style.display = 'flex';
+        if (input) { try { input.focus(); } catch (_) {} }
+        return true;
+    }
+
+    function closeVaultPwModal() {
+        _vaultPending = null;
+        if (_vaultModal) _vaultModal.style.display = 'none';
+        var input = document.getElementById('vault-pw-input');
+        if (input) input.value = '';
+        vaultPwError('');
+        refreshVaultPromptUi();
+    }
+
+    async function confirmVaultPw() {
+        var input = document.getElementById('vault-pw-input');
+        var btn = document.getElementById('vault-pw-confirm-btn');
+        var pw = input ? input.value : '';
+        if (!pw) { vaultPwError('Enter your password.'); return; }
+        var fn = _vaultPending === 'on' ? window._secVaultRequirePassword : window._secVaultDropRequirement;
+        if (typeof fn !== 'function') { vaultPwError('The vault is not available on this device.'); return; }
+        var label = btn ? btn.innerHTML : '';
+        if (btn) { btn.disabled = true; btn.textContent = 'Checking\u2026'; }
+        vaultPwError('');
+        var res = null;
+        try { res = await fn(pw); } catch (_) { res = null; }
+        if (btn) { btn.disabled = false; btn.innerHTML = label; }
+        if (!res || !res.ok) {
+            vaultPwError(res && res.reason === 'wrong-password'
+                ? 'That password does not open this device\u2019s key vault. Nothing has changed.'
+                : 'Could not change the vault setting on this device. Nothing has changed.');
+            if (input) input.value = '';
+            return;
+        }
+        var wasOn = _vaultPending === 'on';
+        closeVaultPwModal();
+        if (typeof showToast === 'function') {
+            showToast(wasOn
+                ? 'Your password is required after a restart, and this device no longer keeps the key.'
+                : 'This device keeps the key and will open without asking for your password.');
+        }
+    }
+
+    if (_vaultToggle) {
+        refreshVaultPromptUi();
+        _vaultToggle.addEventListener('change', function () {
+            var want = this.checked;
+            if (!openVaultPwModal(want ? 'on' : 'off')) {
+                this.checked = !want;
+                refreshVaultPromptUi();
+            }
+        });
+    }
+    var _vaultPwCancel = document.getElementById('vault-pw-cancel-btn');
+    if (_vaultPwCancel) _vaultPwCancel.addEventListener('click', closeVaultPwModal);
+    var _vaultPwConfirm = document.getElementById('vault-pw-confirm-btn');
+    if (_vaultPwConfirm) _vaultPwConfirm.addEventListener('click', confirmVaultPw);
+    var _vaultPwToggleVis = document.getElementById('toggle-vault-pw');
+    if (_vaultPwToggleVis) {
+        _vaultPwToggleVis.addEventListener('click', function () {
+            var inp = document.getElementById('vault-pw-input');
+            if (!inp) return;
+            var visible = inp.type === 'text';
+            inp.type = visible ? 'password' : 'text';
+            this.innerHTML = visible ? icon('eye') : icon('eye-off');
+            this.classList.toggle('active', !visible);
+        });
+    }
+    var _vaultPwInput = document.getElementById('vault-pw-input');
+    if (_vaultPwInput) {
+        _vaultPwInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); confirmVaultPw(); }
+        });
+    }
+    if (_vaultModal) {
+        _vaultModal.addEventListener('click', function (e) {
+            if (e.target === _vaultModal) closeVaultPwModal();
+        });
+    }
+    // Test hook: drive the same modal the user sees.
+    window.__vaultPromptModal = {
+        open: openVaultPwModal,
+        confirm: confirmVaultPw,
+        close: closeVaultPwModal,
+        isOpen: function () { return !!_vaultModal && _vaultModal.style.display !== 'none'; },
+        pending: function () { return _vaultPending; },
+    };
+
+    // ── 5.1 (removed): fingerprint unlock ───────────────────────────────
+    // Biometric unlock is gone from the app: no seal is written, the login page
+    // offers the password form only, and the vault lock screen unlocks with the
+    // password. Anything an older build left behind (the old `e2e_bio_*` seal
+    // keys, named nowhere else in the codebase) is now wiped with the rest of
+    // the keys by the login page's clear and by the panic wipe, because it is
+    // no longer preserved.
 
     // Security tab - session countdown
     function updateSessionCountdown() {
@@ -11669,102 +11783,38 @@ function startNotifVisualizer(durationMs) {
     draw();
 }
 
-// ── Notification wording: who / where / (what) ───────────────────────────────
-// One place builds every message notification's title + body, so a notification
-// says the same things wherever it is raised from: **who** it is from, and — for
-// a channel — **which channel in which server**. Two things have to blank all of
-// that, and they can only do so reliably if there is a single spot to blank:
+// ── Notification wording: never who, never where, never what ────────────────
+// One place builds every message notification's title + body, so what a
+// notification may say is decided in exactly one spot — and since 0.2.30 that
+// is: "something happened", and nothing else.
 //
-//  * **Streamer mode** — nothing on screen may name who or where;
-//  * **"Hide message content in notifications"** (Settings → Notifications) —
-//    the OS keeps whatever a notification says. On Windows the text lands in
-//    Explorer's notification database, and on a phone in the notification
-//    shade, so a decrypted message preview handed to the OS outlives the app
-//    and is readable by anything with access to the device's notification
-//    store (the exact class of leak behind the "an OS handed over Signal's
-//    notifications" reports). Turning this on keeps decrypted content out of
-//    the OS entirely: the banner says only *that* something happened.
-//
-// While either is on, a notification may say no more than "New message in a
-// server", "New direct message", "Call activity" — no name, no channel, no
-// server, no content — and it still deep-links to the right conversation.
+// The OS keeps whatever a notification says. On Windows the text lands in
+// Explorer's notification database, and on a phone it lands in the notification
+// shade (and on the lock screen); a decrypted message preview handed to the OS
+// outlives the app and is readable by anything with access to the device's
+// notification store — the exact class of leak behind the "an OS handed over
+// Signal's notifications" reports. So no sender name, no channel, no server and
+// no content are ever handed over, on any platform, with no setting to turn it
+// off (the toggle this used to be is gone). The notification still deep-links
+// to the right conversation, and streamer mode still blanks the *screen*.
 function notifContentHidden() {
-    try {
-        return localStorage.getItem('streamerMode') === 'true'
-            || localStorage.getItem('notifHidePreview') === 'true';
-    } catch (_) { return false; }
-}
-
-/**
- * The sender's **plaintext @username** — the one piece of identity a
- * notification is allowed to name.
- *
- * Resolution order: the raiser's own answer, then whatever local (non-E2E)
- * caches know about that user id (DM conversation partner, server member list,
- * self). Display names are deliberately never consulted: a nickname is
- * end-to-end encrypted, so putting it in a notification would hand decrypted
- * E2E data to the operating system.
- */
-function plaintextUsernameFor(userId) {
-    if (!userId) return '';
-    try {
-        if (currentDmOtherUser && currentDmOtherUser.id === userId) return currentDmOtherUser.username || '';
-        for (var i = 0; i < dmConversations.length; i++) {
-            if (dmConversations[i].other_user_id === userId && dmConversations[i].other_username) {
-                return dmConversations[i].other_username;
-            }
-        }
-        for (var j = 0; j < currentServerMemberList.length; j++) {
-            if (currentServerMemberList[j].id === userId && currentServerMemberList[j].username) {
-                return currentServerMemberList[j].username;
-            }
-        }
-        if (typeof user !== 'undefined' && user && user.id === userId && user.username) return user.username;
-    } catch (_) {}
-    return '';
-}
-
-/** The `@username` a notification may show for this sender, or '' when unknown. */
-function notifUsername(o) {
-    o = o || {};
-    var raw = o.username || plaintextUsernameFor(o.userId) || '';
-    return String(raw).replace(/^@/, '').trim();
+    return true;
 }
 
 /**
  * @param {'dm'|'mention'|'reply'|'call'} kind
  * @param {{username?:string, userId?:string, dm?:boolean, text?:string}} o
  *
- * `username` / `userId` name the sender with plaintext metadata only. `dm`
- * only chooses between the two SAFE place words ("a direct message" /
- * "a channel") — it is a boolean, never a name.
+ * The second argument is accepted and deliberately ignored — callers still pass
+ * the sender so the call sites read clearly, but nothing about them can reach
+ * the OS. `kind` only chooses between fixed, name-free sentences.
  */
-function notifText(kind, o) {
-    o = o || {};
-    var who = notifUsername(o);
-    var from = who ? '@' + who : 'Someone';
-    var place = o.dm ? 'a direct message' : 'a channel';
-
-    if (notifContentHidden()) {
-        if (kind === 'call') return { title: 'E2E Chat', body: 'Call activity' };
-        if (kind === 'dm') return { title: 'E2E Chat', body: 'New direct message' };
-        if (kind === 'mention') return { title: 'E2E Chat', body: 'You were mentioned in a server' };
-        if (kind === 'reply') return { title: 'E2E Chat', body: 'New reply in a server' };
-        return { title: 'E2E Chat', body: 'New message in a server' };
-    }
-
-    switch (kind) {
-        case 'dm':
-            return { title: 'New DM from ' + from, body: 'Direct message' };
-        case 'mention':
-            return { title: 'Mentioned by ' + from, body: 'You were mentioned in ' + place };
-        case 'reply':
-            return { title: 'Reply from ' + from, body: 'New reply in ' + place };
-        case 'call':
-            return { title: 'Call from ' + from, body: 'Incoming call' };
-        default:
-            return { title: 'E2E Chat', body: 'New message in ' + place };
-    }
+function notifText(kind) {
+    if (kind === 'call') return { title: 'E2E Chat', body: 'Call activity' };
+    if (kind === 'dm') return { title: 'E2E Chat', body: 'New direct message' };
+    if (kind === 'mention') return { title: 'E2E Chat', body: 'You were mentioned in a server' };
+    if (kind === 'reply') return { title: 'E2E Chat', body: 'New reply in a server' };
+    return { title: 'E2E Chat', body: 'New message in a server' };
 }
 
 // Is this the Android app (rather than a browser or the desktop box)? It is the

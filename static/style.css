@@ -18,6 +18,20 @@
     --success: #4caf50;
     --hover-bg: rgba(79, 195, 247, 0.1);
     --active-bg: rgba(79, 195, 247, 0.18);
+
+    /* ── Aliases the stylesheet already referenced but that were NEVER defined.
+       Every `var(--bg-tertiary)`, `var(--bg-input)`, `var(--border-color)` and
+       `var(--text-secondary)` in inline styles and older rows was therefore
+       resolving to its hard-coded fallback (or to nothing at all), which is
+       why a few settings rows ignored the user's theme colours and looked
+       plain next to the panel around them. They are defined here as live
+       references to the real theme tokens, so a themed background/accent
+       reaches them too — in dark AND light mode (chat.js rewrites
+       --bg-secondary / --bg-border when the theme changes). */
+    --bg-tertiary: var(--bg-secondary);
+    --bg-input: var(--bg-secondary);
+    --border-color: var(--bg-border);
+    --text-secondary: var(--text-muted);
 }
 
 /* ─── Global scrollbar styling ─────────────────────────────────────── */
@@ -3093,7 +3107,14 @@ select.modal-input:focus {
 
 .settings-tabs {
     display: flex;
-    gap: 0;
+    /* Real gaps between the tabs. With the old `gap: 0` plus `flex: 1` the
+       labels were squashed until neighbouring words touched ("Notifica
+       tions"), which read as one word. Tabs keep their natural width now and
+       the strip scrolls if they do not fit. */
+    gap: 6px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
     border-bottom: 1px solid var(--bg-border);
     margin-bottom: 16px;
 }
@@ -3257,15 +3278,18 @@ select.modal-input:focus {
 }
 
 .settings-tab {
-    flex: 1;
+    /* Natural width (never squashed into its neighbour), with breathing room
+       on both sides of every word. */
+    flex: 0 0 auto;
+    white-space: nowrap;
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
     color: var(--text-muted);
-    padding: 10px 0;
+    padding: 10px 12px;
     font-size: 14px;
     cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
     border-radius: 8px 8px 0 0;
 }
 .settings-tab:hover {
@@ -3299,6 +3323,128 @@ select.modal-input:focus {
     margin-bottom: 12px;
     line-height: 1.4;
 }
+
+/* ── Settings controls (0.2.30) ───────────────────────────────────────────
+   Rows added over the last few batches styled themselves inline and with the
+   browser's default widgets, which is why a few of them read as plain next to
+   the toggle-slider rows around them. These rules are the shared look: any
+   checkbox, text/number field or select inside a settings panel gets it with
+   no per-row styling. `.settings-toggle` is deliberately excluded — its input
+   is hidden and its `.toggle-slider` is the visible control. */
+.settings-panel label:not(.settings-toggle) > input[type="checkbox"],
+.settings-panel label:not(.settings-toggle) input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    margin: 0;
+    border: 1px solid var(--bg-border);
+    border-radius: 5px;
+    background: var(--bg-input, var(--bg-tertiary));
+    cursor: pointer;
+    position: relative;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+.settings-panel label:not(.settings-toggle) input[type="checkbox"]:hover {
+    border-color: var(--accent);
+}
+.settings-panel label:not(.settings-toggle) input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.settings-panel label:not(.settings-toggle) input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 6px;
+    top: 2px;
+    width: 4px;
+    height: 9px;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+.settings-panel label:not(.settings-toggle) input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* One look for every field in the panel: matches the toggle rows' height and
+   the panel's own colours instead of the browser default. */
+.settings-field {
+    display: block;
+    width: 100%;
+    max-width: 280px;
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: var(--bg-input, var(--bg-tertiary));
+    color: var(--text-primary);
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    line-height: 1.3;
+    box-sizing: border-box;
+}
+.settings-field:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.settings-field-narrow { max-width: 110px; }
+select.settings-field { cursor: pointer; }
+
+/* A checkbox row: the visible control is the checkbox itself (styled above), so
+   the row only has to lay it out. */
+.settings-check {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+    user-select: none;
+    line-height: 1.4;
+}
+.settings-row-label {
+    font-size: 13px;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+
+/* Small label above a field, and the panel's own sub-headings. */
+.settings-field-label {
+    display: block;
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.settings-subhead {
+    margin-top: 14px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+.settings-subhead span {
+    color: var(--text-muted);
+    font-weight: 400;
+}
+
+/* The test/reset buttons the haptics rows carry, at the panel's scale. */
+.settings-small-btn {
+    margin-top: 8px;
+    margin-left: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--bg-border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+}
+.settings-small-btn:first-of-type { margin-left: 0; }
+.settings-small-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Session & Security Log (Settings → Security) */
 .session-log-list {

@@ -30,7 +30,6 @@ class StartArgs {
 
 @InvokeArg
 class IncomingCallArgs {
-    var callerName: String? = null
     var dmChannelId: String? = null
 
     /**
@@ -41,16 +40,6 @@ class IncomingCallArgs {
      * app's default ring pattern is used, so the ring still buzzes.
      */
     var vibratePattern: List<Int>? = null
-
-    /**
-     * F2 (FEATURE_PLAN.md): honour the page's "hide message content in
-     * notifications" preference (notifContentHidden). When true, the ring is
-     * posted WITHOUT the caller's name and at lock-screen visibility PRIVATE,
-     * so the identity never reaches the lock screen or Android's notification
-     * history — the durable OS-held copies the FBI recovered Signal previews
-     * from. Null/absent (older cached page) keeps the named ring.
-     */
-    var hideIdentity: Boolean? = null
 }
 
 /**
@@ -513,14 +502,14 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun incomingCall(invoke: Invoke) {
         val args = invoke.parseArgs(IncomingCallArgs::class.java)
         try {
+            // F2: no caller name is passed in (the page no longer sends one),
+            // and the notifier has no named branch left — the ring names nobody.
             IncomingCallNotifier.show(
                 activity,
-                args.callerName ?: "Someone",
                 args.dmChannelId ?: "",
                 // `List<Int>` has no toLongArray() — every pattern is in ms, well
                 // inside Int, and VibrationEffect wants longs.
-                args.vibratePattern?.map { it.toLong() }?.toLongArray() ?: DEFAULT_RING_PATTERN,
-                args.hideIdentity == true
+                args.vibratePattern?.map { it.toLong() }?.toLongArray() ?: DEFAULT_RING_PATTERN
             )
             // 2.3: while ringing the tile offers a way in — id only, never the
             // caller's name (R1: tile labels are static strings).

@@ -331,30 +331,6 @@
           "markdownDescription": "Denies the batteryStatus command without any pre-configured scope."
         },
         {
-          "description": "Enables the biometricAvailable command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-biometricAvailable",
-          "markdownDescription": "Enables the biometricAvailable command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the biometricAvailable command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-biometricAvailable",
-          "markdownDescription": "Denies the biometricAvailable command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the biometricSeal command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-biometricSeal",
-          "markdownDescription": "Enables the biometricSeal command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the biometricSeal command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-biometricSeal",
-          "markdownDescription": "Denies the biometricSeal command without any pre-configured scope."
-        },
-        {
           "description": "Enables the captionsAvailable command without any pre-configured scope.",
           "type": "string",
           "const": "allow-captionsAvailable",
@@ -523,10 +499,10 @@
           "markdownDescription": "Denies the vibrate command without any pre-configured scope."
         },
         {
-          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-audioRoutes`\n- `allow-setAudioRoute`\n- `allow-biometricAvailable`\n- `allow-biometricSeal`\n- `allow-sharedPending`\n- `allow-sharedRead`\n- `allow-sharedDiscard`\n- `allow-captionsAvailable`\n- `allow-captionsStart`\n- `allow-captionsStop`",
+          "description": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-audioRoutes`\n- `allow-setAudioRoute`\n- `allow-sharedPending`\n- `allow-sharedRead`\n- `allow-sharedDiscard`\n- `allow-captionsAvailable`\n- `allow-captionsStart`\n- `allow-captionsStop`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-audioRoutes`\n- `allow-setAudioRoute`\n- `allow-biometricAvailable`\n- `allow-biometricSeal`\n- `allow-sharedPending`\n- `allow-sharedRead`\n- `allow-sharedDiscard`\n- `allow-captionsAvailable`\n- `allow-captionsStart`\n- `allow-captionsStop`"
+          "markdownDescription": "\nFull-screen shell behaviour on Android: hide the status and navigation bars\n(revealed transiently by a swipe, for as long as the page asks to stay\nimmersive), route the hardware Back button to the page instead of closing the\napp, and close the app when the page has nothing left to close.\n\nPlus the device duties the WebView cannot perform for itself: buzz the phone's\nreal vibrator (`vibrate` — Chromium dropped the Vibration API on Android, so\n`navigator.vibrate` is present and silently does nothing inside the app), and\ndismiss every notification except an ongoing call's (`clearNotifications`).\n\nPlus call comfort: keep the screen on for the length of a call\n(`keepScreenOn`), and ask the system — once, in Android's own dialog — to\nexempt the app from battery optimizations (`batteryStatus`/`batteryRequest`),\nwhich is what stops Doze from quietly ending an ongoing call.\n\n#### This default permission set includes:\n\n- `allow-enterImmersive`\n- `allow-exitImmersive`\n- `allow-setBackHandler`\n- `allow-exit`\n- `allow-vibrate`\n- `allow-clearNotifications`\n- `allow-keepScreenOn`\n- `allow-batteryStatus`\n- `allow-batteryRequest`\n- `allow-audioRoutes`\n- `allow-setAudioRoute`\n- `allow-sharedPending`\n- `allow-sharedRead`\n- `allow-sharedDiscard`\n- `allow-captionsAvailable`\n- `allow-captionsStart`\n- `allow-captionsStop`"
         }
       ]
     }

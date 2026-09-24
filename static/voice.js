@@ -1402,15 +1402,13 @@
         var args = {};
         if (action === 'incomingCall') {
             args = {
-                callerName: (call && call.callerUsername) || 'Someone',
+                // F2 (FEATURE_PLAN.md), now unconditional: no caller name and
+                // no hide-identity flag are sent at all. Kotlin posts a
+                // name-free card at lock-screen visibility PRIVATE, so the
+                // caller's identity never reaches the lock screen or Android's
+                // notification history — and there is nothing left for a
+                // cached page or a modified client to override it with.
                 dmChannelId: (call && call.dmChannelId) || '',
-                // F2 (FEATURE_PLAN.md): the native ring honours the same
-                // "hide message content" preference as the web funnel
-                // (notifContentHidden). When set, Kotlin posts a name-free
-                // card at lock-screen visibility PRIVATE instead of naming the
-                // caller on the lock screen and in Android's notification
-                // history.
-                hideIdentity: (typeof notifContentHidden === 'function') ? !!notifContentHidden() : false,
                 // The phone's own notification is what buzzes while the app is in
                 // the background, and a notification channel's vibration pattern
                 // is FIXED when the channel is created (Android: "you can't change

@@ -93,10 +93,80 @@ test.describe('encrypted local export (5.5)', () => {
         expect(out.shape.hasConversations).toBe(true);
     });
 
-    test('the settings UI exposes the export controls', async ({ page }) => {
+    test('the settings UI offers the export with or without a passphrase', async ({ page }) => {
         await register(page, unique('expui'));
-        const ids = await page.evaluate(() => ['export-passphrase', 'export-passphrase-confirm', 'export-data-btn', 'export-status']
-            .map((id) => !!document.getElementById(id)));
-        expect(ids).toEqual([true, true, true, true]);
+
+        const out = await page.evaluate(() => {
+            const w = window as any;
+            const fields = document.getElementById('export-pw-fields') as HTMLElement;
+            const note = document.getElementById('export-pw-nopw-note') as HTMLElement;
+            const nopw = document.getElementById('export-pw-nopw') as HTMLInputElement;
+            // Trigger opens the modal with encryption ON by default…
+            (document.getElementById('export-data-btn') as HTMLButtonElement).click();
+            const opened = {
+                modalVisible: (document.getElementById('export-pw-modal') as HTMLElement).style.display !== 'none',
+                fieldsShown: fields.style.display !== 'none',
+                noteHidden: note.style.display === 'none',
+                plainDefault: nopw.checked,
+            };
+            // …and ticking the box swaps the passphrase fields for the warning.
+            nopw.checked = true;
+            nopw.dispatchEvent(new Event('change', { bubbles: true }));
+            const plainMode = {
+                fieldsHidden: fields.style.display === 'none',
+                noteShown: note.style.display !== 'none',
+                noteText: note.textContent || '',
+            };
+            (document.getElementById('export-pw-cancel-btn') as HTMLButtonElement).click();
+            return {
+                opened,
+                plainMode,
+                // The single old inline passphrase form is gone.
+                legacyInputs: ['export-passphrase', 'export-passphrase-confirm'].filter((id) => !!document.getElementById(id)).length,
+                ids: ['export-data-btn', 'export-status', 'export-pw-confirm-btn'].map((id) => !!document.getElementById(id)),
+                exposedApi: typeof w.__exportUi,
+            };
+        });
+
+        expect(out.opened).toEqual({ modalVisible: true, fieldsShown: true, noteHidden: true, plainDefault: false });
+        expect(out.plainMode.fieldsHidden).toBe(true);
+        expect(out.plainMode.noteShown).toBe(true);
+        // The warning has to SAY it is not encrypted — the point of the option.
+        expect(out.plainMode.noteText).toContain('not encrypted');
+        expect(out.legacyInputs).toBe(0);
+        expect(out.ids).toEqual([true, true, true]);
+        expect(out.exposedApi).toBe('object');
+    });
+
+    test('the unencrypted choice really is plain, and says so inside the file', async ({ page }) => {
+        await register(page, unique('expplain'));
+
+        const out = await page.evaluate(async () => {
+            const w = window as any;
+            const plain = await w.__exportPlainBytes();
+            let parsed: any = null;
+            try { parsed = JSON.parse(plain.text); } catch (_) {}
+            // The SAME payload through the encrypted path must not be readable.
+            const sealed = await w.__exportSealB64('testpass1234', parsed || {});
+            const sealedBytes: Uint8Array = w.sodium.from_base64(sealed);
+            let sealedRaw = '';
+            for (let i = 0; i < sealedBytes.length; i++) sealedRaw += String.fromCharCode(sealedBytes[i]);
+            return {
+                filename: plain.filename,
+                parsed: !!parsed,
+                marker: parsed && parsed.encrypted,
+                note: (parsed && parsed.note) || '',
+                sealedLeaksJson: sealedRaw.includes('"encrypted"'),
+                sealedHasMagic: sealedRaw.startsWith('E2EXP1\0'),
+            };
+        });
+
+        expect(out.filename).toBe('e2e-chat-export.json');
+        expect(out.parsed).toBe(true);
+        expect(out.marker).toBe(false);
+        expect(out.note).toContain('UNENCRYPTED');
+        // Opposite direction: the sealed file carries no readable JSON at all.
+        expect(out.sealedLeaksJson).toBe(false);
+        expect(out.sealedHasMagic).toBe(true);
     });
 });
