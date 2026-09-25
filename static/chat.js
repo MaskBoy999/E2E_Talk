@@ -28286,10 +28286,23 @@ function showContextDownloadMenu(e, src, label, filename, mimeType, onClick) {
 // ---------------------------------------------------------------------------
 // Copy message media / attachments to the clipboard
 // ---------------------------------------------------------------------------
-// Chrome only accepts a small set of clipboard image types (image/png above
-// all), so non-PNG images are re-encoded through a canvas first. Everything
-// else is attempted with its real MIME type; if the browser refuses we say so
-// honestly instead of silently doing nothing.
+// Three mechanisms, because no single one covers every file:
+//
+//  * **Images** go through the page's own clipboard (`navigator.clipboard`), so
+//    a pasted sticker arrives as a picture in an editor instead of as a file.
+//    Chrome takes only a small set of image types (image/png above all), so any
+//    other image is re-encoded through a canvas first.
+//  * **Every other type** is handed to the shell (`copyFileToOsClipboard`). The
+//    async Clipboard API accepts text/plain, text/html and image/png and
+//    nothing else — `clipboard.write()` with a real file type is refused *by the
+//    engine*, which is what the old "this browser only allows images" message
+//    was really reporting. A file needs a platform format (Windows CF_HDROP, the
+//    macOS file pasteboard, X11/Wayland text/uri-list, an Android FileProvider
+//    URI) and only native code can build one.
+//  * **A plain browser** — the app opened from the server in a normal browser,
+//    with no shell behind it — can do neither for a file, so it says exactly
+//    that and points at Save a copy. A silent no-op would look like a broken
+//    button.
 function clipboardImageSupported() {
     return !!(navigator.clipboard && window.ClipboardItem);
 }
@@ -28312,27 +28325,85 @@ function blobToPngBlob(blob) {
     });
 }
 
-async function copyBlobToClipboard(blob, label) {
-    if (!clipboardImageSupported()) {
-        showToast('This browser cannot copy files to the clipboard');
-        return false;
-    }
-    var type = blob.type || 'application/octet-stream';
-    if (type.indexOf('image/') === 0 && type !== 'image/png') {
-        var png = await blobToPngBlob(blob);
-        if (png) { blob = png; type = 'image/png'; }
-    }
+// Ask the shell to put the decrypted file on the OS clipboard.
+//
+// A file on the clipboard *is* a path on every platform, so the shell writes
+// the bytes into the app's own cache directory and hands the path over in the
+// platform's file format. Returns true only when the OS took it — the caller
+// keeps a visible fallback, so a refusal is never silent.
+async function copyFileToOsClipboard(blob, filename, mime) {
+    var t = window.__TAURI__;
+    if (!t || !t.core || typeof t.core.invoke !== 'function') return false;
+    var name = filename || 'attachment';
     try {
-        var item = {};
-        item[type] = blob;
-        await navigator.clipboard.write([new ClipboardItem(item)]);
-        showToast((label || (type.indexOf('image/') === 0 ? 'Image' : 'File')) + ' copied to clipboard');
+        if (isAndroidBox()) {
+            // Android has no request-body IPC, so the bytes travel base64 and
+            // the Kotlin half writes them to its cache and shares them through
+            // the app's FileProvider — a clipboard *URI* is what an Android
+            // paste reads.
+            await t.core.invoke('plugin:box-shell|copyFileToClipboard', {
+                name: name,
+                mime: mime || 'application/octet-stream',
+                data: E2ECrypto.arrayBufferToBase64(await blob.arrayBuffer()),
+            });
+        } else {
+            // Desktop sends one raw body — [u32 LE name length][name][bytes] —
+            // so a large attachment is not base64'd, re-parsed and copied three
+            // times on the way to disk. The name rides in the body rather than
+            // in a header because an attachment name is arbitrary text and a
+            // header is not.
+            var nameBytes = new TextEncoder().encode(name);
+            var head = new Uint8Array(4);
+            new DataView(head.buffer).setUint32(0, nameBytes.length, true);
+            var data = new Uint8Array(await blob.arrayBuffer());
+            var body = new Uint8Array(4 + nameBytes.length + data.length);
+            body.set(head, 0);
+            body.set(nameBytes, 4);
+            body.set(data, 4 + nameBytes.length);
+            await t.core.invoke('plugin:box-shell|copyFileToClipboard', body);
+        }
         return true;
     } catch (err) {
-        console.warn('Clipboard write failed:', err);
-        showToast('Could not copy that file type — this browser only allows images');
+        console.warn('Native clipboard copy failed:', err);
         return false;
     }
+}
+
+// Copy a blob to the clipboard under its own name.
+async function copyBlobToClipboard(blob, label, filename, mime) {
+    var type = blob.type || mime || 'application/octet-stream';
+    var name = filename || ('copied.' + (type.split('/')[1] || 'bin'));
+
+    // Images first: the page's own clipboard makes a paste arrive as a picture
+    // (which is what a sticker is for), and PNG is a type the engine accepts.
+    if (type.indexOf('image/') === 0 && clipboardImageSupported()) {
+        var imgBlob = blob;
+        var imgType = type;
+        if (imgType !== 'image/png') {
+            var png = await blobToPngBlob(blob);
+            if (png) { imgBlob = png; imgType = 'image/png'; }
+        }
+        try {
+            var item = {};
+            item[imgType] = imgBlob;
+            await navigator.clipboard.write([new ClipboardItem(item)]);
+            showToast((label || 'Image') + ' copied to clipboard');
+            return true;
+        } catch (err) {
+            // Not fatal: an image is still a file, and the shell can copy it as
+            // one. Fall through.
+            console.warn('Image clipboard write failed:', err);
+        }
+    }
+
+    if (await copyFileToOsClipboard(blob, name, type)) {
+        showToast('"' + name + '" copied to clipboard — paste it anywhere');
+        return true;
+    }
+
+    showToast('Copying a file to the clipboard needs the app — this browser only allows images. ' +
+        'Use "Save a copy" to download "' + name + '" instead');
+    return false;
 }
 
 // Right-click a rendered image (sticker / GIF / file preview) → copy its bytes.
@@ -28342,7 +28413,7 @@ async function copyImageElementToClipboard(imgEl, label) {
     try {
         var res = await fetch(src);
         if (!res.ok) throw new Error('fetch ' + res.status);
-        await copyBlobToClipboard(await res.blob(), label);
+        await copyBlobToClipboard(await res.blob(), label, label);
     } catch (err) {
         console.warn('Copy image failed:', err);
         showToast('Could not copy that image');
@@ -28362,7 +28433,7 @@ async function copyAttachmentToClipboard(card) {
         if (!key) { try { key = await recoverAttachmentFileKey(fileId, card); } catch (_) {} }
         if (!key) throw new Error('file key unavailable');
         var blob = await downloadAndDecryptFile(fileId, key, mime, size);
-        await copyBlobToClipboard(blob, (mime.indexOf('image/') === 0 ? 'Image "' + filename + '"' : 'File "' + filename + '"'));
+        await copyBlobToClipboard(blob, (mime.indexOf('image/') === 0 ? 'Image "' + filename + '"' : 'File "' + filename + '"'), filename, mime);
     } catch (err) {
         console.warn('Copy attachment failed:', err);
         showToast('Could not copy "' + filename + '"');

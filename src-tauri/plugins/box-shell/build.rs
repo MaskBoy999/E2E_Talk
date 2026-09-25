@@ -20,6 +20,11 @@ const COMMANDS: &[&str] = &[
     "captionsAvailable",
     "captionsStart",
     "captionsStop",
+    // Attachments (copy any file type to the OS clipboard). The WebView's own
+    // clipboard API takes images and text only, so a real file has to go through
+    // the shell: Windows CF_HDROP / macOS pasteboard / X11 text-uri-list in
+    // Rust, ClipData + FileProvider in Kotlin. One command name for both.
+    "copyFileToClipboard",
 ];
 
 fn main() {

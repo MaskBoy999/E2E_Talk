@@ -13,3 +13,16 @@ tauri-plugin = { version = "2", features = ["build"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+
+# Windows-only: the clipboard file list (`CF_HDROP`) that `src/clipboard.rs`
+# builds. Every one of these features is the module that declares a call already
+# used by the clipboard code — no new crate is added to the tree (the `windows`
+# crate is already there for `toast.rs`/`win_webview.rs` in the app crate).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+] }

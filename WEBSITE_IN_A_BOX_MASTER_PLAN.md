@@ -1902,3 +1902,24 @@ tests green across the new and modified suites; the only reds are the three
 re-proven pre-existing failures (voice-fullscreen ×2, dm-call-volume reset) —
 stash-to-HEAD proof included in PROGRESS.md. `MANUAL_TESTING.md` gained
 sections 13–19 covering every feature in this release for on-device passes.
+
+### 13.16 Copying *any* file type to the clipboard — v0.2.30
+
+*Copy file* on an attachment used to answer "this browser only allows images" —
+true, and unfixable in the page: Chromium takes `text/plain`, `text/html` and
+`image/png` from the async Clipboard API and refuses everything else inside the
+engine. A clipboard file is a **path**, so the copy moved to the shell, behind the
+existing `plugin:box-shell|copyFileToClipboard` command:
+
+| platform | format | notes |
+|---|---|---|
+| Windows | `CF_HDROP` | real `DROPFILES` + UTF-16 list; no process spawn |
+| macOS | file pasteboard | `osascript` `POSIX file`, unelevated |
+| Linux | `text/uri-list` | `wl-copy`, else `xclip`; neither ⇒ honest error |
+| Android | `ClipData` URI | `FileProvider`, already in the generated manifest |
+
+The page routes **only non-images** to the shell; images keep using the page's own
+clipboard so a sticker still pastes as a picture. The bytes land in
+`<app cache>/clipboard/` — the app's own cache dir, one file at a time (a new copy
+deletes the old, and startup clears the folder), under a sanitised name, with **no
+read path**, so no page can use the clipboard to get at what the host copied.

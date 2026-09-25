@@ -362,6 +362,15 @@ not a missing feature:
   the composer via a FIFO that's consumed once (empty FIFO = no-op)
 - **Drag files out** (desktop) — drag an attachment to your desktop; the app
   hands the OS a download handle reusing the Save-as decryption (no new trust)
+- **Copy any file to the clipboard** — right-click an attachment → *Copy file*
+  puts the real decrypted file on your system clipboard, whatever its type (an
+  `.exe`, `.zip`, `.pdf`). The app writes it into its own cache folder under its
+  real name and hands the OS a file reference (Windows `CF_HDROP`, the macOS
+  file pasteboard, X11/Wayland `text/uri-list`, an Android provider URI), because
+  a browser's clipboard API accepts images and text only. One copy exists at a
+  time — the next copy and the next launch delete the previous file — and there
+  is deliberately **no** "paste a file from the clipboard": reading the host's
+  clipboard would let any page in the app window see what you copied there
 - **Photo/video editing** before send, **document preview**, image/video
   media previews with manual-load mode
 - **Stickers & GIFs** — own sticker tab with upload, editable stickers (live

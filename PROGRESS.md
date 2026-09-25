@@ -8528,3 +8528,54 @@ routes, captions/biometric commands, FLAG_SECURE removal),
 `tests/{batch-b,captions,biometric-unlock,panic-wipe,key-vault,local-search,device-verify,encrypted-export,network-awareness,drag-out,android-plugin-startup}.spec.ts`
 + the auth/blob/backup spec updates.
 
+## Session: copy *any* file type to the clipboard — v0.2.30
+
+**The report:** right-clicking an attachment and choosing *Copy file* answered
+**"Could not copy that file type — this browser only allows images"**. The
+message was accurate, which is exactly why it could not be fixed inside the page:
+Chromium's async Clipboard API accepts `text/plain`, `text/html` and `image/png`
+and refuses every other type *in the engine*. A file on the clipboard is a
+**path** on every platform, so the copy has to leave the WebView.
+
+**What shipped:** one command, `plugin:box-shell|copyFileToClipboard`, with a
+native half per platform.
+
+* **Windows** — a real `CF_HDROP`: a `DROPFILES` header (`fWide`, so UTF-16
+  paths) plus a double-null-terminated list, `GlobalAlloc`ed and handed to
+  `SetClipboardData`. No process is spawned.
+* **macOS** — the file pasteboard via `osascript`
+  (`set the clipboard to (POSIX file …)`), unelevated, one literal path argument.
+* **Linux** — `wl-copy --type text/uri-list`, else
+  `xclip -selection clipboard -t text/uri-list`. A machine with neither gets an
+  error that names *Save a copy* rather than a silent no-op.
+* **Android** — `ClipData.newUri` with a `FileProvider` URI (the provider and its
+  `cache-path` are already in the generated manifest), which is what an Android
+  paste reads.
+
+**The cost, stated plainly:** a clipboard entry points at a file that must still
+exist when the user pastes, so the decrypted bytes are written into
+`<app cache>/clipboard/`. Contained on purpose: the app's **own cache dir** (not a
+shared temp folder), **one entry at a time** (each copy deletes the previous
+file; startup empties the folder), a **sanitised** name (`safe_name` strips
+separators, traversal and control characters and bounds the length — the name
+comes from a message, so it is untrusted input, and a property test pins it), and
+**no read path at all**: there is no "paste a file" command, so a page in the
+WebView cannot use the clipboard to read back what the host copied.
+
+**Payload:** desktop sends one raw IPC body,
+`[u32 LE name length][name][bytes]` — otherwise a 25 MB attachment would be
+base64'd, JSON-parsed and copied three times on its way to disk. Android has no
+request-body IPC, so it sends base64 (`{name,mime,data}`) and the Kotlin half
+decodes it. Both shapes are the same command name under the same ACL entry.
+
+**Verified:** `cargo test -p tauri-plugin-box-shell` 3/3, including a
+**real-clipboard round trip** on Windows (`SetClipboardData` → `GetClipboardData`
++ `DragQueryFileW`, the format Explorer pastes from), confirmed independently with
+`Get-Clipboard -Format FileDropList`, which returned the exact copied path.
+Kotlin `compileReleaseKotlin` for both plugins. New
+`tests/clipboard-file.spec.ts` (5): the page hands a non-image file to the shell
+with its name and *exact* bytes, a plain browser gets an honest refusal that names
+the file, images keep the page clipboard path (so a sticker still pastes as a
+picture), both plugin halves plus the ACL declare the command, and the clipboard
+stays write-only.
+

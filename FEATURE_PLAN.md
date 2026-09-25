@@ -5,7 +5,15 @@ build"*; this one answers *"what does each thing actually mean, can it ship
 without breaking encryption, and where would an attacker get at it"*. Every
 verdict below was checked against the code as it stands, not assumed.
 
-Research date: 2026-09-23 · box at v0.2.29.
+Research date: 2026-09-23 · box at v0.2.30.
+
+> **v0.2.30 (attachments):** *Copy file* now puts **any** file type on the OS
+> clipboard. The page routes non-images to `plugin:box-shell|copyFileToClipboard`
+> (Rust: `CF_HDROP` / macOS pasteboard / X11 `text/uri-list`; Kotlin: `ClipData`
+> + `FileProvider`); images keep the page's own clipboard path. The file is
+> written to `<app cache>/clipboard/` one at a time, under a sanitised name, with
+> no read path (see PROGRESS.md, master plan §13.16, MANUAL_TESTING.md §20).
+> `npm test`: see `tests/clipboard-file.spec.ts`.
 
 ---
 

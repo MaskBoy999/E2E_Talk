@@ -34,6 +34,7 @@ which is what stops Doze from quietly ending an ongoing call.
 - `allow-captionsAvailable`
 - `allow-captionsStart`
 - `allow-captionsStop`
+- `allow-copyFileToClipboard`
 
 ## Permission Table
 
@@ -222,6 +223,32 @@ Enables the clearNotifications command without any pre-configured scope.
 <td>
 
 Denies the clearNotifications command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-copyFileToClipboard`
+
+</td>
+<td>
+
+Enables the copyFileToClipboard command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-copyFileToClipboard`
+
+</td>
+<td>
+
+Denies the copyFileToClipboard command without any pre-configured scope.
 
 </td>
 </tr>

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-copyFileToClipboard"
+description = "Enables the copyFileToClipboard command without any pre-configured scope."
+commands.allow = ["copyFileToClipboard"]
+
+[[permission]]
+identifier = "deny-copyFileToClipboard"
+description = "Denies the copyFileToClipboard command without any pre-configured scope."
+commands.deny = ["copyFileToClipboard"]

@@ -23,4 +23,7 @@ permissions = [
     "allow-captionsAvailable",
     "allow-captionsStart",
     "allow-captionsStop",
+    # Attachments: put a decrypted file on the OS clipboard under its real name
+    # and type (the WebView's clipboard API only accepts images).
+    "allow-copyFileToClipboard",
 ]

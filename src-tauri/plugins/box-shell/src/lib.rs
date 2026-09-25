@@ -53,10 +53,68 @@ use tauri::Runtime;
 #[cfg(target_os = "android")]
 const PLUGIN_IDENTIFIER: &str = "com.e2echat.boxshell";
 
+/// Desktop-only: putting a *file* on the OS clipboard, which the WebView cannot
+/// do for itself. See the module docs for why it has to exist at all.
+#[cfg(not(target_os = "android"))]
+mod clipboard;
+
+/// Put a decrypted attachment on the OS clipboard.
+///
+/// One command name, two platforms: on Android the same call is handled by the
+/// Kotlin half (`ClipData` + the app's `FileProvider`), which is why this one is
+/// written in the plugin and declared in `build.rs` — a plugin command is
+/// reachable from the remote app page through the `box-shell:default`
+/// capability, while an *app* command is refused to a remote origin (see
+/// `grant_remote_ipc` in the app crate).
+///
+/// The payload is the raw request body, not JSON: `[u32 LE name length][name
+/// UTF-8][file bytes]`. An attachment may be hundreds of megabytes, and a
+/// base64 string inside a JSON argument would mean two extra full-size copies
+/// (and a JSON parse) on the way to disk for no benefit. The length-prefixed
+/// name avoids sending it as a header, which would need its own escaping rules.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+#[allow(non_snake_case)]
+fn copyFileToClipboard<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("copyFileToClipboard: expected the raw request body".to_string());
+    };
+    let (name, bytes) = split_body(body)?;
+    clipboard::copy_file(&app, name, bytes)?;
+    Ok(())
+}
+
+/// Split the raw body described on [`copyFileToClipboard`].
+#[cfg(not(target_os = "android"))]
+fn split_body(body: &[u8]) -> Result<(&str, &[u8]), String> {
+    if body.len() < 4 {
+        return Err("copyFileToClipboard: body is too short to hold a name".to_string());
+    }
+    let len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    if body.len() < 4 + len {
+        return Err(format!(
+            "copyFileToClipboard: body is {} bytes but claims a {len}-byte name",
+            body.len()
+        ));
+    }
+    let name = std::str::from_utf8(&body[4..4 + len])
+        .map_err(|_| "copyFileToClipboard: name is not UTF-8".to_string())?;
+    Ok((name, &body[4 + len..]))
+}
+
 /// Register the plugin. Call from `tauri::Builder::plugin(…)`.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    Builder::<R, ()>::new("box-shell")
-        .setup(|_app, api| {
+    let builder = Builder::<R, ()>::new("box-shell");
+    // Desktop (and only desktop) adds a Rust command. On Android the clipboard
+    // half is Kotlin — registering a Rust handler for the same name there would
+    // shadow it, so the handler is compiled out instead of branched at runtime.
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![copyFileToClipboard]);
+    builder
+        .setup(|app, api| {
             #[cfg(target_os = "android")]
             api.register_android_plugin(PLUGIN_IDENTIFIER, "BoxShellPlugin")
                 // A failure here is fatal for the feature and must not look like
@@ -64,7 +122,13 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 // instead of silently dropping every later invoke.
                 .map_err(|e| format!("box-shell: could not register the Android plugin: {e}"))?;
             #[cfg(not(target_os = "android"))]
-            let _ = &api;
+            {
+                let _ = &api;
+                // A clipboard entry is a *path*, so a copy made in an earlier
+                // launch is a decrypted attachment sitting in the cache dir with
+                // nothing on the clipboard left to explain it. Start empty.
+                clipboard::clear(app);
+            }
             Ok(())
         })
         .build()

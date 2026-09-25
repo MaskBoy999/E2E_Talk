@@ -486,3 +486,45 @@ command's absence).
 `HEAD` as well (verified by stashing the working-tree changes and re-running).
 They are about display-name propagation after a server join, not about keys or
 the vault. Everything else listed in `FEATURE_PLAN.md` §5 is green.
+
+---
+
+## 20. Copying any file type to the clipboard (0.2.30)
+
+What changed: *Copy file* on an attachment of any type now really puts that file
+on your computer's clipboard (before, anything that was not an image was refused —
+"this browser only allows images"). Nothing to turn on.
+
+**Do:** send or open a message with a file that is **not** an image (an `.exe`,
+`.zip`, `.pdf`, anything).
+Right-click the attachment → **Copy file**.
+**Expect:** a toast: `"<name>" copied to clipboard — paste it anywhere`.
+
+**Do:** now paste somewhere that accepts a file — a folder in Explorer/Files, the
+attach field of an email, a chat app's attach field.
+**Expect:** the actual file appears, under its real name and with the same size.
+
+**Do:** the same with an **image** attachment → **Copy image**.
+**Expect:** `Image "<name>" copied to clipboard`, and pasting into an image editor
+inserts the *picture* (a copy of an image is still a picture, not a file path).
+
+**Do:** copy file **A**, then copy file **B**, then paste.
+**Expect:** only **B** pastes. A clipboard entry is a pointer at a real file, so
+only the newest copy exists on disk at any time.
+
+**Do:** open the same address in a normal browser (no app) and *Copy file* on a
+non-image.
+**Expect:** an honest toast that names the file, says copying a file needs the app,
+and points at **Save a copy**. Nothing is silently ignored.
+
+**Do (Android):** *Copy file* on a non-image attachment, then paste into another
+app (or Files by Google).
+**Expect:** the file itself is pasted; Android hands it over as a read-only
+provider URI, so the receiving app may ask for access once. Files over 25 MB are
+refused with a message that says so (a clipboard copy is a paste, not a transfer).
+
+**Worth knowing:** to make a paste work, the decrypted file has to exist on disk
+for as long as the clipboard holds it. It goes in the app's own cache folder,
+only one at a time, and is deleted on the next copy or the next launch. There is
+deliberately no *paste a file from the clipboard* feature — reading the host's
+clipboard would let any page in the app window see whatever you copied there.

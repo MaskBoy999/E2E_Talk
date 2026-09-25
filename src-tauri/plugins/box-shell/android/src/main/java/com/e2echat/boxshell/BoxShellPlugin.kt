@@ -3,6 +3,8 @@ package com.e2echat.boxshell
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -27,6 +29,7 @@ import android.view.Window
 import android.view.WindowManager
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -98,6 +101,21 @@ class AudioRouteArgs {
 @InvokeArg
 class SharedReadArgs {
     var index: Int = -1
+}
+
+/**
+ * Arguments for `copyFileToClipboard`: the file's real name, its MIME type, and
+ * the decrypted bytes as base64.
+ *
+ * Base64 (and not a raw body) because Android's IPC has no request body — the
+ * desktop half of this same command reads the bytes raw, and the page picks the
+ * shape for the platform it is running on.
+ */
+@InvokeArg
+class CopyFileArgs {
+    var name: String? = null
+    var mime: String? = null
+    var data: String? = null
 }
 
 @TauriPlugin
@@ -565,6 +583,80 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
     fun sharedDiscard(invoke: Invoke) {
         try { discardShared() } catch (_: Exception) {}
         invoke.resolve()
+    }
+
+    /**
+     * Put a decrypted attachment on the clipboard as a **file** (0.2.30).
+     *
+     * Chromium's async Clipboard API writes text and images and nothing else, so
+     * the page cannot copy an `.exe`, `.zip` or `.pdf` by itself — the same
+     * limitation the desktop half works around with `CF_HDROP` / the macOS
+     * pasteboard / X11 `text/uri-list`. Here a clipboard entry is a **URI**, so
+     * the bytes are written into the app's own cacheDir and shared through the
+     * `FileProvider` the generated manifest already declares
+     * (`${applicationId}.fileprovider`, whose `cache-path` covers exactly this
+     * directory); the system then grants the pasting app read access.
+     *
+     * One file at a time, and it is deleted before each write: a URI forces the
+     * bytes to outlive the call, so nothing is left behind that a *later* paste
+     * could still reach.
+     */
+    @Command
+    fun copyFileToClipboard(invoke: Invoke) {
+        val args = invoke.parseArgs(CopyFileArgs::class.java)
+        val name = clipboardName(args.name)
+        try {
+            val bytes = try {
+                Base64.decode(args.data ?: "", Base64.DEFAULT)
+            } catch (_: Exception) {
+                invoke.reject("copyFileToClipboard: payload is not base64")
+                return
+            }
+            if (bytes.isEmpty()) {
+                invoke.reject("copyFileToClipboard: nothing to copy")
+                return
+            }
+            // The share FIFO's cap, reused deliberately: a clipboard copy is a
+            // paste, not a file transfer, and the whole payload arrives as one
+            // base64 string over JSON IPC.
+            if (bytes.size > MAX_SHARED_FILE_BYTES) {
+                invoke.reject(
+                    "copyFileToClipboard: too large to copy (over " +
+                        "${MAX_SHARED_FILE_BYTES / (1024 * 1024)} MB)"
+                )
+                return
+            }
+            val dir = File(activity.cacheDir, "clipboard").apply { mkdirs() }
+            dir.listFiles()?.forEach { stale -> try { stale.delete() } catch (_: Exception) {} }
+            val file = File(dir, name)
+            file.writeBytes(bytes)
+            val uri = FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
+            val clip = ClipData.newUri(activity.contentResolver, name, uri)
+            val manager = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            if (manager == null) {
+                invoke.reject("copyFileToClipboard: no clipboard service")
+                return
+            }
+            manager.setPrimaryClip(clip)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("copyFileToClipboard: ${e.message}")
+        }
+    }
+
+    /**
+     * A filesystem-safe rendering of an attachment name, matching the desktop
+     * half's `safe_name` so both platforms land on the same file name. The name
+     * comes from message content the server stores, so it may not choose the
+     * path it lands in, and the extension is kept because it is what tells the
+     * pasting app what kind of file this is.
+     */
+    private fun clipboardName(raw: String?): String {
+        val cleaned = (raw ?: "").map { ch ->
+            if (ch.isISOControl() || ch in "/\\:*?\"<>|") '_' else ch
+        }.joinToString("").take(120)
+        val trimmed = cleaned.trim('.', ' ').replace("..", "__")
+        return trimmed.ifEmpty { "attachment" }
     }
 
     private fun window(): Window? = activity.window
