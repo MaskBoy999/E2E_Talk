@@ -110,6 +110,162 @@
         if (!document.hidden) window.boxClearNotifications();
     });
 
+    // ── 5. Saving a file to disk ─────────────────────────────────────────
+    //
+    // The one entry point for every "save this to a file" action in the app, on
+    // every page. An `<a download>` on a `blob:` URL — what a plain browser uses
+    // — is silently dropped by both shells: WebView2 and the Android WebView
+    // accept the click and write nothing, so "Download", "Save a copy", an
+    // exported theme/backup and every editor's "Save" looked like they worked in
+    // a browser and did nothing inside the app. The shell has no such problem:
+    // the `box-shell` plugin writes the file itself (Rust into the user's
+    // Downloads on desktop, MediaStore's Downloads collection in Kotlin on
+    // Android) and returns the path it used.
+    //
+    // Returns a promise for `true` only when the file was actually written. On a
+    // plain browser (`boxCanSaveToDisk()` false) and on any failure it resolves
+    // `false`, so the caller keeps its own `<a download>` fallback — a refusal is
+    // never silent.
+    function arrayBufferToBase64(buf) {
+        var bytes = new Uint8Array(buf);
+        var chunk = 0x8000;
+        var out = '';
+        for (var i = 0; i < bytes.length; i += chunk) {
+            out += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        return btoa(out);
+    }
+
+    /** Is there a shell behind the page that can write a file to disk? */
+    window.boxCanSaveToDisk = function () {
+        return !!bridge();
+    };
+
+    /**
+     * Save `blob` under `filename` through the shell. Resolves `true` when the
+     * file was written, `false` when this is not a shell or the write failed
+     * (the caller then falls back to a plain download).
+     */
+    window.boxSaveFile = function (blob, filename) {
+        var t = bridge();
+        if (!t || !blob) return Promise.resolve(false);
+        var name = filename || 'download';
+        var mime = blob.type || 'application/octet-stream';
+        if (isAndroidBox()) {
+            // Android has no request-body IPC: the bytes travel base64 and the
+            // Kotlin half writes them into the public Downloads collection.
+            return blob.arrayBuffer().then(function (buf) {
+                return t.core.invoke('plugin:box-shell|saveFile', {
+                    name: name,
+                    mime: mime,
+                    data: arrayBufferToBase64(buf),
+                });
+            }).then(function (res) {
+                var savedName = res && res.name ? res.name : name;
+                if (window.showToast) window.showToast('Saved "' + savedName + '" to Downloads');
+                return true;
+            }).catch(function (e) {
+                console.warn('[box-shell] saveFile failed:', e);
+                return false;
+            });
+        }
+        // Desktop sends one raw body — [u32 LE name length][name][bytes] — so a
+        // large attachment is not base64'd and re-parsed on the way to disk.
+        return blob.arrayBuffer().then(function (buf) {
+            var nameBytes = new TextEncoder().encode(name);
+            var head = new Uint8Array(4);
+            new DataView(head.buffer).setUint32(0, nameBytes.length, true);
+            var data = new Uint8Array(buf);
+            var body = new Uint8Array(4 + nameBytes.length + data.length);
+            body.set(head, 0);
+            body.set(nameBytes, 4);
+            body.set(data, 4 + nameBytes.length);
+            return t.core.invoke('plugin:box-shell|saveFile', body);
+        }).then(function (path) {
+            var where = path ? String(path) : 'your Downloads folder';
+            if (window.showToast) window.showToast('Saved to ' + where);
+            return true;
+        }).catch(function (e) {
+            console.warn('[box-shell] saveFile failed:', e);
+            return false;
+        });
+    };
+
+    // The plain-browser download: an anchor with `download` on it. Only used
+    // when there is no shell (or the shell refused).
+    function webDownloadBlob(blob, filename) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = filename || 'download';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, 5000);
+    }
+
+    /**
+     * Save a blob to disk from **any** page: native when a shell is present,
+     * a plain `<a download>` otherwise. This is the one call a feature should
+     * use — it never leaves the user without a file.
+     */
+    window.saveBlobToDisk = function (blob, filename) {
+        if (window.boxCanSaveToDisk()) {
+            return window.boxSaveFile(blob, filename).then(function (ok) {
+                if (!ok) webDownloadBlob(blob, filename);
+                return true;
+            });
+        }
+        webDownloadBlob(blob, filename);
+        return Promise.resolve(true);
+    };
+
+    /**
+     * Save the bytes behind a `blob:`/`data:` URL. Object URLs are what the
+     * download helpers already hold, so they fetch first and hand the blob to
+     * [`window.saveBlobToDisk`].
+     */
+    window.saveUrlAs = function (url, filename, mime) {
+        if (!window.boxCanSaveToDisk()) {
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = filename || 'download';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            return Promise.resolve(true);
+        }
+        return fetch(url).then(function (r) {
+            if (!r.ok) throw new Error('fetch ' + r.status);
+            return r.blob();
+        }).then(function (blob) {
+            if (mime && !blob.type) blob = blob.slice(0, blob.size, mime);
+            return window.saveBlobToDisk(blob, filename);
+        }).catch(function (e) {
+            console.warn('[box-shell] saveUrlAs failed:', e);
+            return false;
+        });
+    };
+
+    /**
+     * Save the bytes behind a `blob:`/`data:` URL. Object URLs are what the
+     * download helpers already hold, so they fetch first and hand the blob to
+     * [`window.boxSaveFile`].
+     */
+    window.boxSaveUrl = function (url, filename, mime) {
+        if (!bridge()) return Promise.resolve(false);
+        return fetch(url).then(function (r) {
+            if (!r.ok) throw new Error('fetch ' + r.status);
+            return r.blob();
+        }).then(function (blob) {
+            if (mime && !blob.type) blob = blob.slice(0, blob.size, mime);
+            return window.boxSaveFile(blob, filename);
+        }).catch(function (e) {
+            console.warn('[box-shell] boxSaveUrl failed:', e);
+            return false;
+        });
+    };
+
     if (!isAndroidBox()) return;
 
     // ── 1. Immersive bars ────────────────────────────────────────────────

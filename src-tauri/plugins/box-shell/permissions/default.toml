@@ -26,4 +26,8 @@ permissions = [
     # Attachments: put a decrypted file on the OS clipboard under its real name
     # and type (the WebView's clipboard API only accepts images).
     "allow-copyFileToClipboard",
+    # Saving: write a decrypted file to disk. The WebView silently drops an
+    # `<a download>` on a blob: URL, so downloads, exports and "Save a copy"
+    # only produce a file through this command.
+    "allow-saveFile",
 ]

@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -19,6 +20,7 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.speech.RecognitionListener
@@ -118,6 +120,19 @@ class CopyFileArgs {
     var data: String? = null
 }
 
+/**
+ * Arguments for `saveFile`: the file's real name, its MIME type, and the
+ * decrypted bytes as base64 — the same shape (and the same reason) as
+ * [CopyFileArgs]: Android's IPC has no request body, so the desktop half reads
+ * the bytes raw while the phone carries them base64.
+ */
+@InvokeArg
+class SaveFileArgs {
+    var name: String? = null
+    var mime: String? = null
+    var data: String? = null
+}
+
 @TauriPlugin
 class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
 
@@ -153,6 +168,14 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
         /** Cap: a share is an import, not a file-transfer protocol. */
         private const val MAX_SHARED_FILE_BYTES = 25L * 1024 * 1024
         private const val MAX_SHARED_TEXT_CHARS = 100_000
+
+        /**
+         * The save-to-disk cap. Larger than the share/clipboard cap because a
+         * save is the real download path (a video attachment is the common
+         * case), but still bounded: the payload crosses JSON IPC as one base64
+         * string, so it is a memory budget on the phone, not a disk one.
+         */
+        private const val MAX_SAVE_FILE_BYTES = 100L * 1024 * 1024
 
         /** Read-only view for `sharedPending` / `sharedRead`. */
         @JvmStatic
@@ -651,6 +674,84 @@ class BoxShellPlugin(private val activity: Activity) : Plugin(activity) {
      * path it lands in, and the extension is kept because it is what tells the
      * pasting app what kind of file this is.
      */
+    /**
+     * Save a decrypted file into the phone's public **Downloads** collection.
+     *
+     * An `<a download>` on a `blob:` URL is dropped by the Android WebView, so
+     * "Download"/"Save a copy"/an export had to be a page click that produced no
+     * file — the exact behaviour reported (works in a browser, nothing in the
+     * app). `MediaStore` is the modern way in: inserting a row into the Downloads
+     * collection needs **no** storage permission from API 29 on (the collection
+     * is indexed and visible in Files/Downloads), which is why the payload is
+     * capped rather than routed through a legacy path. `IS_PENDING` hides the
+     * entry until the bytes are fully written, so a half-saved file is never
+     * visible.
+     *
+     * MediaStore itself de-duplicates a repeated name (`report (1).pdf`), so the
+     * second save of the same attachment is an added file, not an overwrite.
+     */
+    @Command
+    fun saveFile(invoke: Invoke) {
+        val args = invoke.parseArgs(SaveFileArgs::class.java)
+        val name = clipboardName(args.name)
+        val mime = args.mime?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+        try {
+            val bytes = try {
+                Base64.decode(args.data ?: "", Base64.DEFAULT)
+            } catch (_: Exception) {
+                invoke.reject("saveFile: payload is not base64")
+                return
+            }
+            if (bytes.isEmpty()) {
+                invoke.reject("saveFile: nothing to save")
+                return
+            }
+            // The whole payload arrives as one base64 string over JSON IPC; a
+            // phone that tries to hold a multi-hundred-megabyte string plus the
+            // decoded copy is an OOM, not a save. Refuse with a reason the page
+            // can repeat.
+            if (bytes.size > MAX_SAVE_FILE_BYTES) {
+                invoke.reject(
+                    "saveFile: too large to save (over " +
+                        "${MAX_SAVE_FILE_BYTES / (1024 * 1024)} MB)"
+                )
+                return
+            }
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, mime)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = activity.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            if (uri == null) {
+                invoke.reject("saveFile: could not create the download entry")
+                return
+            }
+            try {
+                val out = resolver.openOutputStream(uri)
+                if (out == null) throw Exception("could not open the download for writing")
+                out.use { it.write(bytes) }
+            } catch (e: Exception) {
+                try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+                invoke.reject("saveFile: ${e.message}")
+                return
+            }
+            // Publish it: while IS_PENDING is 1 the file is invisible to the
+            // gallery and to Files, so a crash mid-write leaves nothing behind.
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+
+            val out = JSObject()
+            out.put("name", name)
+            out.put("uri", uri.toString())
+            invoke.resolve(out)
+        } catch (e: Exception) {
+            invoke.reject("saveFile: ${e.message}")
+        }
+    }
+
     private fun clipboardName(raw: String?): String {
         val cleaned = (raw ?: "").map { ch ->
             if (ch.isISOControl() || ch in "/\\:*?\"<>|") '_' else ch

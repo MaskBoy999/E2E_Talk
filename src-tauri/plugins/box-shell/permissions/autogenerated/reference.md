@@ -35,6 +35,7 @@ which is what stops Doze from quietly ending an ongoing call.
 - `allow-captionsStart`
 - `allow-captionsStop`
 - `allow-copyFileToClipboard`
+- `allow-saveFile`
 
 ## Permission Table
 
@@ -353,6 +354,32 @@ Enables the keepScreenOn command without any pre-configured scope.
 <td>
 
 Denies the keepScreenOn command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:allow-saveFile`
+
+</td>
+<td>
+
+Enables the saveFile command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`box-shell:deny-saveFile`
+
+</td>
+<td>
+
+Denies the saveFile command without any pre-configured scope.
 
 </td>
 </tr>

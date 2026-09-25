@@ -4338,13 +4338,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     fileName = new TextDecoder().decode(dec) || fileName;
                 } catch (_) {}
             }
-            // Trigger download
+            // Trigger download (native save inside a shell).
             const blob = new Blob([blobData], { type: mimeType });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = fileName; document.body.appendChild(a); a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            triggerBlobDownload(blob, fileName);
         } catch (err) {
             console.error('Vault download error:', err);
             alert('Download failed: ' + err.message);
@@ -5547,14 +5543,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     function downloadAppearanceFile(fileData) {
         var blob = new Blob([JSON.stringify(fileData)], { type: 'application/json' });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = 'e2e_appearance_' + new Date().toISOString().slice(0, 10) + '.e2etheme';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        triggerBlobDownload(blob, 'e2e_appearance_' + new Date().toISOString().slice(0, 10) + '.e2etheme');
     }
     var appearancePwConfirmBtn = document.getElementById('appearance-pw-confirm-btn');
     if (appearancePwConfirmBtn) {
@@ -7253,14 +7242,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function downloadExport(blob, filename) {
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+        // Exports are the one place a silent failure loses data, so this goes
+        // through the native save bridge inside a shell.
+        triggerBlobDownload(blob, filename);
     }
 
     async function confirmExport() {
@@ -8112,14 +8096,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 'only way back into the account if you lose your authenticator app.\n\n' +
                 lines + '\n';
             var blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = 'e2e-chat-2fa-recovery-codes.txt';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+            triggerBlobDownload(blob, 'e2e-chat-2fa-recovery-codes.txt');
             var st = document.getElementById('twofa-copy-status');
             if (st) { st.textContent = 'Saved!'; setTimeout(function () { st.textContent = ''; }, 2000); }
         });
@@ -9196,7 +9173,10 @@ document.addEventListener('DOMContentLoaded', () => {
             var blob = new Blob([file], { type: file.type });
             window.DocPreview.openPdfEditor(blob, file.name);
         }
-        else if (file.type.startsWith('text/') || file.name.match(/\.(txt|md|json|html|css|js|ts|py|java|c|cpp|h|hpp|rs|go|rb|php|xml|yaml|yml|toml|ini|cfg|conf|log|env|csv|tsv|sql|sh|bat|ps1|cmd|vue|svelte|jsx|tsx)$/i)) {
+        else if (isSheetFile(file.name, file.type)) {
+            openSheetEditor(file);
+        }
+        else if (isEditableTextFile(file.name, file.type)) {
             openTextEditorModal(file);
         }
     });
@@ -22434,10 +22414,11 @@ async function showInviteModal() {
                 ctx.fillStyle = '#ffffff';
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
                 ctx.drawImage(img, 0, 0);
-                const link = document.createElement('a');
-                link.download = 'e2e-chat-invite-code-qr.png';
-                link.href = canvas.toDataURL('image/png');
-                link.click();
+                // A data:-URL anchor is dropped inside the shells, so hand the
+                // PNG to the native save bridge (plain browsers download it).
+                canvas.toBlob(function (pngBlob) {
+                    if (pngBlob) triggerBlobDownload(pngBlob, 'e2e-chat-invite-code-qr.png');
+                }, 'image/png');
             };
             img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
         };
@@ -22623,10 +22604,9 @@ async function loadMyFriendCode() {
                         ctx.fillStyle = '#ffffff';
                         ctx.fillRect(0, 0, canvas.width, canvas.height);
                         ctx.drawImage(img, 0, 0);
-                        const link = document.createElement('a');
-                        link.download = 'e2e-chat-friend-code-qr.png';
-                        link.href = canvas.toDataURL('image/png');
-                        link.click();
+                        canvas.toBlob(function (pngBlob) {
+                            if (pngBlob) triggerBlobDownload(pngBlob, 'e2e-chat-friend-code-qr.png');
+                        }, 'image/png');
                     };
                     img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
                 };
@@ -23796,6 +23776,59 @@ function isTextFile(filename, mime) {
     const ext = filename.split('.').pop().toLowerCase();
     const textExts = ['txt','js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','htm','css','json','xml','rb','php','swift','kt','cs','lua','pl','r','m','mm','yaml','yml','toml','ini','cfg','conf','inf','reg','bat','cmd','vbs','ps1','md','mdx','log','env','svg','dockerfile','makefile'];
     return textExts.includes(ext);
+}
+
+// ─── Editable-as-text file types ────────────────────────────────────────────
+// One list, so the upload Edit button, the upload quick-action row and the
+// per-type mime mapping can never disagree about what opens in the text editor.
+// Deliberately separate from `isTextFile` above: that one also drives message
+// rendering, where CSV/TSV must stay a table preview (doc-preview.js), and a
+// wider list there would silently replace the table with raw text.
+const EDITABLE_TEXT_EXTS = [
+    // Plain text / notes
+    'txt', 'text', 'log', 'md', 'markdown', 'mdx', 'rst', 'adoc', 'nfo', 'readme', 'license',
+    // Data / config
+    'json', 'json5', 'jsonc', 'ndjson', 'jsonl', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
+    'config', 'env', 'properties', 'csv', 'tsv', 'xml', 'plist', 'lock', 'editorconfig', 'gitignore',
+    'gitattributes', 'npmrc', 'nvmrc', 'babelrc', 'eslintrc', 'prettierrc',
+    // Web
+    'html', 'htm', 'xhtml', 'css', 'scss', 'sass', 'less', 'svg', 'jsx', 'tsx', 'vue', 'svelte', 'astro',
+    // Code
+    'js', 'mjs', 'cjs', 'ts', 'mts', 'cts', 'py', 'pyw', 'rb', 'php', 'java', 'kt', 'kts', 'scala',
+    'groovy', 'gradle', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'hh', 'cs', 'go', 'rs', 'swift', 'm', 'mm',
+    'dart', 'lua', 'pl', 'pm', 'r', 'jl', 'ex', 'exs', 'erl', 'hrl', 'hs', 'clj', 'cljs', 'fs', 'fsx', 'vb',
+    'sh', 'bash', 'zsh', 'fish', 'bat', 'cmd', 'ps1', 'psm1', 'psd1', 'vbs', 'sql', 'graphql', 'gql',
+    'proto', 'thrift', 'asm', 's', 'diff', 'patch', 'tex', 'bib', 'srt', 'vtt', 'ass',
+    // Extensionless build files (matched by their whole name's last segment)
+    'dockerfile', 'makefile', 'rakefile', 'gemfile', 'procfile',
+];
+const _EDITABLE_TEXT_SET = new Set(EDITABLE_TEXT_EXTS);
+
+/**
+ * Can this upload be opened in the text editor?
+ *
+ * True for anything the browser calls text (`text/*`) and for the extension
+ * list above — including the data formats (csv/tsv/json/yaml/…) and the
+ * extensionless build files (Dockerfile, Makefile). Images/video/audio/PDF
+ * are handled by their own editors and never reach here.
+ */
+function isEditableTextFile(filename, mime) {
+    if (mime && mime.indexOf('text/') === 0) return true;
+    if (mime === 'application/json' || mime === 'application/javascript' ||
+        mime === 'application/xml' || mime === 'application/x-sh' ||
+        mime === 'application/x-yaml' || mime === 'application/toml' ||
+        mime === 'application/sql' || mime === 'image/svg+xml') return true;
+    if (!filename) return false;
+    if (filename.toLowerCase() === 'makefile' || filename.toLowerCase() === 'dockerfile') return true;
+    var ext = filename.split('.').pop().toLowerCase();
+    return _EDITABLE_TEXT_SET.has(ext);
+}
+
+// Workbooks the grid editor opens (xls/xlsx/ods). DocPreview already owns
+// "is this a document, and which kind" for the viewer, so editing follows it
+// exactly — one definition of "spreadsheet" shared by preview and edit.
+function isSheetFile(filename, mime) {
+    return !!(window.DocPreview && DocPreview.getDocType(filename, mime) === 'xlsx');
 }
 
 function isMarkdownFile(filename, mime) {
@@ -25517,14 +25550,16 @@ function _showUploadQuickActions() {
     var qa = document.getElementById('upload-quick-actions');
     if (!qa || selectedFiles.length === 0) { if (qa) qa.style.display = 'none'; return; }
     var file = selectedFiles[currentFileIndex];
-    var isText = file && (file.type.startsWith('text/') || file.name.match(/\.(txt|md|json|html|css|js|ts|py|java|c|cpp|h|hpp|rs|go|rb|php|xml|yaml|yml|toml|ini|cfg|conf|log|env|csv|tsv|sql|sh|bat|ps1|cmd|vue|svelte|jsx|tsx)$/i));
-    var isMedia = file && (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type === 'application/pdf' || isText);
+    var isText = file && isEditableTextFile(file.name, file.type);
+    var isSheet = file && isSheetFile(file.name, file.type);
+    var isMedia = file && (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type === 'application/pdf' || isText || isSheet);
     qa.style.display = isMedia ? 'flex' : 'none';
-    // Audio/PDF/Text get Edit only: the mirror/rotate quick buttons transform
-    // image/video previews, while audio, PDF, and text edits live inside the edit modal.
+    // Audio/PDF/Text/Spreadsheet get Edit only: the mirror/rotate quick buttons
+    // transform image/video previews, while the other edits live inside the
+    // edit modal.
     var isAudio = !!(file && file.type.startsWith('audio/'));
     var isPdf = !!(file && file.type === 'application/pdf');
-    var hideQuickTransform = isAudio || isPdf || isText;
+    var hideQuickTransform = isAudio || isPdf || isText || isSheet;
     ['upload-btn-mirror', 'upload-btn-rotate-left', 'upload-btn-rotate-right'].forEach(function(id) {
         var b = document.getElementById(id);
         if (b) b.style.display = hideQuickTransform ? 'none' : '';
@@ -27154,14 +27189,17 @@ function openTextEditorModal(file) {
             modal = document.createElement('div');
             modal.id = 'text-edit-modal';
             modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center';
-            modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:90%;max-width:800px;max-height:85vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
-                + '<div style="padding:16px 20px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center">'
-                + '<span style="color:#e0e0e0;font-size:16px;font-weight:600"><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Text</span>'
-                + '<span id="text-edit-filename" style="color:#888;font-size:13px"></span></div>'
-                + '<div style="flex:1;overflow:hidden;padding:0">'
-                + '<textarea id="text-edit-area" style="width:100%;height:100%;min-height:400px;background:#0d1117;color:#c9d1d9;border:none;padding:16px;font-family:Consolas,Monaco,monospace;font-size:14px;resize:none;outline:none;tab-size:4"></textarea>'
+            // Width/height use viewport units and the rows wrap, so the editor
+            // is usable on a phone (a fixed 800px box with a 400px-min textarea
+            // overflowed the screen).
+            modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:min(96vw,800px);max-height:88vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
+                + '<div style="padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+                + '<span style="color:#e0e0e0;font-size:15px;font-weight:600"><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Text</span>'
+                + '<span id="text-edit-filename" style="color:#888;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%"></span></div>'
+                + '<div style="flex:1;overflow:hidden;padding:0;min-height:0">'
+                + '<textarea id="text-edit-area" style="width:100%;height:100%;min-height:160px;background:#0d1117;color:#c9d1d9;border:none;padding:16px;font-family:Consolas,Monaco,monospace;font-size:14px;resize:none;outline:none;tab-size:4"></textarea>'
                 + '</div>'
-                + '<div style="padding:12px 20px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center">'
+                + '<div style="padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
                 + '<div style="display:flex;gap:8px">'
                 + '<button id="text-edit-undo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">' + icon('undo') + ' Undo</button>'
                 + '<button id="text-edit-redo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">' + icon('redo') + ' Redo</button>'
@@ -27181,8 +27219,32 @@ function openTextEditorModal(file) {
                     modal.style.display = 'none';
                     return;
                 }
-                var ext = _textEditorState.fileName.split('.').pop() || 'txt';
-                var mimeMap = { 'txt': 'text/plain', 'md': 'text/markdown', 'json': 'application/json', 'html': 'text/html', 'css': 'text/css', 'js': 'application/javascript', 'ts': 'application/typescript', 'py': 'text/x-python', 'xml': 'application/xml', 'csv': 'text/csv', 'sql': 'text/plain', 'sh': 'text/x-shellscript' };
+                var ext = _textEditorState.fileName.split('.').pop().toLowerCase() || 'txt';
+                // A type for the formats the editor now opens; anything else is
+                // plain text, which is what the bytes actually are.
+                var mimeMap = {
+                    'txt': 'text/plain', 'text': 'text/plain', 'log': 'text/plain', 'md': 'text/markdown',
+                    'markdown': 'text/markdown', 'mdx': 'text/markdown', 'rst': 'text/plain',
+                    'json': 'application/json', 'json5': 'application/json', 'jsonc': 'application/json',
+                    'ndjson': 'application/x-ndjson', 'jsonl': 'application/x-ndjson',
+                    'yaml': 'text/yaml', 'yml': 'text/yaml', 'toml': 'application/toml',
+                    'ini': 'text/plain', 'cfg': 'text/plain', 'conf': 'text/plain', 'env': 'text/plain',
+                    'properties': 'text/plain', 'lock': 'text/plain',
+                    'csv': 'text/csv', 'tsv': 'text/tab-separated-values',
+                    'html': 'text/html', 'htm': 'text/html', 'xhtml': 'text/html',
+                    'css': 'text/css', 'scss': 'text/css', 'sass': 'text/css', 'less': 'text/css',
+                    'svg': 'image/svg+xml',
+                    'js': 'application/javascript', 'mjs': 'application/javascript', 'cjs': 'application/javascript',
+                    'jsx': 'text/jsx', 'tsx': 'text/tsx', 'ts': 'application/typescript',
+                    'vue': 'text/plain', 'svelte': 'text/plain',
+                    'py': 'text/x-python', 'rb': 'text/x-ruby', 'java': 'text/x-java',
+                    'c': 'text/x-c', 'h': 'text/x-c', 'cpp': 'text/x-c++', 'hpp': 'text/x-c++',
+                    'cs': 'text/x-csharp', 'go': 'text/x-go', 'rs': 'text/x-rust', 'php': 'text/x-php',
+                    'swift': 'text/x-swift', 'kt': 'text/x-kotlin', 'dart': 'text/x-dart',
+                    'xml': 'application/xml', 'sql': 'text/plain', 'graphql': 'text/plain',
+                    'sh': 'text/x-shellscript', 'bash': 'text/x-shellscript', 'zsh': 'text/x-shellscript',
+                    'bat': 'text/plain', 'cmd': 'text/plain', 'ps1': 'text/plain', 'vbs': 'text/plain',
+                };
                 var blob = new Blob([editedText], { type: (mimeMap[ext] || 'text/plain') + ';charset=utf-8' });
                 var newFile = new File([blob], _textEditorState.fileName, { type: blob.type, lastModified: Date.now() });
                 selectedFiles[currentFileIndex] = newFile;
@@ -27213,6 +27275,221 @@ function openTextEditorModal(file) {
         area.focus();
     };
     reader.readAsText(file);
+}
+
+// ===== Spreadsheet editor (xls / xlsx / ods) =====
+// SheetJS already ships for the viewer, so the editor reuses it: read the
+// workbook once, render every sheet as a contenteditable grid, and on save
+// write ONLY the cells the user changed back into the original workbook
+// object — untouched sheets, cell formats and formulas survive the round trip.
+var _sheetEditorState = null;
+
+function openSheetEditor(file) {
+    if (!window.DocPreview || !DocPreview.loadSheetJs) return;
+    DocPreview.loadSheetJs().then(function () {
+        if (!window.XLSX) throw new Error('SheetJS failed to load');
+        return file.arrayBuffer();
+    }).then(function (buf) {
+        var ext = file.name.split('.').pop().toLowerCase();
+        _sheetEditorState = {
+            fileName: file.name,
+            workbook: XLSX.read(buf, { type: 'array' }),
+            bookType: ext === 'xls' ? 'xls' : ext === 'ods' ? 'ods' : 'xlsx',
+            mime: ext === 'xls' ? 'application/vnd.ms-excel'
+                : ext === 'ods' ? 'application/vnd.oasis.opendocument.spreadsheet'
+                : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        };
+        _sheetBuildModal();
+    }).catch(function (e) {
+        if (window.showToast) showToast('Cannot edit this spreadsheet: ' + e.message);
+    });
+}
+
+function _sheetCellDisplay(cell) {
+    if (!cell) return '';
+    if (cell.w != null) return cell.w;
+    if (cell.v == null) return '';
+    return String(cell.v);
+}
+
+function _sheetHeadStyle(kind) {
+    // Column heads stick to the top, row numbers to the left, so a wide sheet
+    // stays readable while scrolling on a phone.
+    var pos = kind === 'corner' ? 'top:0;left:0;z-index:3;'
+        : kind === 'row' ? 'left:0;z-index:2;'
+        : 'top:0;';
+    return 'position:sticky;' + pos +
+        'background:#2a2a3e;color:#9aa0ae;font-weight:600;border:1px solid #333;padding:3px 7px;user-select:none';
+}
+
+function _sheetRenderTable(ws) {
+    var range = ws && ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : null;
+    var startR = range ? range.s.r : 0, endR = range ? range.e.r : 0;
+    var startC = range ? range.s.c : 0, endC = range ? range.e.c : 0;
+    var table = document.createElement('table');
+    table.style.cssText = 'border-collapse:collapse;font-size:13px';
+    var hr = document.createElement('tr');
+    var corner = document.createElement('th');
+    corner.style.cssText = _sheetHeadStyle('corner');
+    hr.appendChild(corner);
+    for (var c = startC; c <= endC; c++) {
+        var th = document.createElement('th');
+        th.textContent = XLSX.utils.encode_col(c);
+        th.style.cssText = _sheetHeadStyle('col');
+        hr.appendChild(th);
+    }
+    var thead = document.createElement('thead');
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    for (var r = startR; r <= endR; r++) {
+        var tr = document.createElement('tr');
+        var rh = document.createElement('th');
+        rh.textContent = String(r + 1);
+        rh.style.cssText = _sheetHeadStyle('row');
+        tr.appendChild(rh);
+        for (var c2 = startC; c2 <= endC; c2++) {
+            var addr = XLSX.utils.encode_cell({ r: r, c: c2 });
+            var text = _sheetCellDisplay(ws ? ws[addr] : null);
+            var td = document.createElement('td');
+            td.contentEditable = 'true';
+            td.spellcheck = false;
+            td.dataset.addr = addr;
+            td.dataset.orig = text;
+            td.textContent = text;
+            td.style.cssText = 'border:1px solid #333;padding:4px 8px;white-space:nowrap;min-width:64px;max-width:320px;outline:none';
+            tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    return table;
+}
+
+function _sheetBuildModal() {
+    var st = _sheetEditorState;
+    var wb = st.workbook;
+    var modal = document.getElementById('sheet-edit-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'sheet-edit-modal';
+        // Viewport-sized with wrapping rows: usable on a phone as well as a
+        // desktop, same contract as the text editor above.
+        modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:none;align-items:center;justify-content:center';
+        modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:min(96vw,1000px);max-height:88vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
+            + '<div style="padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+            + '<span style="color:#e0e0e0;font-size:15px;font-weight:600"><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Spreadsheet</span>'
+            + '<span id="sheet-edit-filename" style="color:#888;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%"></span></div>'
+            + '<div id="sheet-edit-tabs" style="display:flex;gap:4px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid #333"></div>'
+            + '<div id="sheet-edit-body" style="flex:1;min-height:0;overflow:auto;background:#0d1117"></div>'
+            + '<div style="padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+            + '<span id="sheet-edit-info" style="color:#888;font-size:12px"></span>'
+            + '<div style="display:flex;gap:8px">'
+            + '<button id="sheet-edit-cancel" style="padding:8px 18px;border:none;background:#f44336;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">Cancel</button>'
+            + '<button id="sheet-edit-confirm" style="padding:8px 18px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">Save &amp; Upload</button>'
+            + '</div></div></div>';
+        document.body.appendChild(modal);
+        document.getElementById('sheet-edit-cancel').onclick = function () {
+            modal.style.display = 'none';
+        };
+        document.getElementById('sheet-edit-confirm').onclick = _sheetSaveEdits;
+    }
+    document.getElementById('sheet-edit-filename').textContent = st.fileName;
+    var body = document.getElementById('sheet-edit-body');
+    body.innerHTML = '';
+    // Every sheet is rendered up front (the hidden ones too) so save can walk
+    // all of them without re-parsing the file.
+    wb.SheetNames.forEach(function (name, idx) {
+        var table = _sheetRenderTable(wb.Sheets[name]);
+        table.dataset.sheet = name;
+        table.style.display = idx === 0 ? '' : 'none';
+        body.appendChild(table);
+    });
+    var tabs = document.getElementById('sheet-edit-tabs');
+    tabs.innerHTML = '';
+    wb.SheetNames.forEach(function (name, idx) {
+        var tab = document.createElement('button');
+        tab.textContent = name;
+        tab.style.cssText = 'padding:5px 12px;border-radius:6px;border:1px solid #333;background:' +
+            (idx === 0 ? '#4fc3f7' : '#2a2a3e') + ';color:#e0e0e0;cursor:pointer;font-size:12px';
+        tab.onclick = function () {
+            body.querySelectorAll('table[data-sheet]').forEach(function (t) {
+                t.style.display = t.dataset.sheet === name ? '' : 'none';
+            });
+            tabs.querySelectorAll('button').forEach(function (b) { b.style.background = '#2a2a3e'; });
+            tab.style.background = '#4fc3f7';
+        };
+        tabs.appendChild(tab);
+    });
+    document.getElementById('sheet-edit-info').textContent =
+        wb.SheetNames.length + (wb.SheetNames.length === 1 ? ' sheet' : ' sheets') + ' · click a cell to edit';
+    modal.style.display = 'flex';
+}
+
+function _sheetApplyEdits(ws, table) {
+    var range = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : null;
+    var maxR = range ? range.e.r : -1, maxC = range ? range.e.c : -1;
+    var changed = false;
+    table.querySelectorAll('td[data-addr]').forEach(function (td) {
+        var text = td.textContent;
+        if (text === td.dataset.orig) return; // untouched cells keep their
+        // original object — formats, cached values and formulas intact.
+        var addr = td.dataset.addr;
+        if (text === '') {
+            delete ws[addr];
+            changed = true;
+            return;
+        }
+        var ref = XLSX.utils.decode_cell(addr);
+        var orig = ws[addr];
+        var t, v;
+        if (orig && orig.t === 'n' && isFinite(Number(text))) {
+            t = 'n'; v = Number(text);
+        } else if (orig && orig.t === 'b' && /^(true|false)$/i.test(text)) {
+            t = 'b'; v = text.toLowerCase() === 'true';
+        } else if (!orig && /^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$/.test(text.trim())) {
+            // New cells only: infer a number, but keep leading zeros ("007")
+            // as the text they are.
+            t = 'n'; v = Number(text);
+        } else {
+            t = 's'; v = text;
+        }
+        var cell = { t: t, v: v };
+        if (orig && orig.z) cell.z = orig.z;
+        // Deliberately a fresh object: a formula the user typed over goes away.
+        ws[addr] = cell;
+        changed = true;
+        if (ref.r > maxR) maxR = ref.r;
+        if (ref.c > maxC) maxC = ref.c;
+    });
+    if (changed && maxR >= 0) {
+        ws['!ref'] = XLSX.utils.encode_range({
+            s: { r: range ? range.s.r : 0, c: range ? range.s.c : 0 },
+            e: { r: maxR, c: maxC },
+        });
+    }
+}
+
+function _sheetSaveEdits() {
+    var st = _sheetEditorState;
+    if (!st) return;
+    try {
+        document.querySelectorAll('#sheet-edit-body table[data-sheet]').forEach(function (table) {
+            var name = table.dataset.sheet;
+            if (!st.workbook.Sheets[name]) st.workbook.Sheets[name] = {};
+            _sheetApplyEdits(st.workbook.Sheets[name], table);
+        });
+        var out = XLSX.write(st.workbook, { bookType: st.bookType, type: 'array' });
+        var blob = new Blob([out], { type: st.mime });
+        var newFile = new File([blob], st.fileName, { type: st.mime, lastModified: Date.now() });
+        selectedFiles[currentFileIndex] = newFile;
+        _clearUploadEditState(currentFileIndex);
+        document.getElementById('sheet-edit-modal').style.display = 'none';
+        renderUploadPreview();
+        _showUploadQuickActions();
+    } catch (e) {
+        if (window.showToast) showToast('Could not save the spreadsheet: ' + e.message);
+    }
 }
 
 // G5 — client-side magic-byte validation. The server stores every upload as
@@ -28042,44 +28319,44 @@ async function downloadAndDecryptStickerData(fileId, fileKey, mimeType) {
 async function downloadFileById(fileId, fileKeyB64, filename, mimeType, fileSize) {
     try {
         const blob = await downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize);
-        const url = URL.createObjectURL(blob);
-        blobUrls.push(url);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => {
-            URL.revokeObjectURL(url);
-            blobUrls = blobUrls.filter(u => u !== url);
-        }, 5000);
+        // Inside the shell an <a download> on a blob: URL is a silent no-op, so
+        // this goes through triggerBlobDownload, which reaches the native save
+        // bridge when there is one and falls back to a plain download otherwise.
+        triggerBlobDownload(blob, filename);
     } catch (e) {
         console.error('Download failed:', e);
         alert('Failed to download file: ' + e.message);
     }
 }
 
-function downloadBlobAs(url, filename, mimeType) {
-    const a = document.createElement('a');
-    a.href = url;
-    const ext = mimeType ? mimeType.split('/')[1] || 'png' : 'png';
-    a.download = filename + '.' + ext;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-}
-
-// Download an in-memory blob under an EXACT filename (no extension guessed /
-// appended) — used by the multi-file "Download all" zip.
-function triggerBlobDownload(blob, filename) {
-    const url = URL.createObjectURL(blob);
+// The plain-browser download: an anchor with `download` on it. This is the
+// fallback everywhere below — a real browser needs nothing else, while both
+// shells silently drop the click, so those paths go native first.
+function _anchorDownload(url, filename) {
     const a = document.createElement('a');
     a.href = url;
     a.download = filename || 'download';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+}
+
+function downloadBlobAs(url, filename, mimeType) {
+    const ext = mimeType ? mimeType.split('/')[1] || 'png' : 'png';
+    const full = filename + '.' + ext;
+    // saveUrlAs (box-shell.js) is native-first inside a shell and a plain
+    // download everywhere else — see the native save bridge notes above.
+    if (typeof window.saveUrlAs === 'function') { window.saveUrlAs(url, full, mimeType); return; }
+    _anchorDownload(url, full);
+}
+
+// Download an in-memory blob under an EXACT filename (no extension guessed /
+// appended) — used by the multi-file "Download all" zip.
+function triggerBlobDownload(blob, filename) {
+    const name = filename || 'download';
+    if (typeof window.saveBlobToDisk === 'function') { window.saveBlobToDisk(blob, name); return; }
+    const url = URL.createObjectURL(blob);
+    _anchorDownload(url, name);
     setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 5000);
 }
 

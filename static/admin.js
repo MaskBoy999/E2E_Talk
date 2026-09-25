@@ -1649,14 +1649,21 @@ async function doExport(password) {
             combined.set(new Uint8Array(data2), 1);
             finalBlob = new Blob([combined], { type: 'application/octet-stream' });
         }
-        const url = URL.createObjectURL(finalBlob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'e2e_chat_' + new Date().toISOString().slice(0, 10) + '.dbpack';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        const name = 'e2e_chat_' + new Date().toISOString().slice(0, 10) + '.dbpack';
+        // Inside a shell an <a download> writes nothing; go through the native
+        // save bridge when it is there (box-shell.js), else download plainly.
+        if (typeof window.saveBlobToDisk === 'function') {
+            window.saveBlobToDisk(finalBlob, name);
+        } else {
+            const url = URL.createObjectURL(finalBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
     } catch (err) {
         alert('Export failed: ' + err.message);
     } finally {

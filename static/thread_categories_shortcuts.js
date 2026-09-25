@@ -2925,10 +2925,17 @@
 
     function downloadCssFile(fileData) {
         var blob = new Blob([JSON.stringify(fileData)], { type: 'application/json' });
+        var name = 'e2e_css_' + new Date().toISOString().slice(0, 10) + '.e2ecss';
+        // Native save inside a shell (box-shell.js); a plain download in a
+        // browser, where the anchor is all that is needed.
+        if (typeof window.saveBlobToDisk === 'function') {
+            window.saveBlobToDisk(blob, name);
+            return;
+        }
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
-        a.download = 'e2e_css_' + new Date().toISOString().slice(0, 10) + '.e2ecss';
+        a.download = name;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);

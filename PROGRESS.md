@@ -1,5 +1,63 @@
 # PROGRESS
 
+## Saving works inside the shells, editing covers more types, editors fit a phone
+
+**Save to disk.** Every save in the app — attachments, gallery "Download all",
+exports, themes, 2FA codes, QR codes, the PDF editor's Save & Download, the CSS
+export, the admin backup — was an `<a download>` click. A real browser turns
+that into a file; WebView2 and the Android WebView drop it on the floor, which
+is why "saving anything" worked only in the browser. All of it now funnels
+through one helper pair (`window.saveBlobToDisk` / `window.saveUrlAs` in
+box-shell.js) that hands the bytes to a new `plugin:box-shell|saveFile`
+command when a shell is present and falls back to the anchor when there is
+not: raw IPC body on desktop (`[u32 LE name length][name][bytes]`, written
+under the user's Downloads folder with a uniquified name — no new crate, no
+dialog plugin), base64 `{name,mime,data}` on Android (MediaStore Downloads
+with the `IS_PENDING` dance; API 29+ needs no storage permission for it).
+`downloadBlobAs`, `triggerBlobDownload`, `downloadFileById` and the export
+helpers all route through it, so a browser still gets its normal download.
+
+**More file types editable.** One list (`EDITABLE_TEXT_EXTS` +
+`isEditableTextFile`) now decides what the Edit button opens as text — all the
+text/code/config/data formats (yaml, toml, ini, env, csv, tsv, xml, svg, the
+c-family, shells, sql, srt… ) plus extensionless files like `Dockerfile` and
+`Makefile` — deliberately kept separate from `isTextFile`, which still lets
+message rendering treat CSV/TSV as a table preview.
+
+**Spreadsheets got a real editor.** `xls`/`xlsx`/`ods` open in a grid modal
+next to the text editor, built on the SheetJS build that already ships for the
+viewer: the workbook is read once, every sheet renders as a contenteditable
+grid (sticky column/row headers, tabs per sheet), and save writes **only the
+cells the user changed** back into the original workbook object — untouched
+sheets, number formats and formulas survive the round trip. Edited cells keep
+their original type (a number that gets "abc" becomes text; a new cell
+fuzzy-parses a number but keeps `007` as text). ODS joined the document list,
+so it previews and edits too. Deliberate ceiling: no insert row/column and no
+formula bar — the grid edits the range the file already has (`ponytail:`
+comments mark both).
+
+**Mobile pass on every editor.** The photo/video/audio headers put the title
+on its own row and the tools in a horizontally scrollable strip with 40px
+touch targets; Cancel/Confirm stay pinned inside the viewport. The text and
+new spreadsheet modals are viewport-sized (`min(96vw, …)`) with wrapping
+header/footer rows, and the PDF editor stacks thumb strip + tools under the
+page instead of beside it (its panels now carry ids/classes the media query
+can reach). Everything was written mobile-first, so the new grid needs no
+special-casing: the table scrolls inside its own pane, the footer never
+leaves the screen.
+
+**Verified:** `cargo check` for app + plugin, `cargo test -p
+tauri-plugin-box-shell` 4/4 (incl. the new save-module tests), release
+`cargo build --release` clean. Playwright: new `tests/save-and-editors.spec.ts`
+8/8 — the shell stub's desktop and Android `saveFile` body shapes byte for
+byte, downloads routing through the bridge, the six new text formats opening
+the editor, a two-sheet workbook edited and round-tripped through real
+serialized bytes (both the edited cells and the untouched sheet), and both
+editors fitting a 390×844 phone. Regressions: `doc-preview` 13/13,
+`photo-video-edit` Upload Modal Quick Actions 10/10, appearance export/import
+download 2/2. Two pre-existing failures confirmed red on the committed tree
+before this work (audio/video cut-preview playback in headless Chromium).
+
 ## Soundboard: resume / stop / disable correctness
 
 Root causes addressed, all in the soundboard playback/tracking path:

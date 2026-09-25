@@ -72,6 +72,7 @@ var DocPreview = (function () {
         xls:  'application/vnd.ms-excel',
         csv:  'text/csv',
         tsv:  'text/tab-separated-values',
+        ods:  'application/vnd.oasis.opendocument.spreadsheet',
         pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         ppt:  'application/vnd.ms-powerpoint',
         zip:  'application/zip',
@@ -112,7 +113,7 @@ var DocPreview = (function () {
         // Check by extension first (most reliable)
         if (ext === 'pdf') return 'pdf';
         if (ext === 'docx' || ext === 'doc') return 'docx';
-        if (ext === 'xlsx' || ext === 'xls') return 'xlsx';
+        if (ext === 'xlsx' || ext === 'xls' || ext === 'ods') return 'xlsx';
         if (ext === 'pptx' || ext === 'ppt') return 'pptx';
         if (ext === 'csv' || ext === 'tsv') return 'csv';
         if (ext === 'zip' || ext === '7z' || ext === 'rar' || ext === 'tar' || ext === 'gz') return 'zip';
@@ -121,7 +122,7 @@ var DocPreview = (function () {
         if (mimeType) {
             var m = mimeType.toLowerCase();
             if (m.includes('pdf')) return 'pdf';
-            if (m.includes('sheet') || m.includes('excel')) return 'xlsx';
+            if (m.includes('sheet') || m.includes('excel') || m.includes('opendocument.spreadsheet')) return 'xlsx';
             if (m.includes('presentation') || m.includes('powerpoint')) return 'pptx';
             if (m.includes('word')) return 'docx';
             if (m === 'text/csv' || m === 'text/tab-separated-values') return 'csv';
@@ -937,6 +938,9 @@ var DocPreview = (function () {
 
         // Header
         var header = document.createElement('div');
+        // Class (not id): the phone layout in style.css reflows this header and
+        // the two side panels (see the "Editor modals: phone layout" block).
+        header.className = 'pdf-editor-header';
         header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:#1a1a2e;border-bottom:1px solid #333;flex-shrink:0';
         header.innerHTML = '<span style="color:#eee;font-weight:600;font-size:14px">' + icon('edit') + ' PDF Editor — ' + escapeHtml(filename) + '</span>';
         var headerBtns = document.createElement('div');
@@ -973,6 +977,7 @@ var DocPreview = (function () {
 
         // Main content
         var main = document.createElement('div');
+        main.className = 'pdf-editor-main';
         main.style.cssText = 'display:flex;flex:1;overflow:hidden';
 
         // Left panel: thumbnails
@@ -989,6 +994,7 @@ var DocPreview = (function () {
 
         // Right panel: tools
         var rightPanel = document.createElement('div');
+        rightPanel.id = 'pdf-tools-panel';
         rightPanel.style.cssText = 'width:200px;background:#1e1e2e;border-left:1px solid #333;padding:12px;flex-shrink:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px';
 
         // Page tools
@@ -1342,14 +1348,20 @@ var DocPreview = (function () {
 
             var pdfBytes = await newDoc.save();
             var blob = new Blob([pdfBytes], { type: 'application/pdf' });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = _pdfEditor.filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+            // Inside a shell an <a download> writes nothing, so the edited PDF
+            // goes through the native save bridge (box-shell.js) when present.
+            if (typeof window.saveBlobToDisk === 'function') {
+                window.saveBlobToDisk(blob, _pdfEditor.filename);
+            } else {
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = _pdfEditor.filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+            }
         } catch (e) {
             alert('Export failed: ' + e.message);
         }
@@ -1585,6 +1597,7 @@ var DocPreview = (function () {
         getDocType: getDocType,
         previewDocument: previewDocument,
         openPdfEditor: openPdfEditor,
+        loadSheetJs: loadSheetJs,
         close: closeDocModal,
         _loadPdfLibForTest: _loadPdfLibForTest,
         _getEditorState: function () { return JSON.parse(JSON.stringify(_pdfEditor.pages)); }

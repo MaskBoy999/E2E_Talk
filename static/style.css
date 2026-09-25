@@ -6159,6 +6159,156 @@ select.settings-field { cursor: pointer; }
     color: var(--text-muted);
 }
 
+/* ===== Editor modals: phone layout =====
+   The editors were laid out for a wide window: title, tools, undo/redo and
+   Cancel/Confirm all sat on one row, so on a phone the title was squeezed to a
+   sliver and the action buttons wrapped into a second, ragged row. Below 640px
+   the title takes its own line, the tool strip scrolls horizontally instead of
+   wrapping, and the actions stay pinned to the right. Touch targets grow to
+   40px because a 34px button is a mis-tap on a phone. */
+@media (max-width: 640px) {
+    .photo-edit-header,
+    .video-edit-header,
+    .audio-edit-header {
+        padding: 8px 10px;
+        gap: 6px;
+    }
+    .photo-edit-title,
+    .video-edit-title,
+    .audio-edit-title {
+        flex: 1 1 100%;
+        order: -1;
+        margin-right: 0;
+        font-size: 14px;
+    }
+    /* Tools + history scroll sideways together instead of wrapping into rows
+       that push the buttons the user needs off the screen. */
+    .photo-edit-tools,
+    .video-edit-tools,
+    .audio-edit-tools {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .photo-edit-tools::-webkit-scrollbar,
+    .video-edit-tools::-webkit-scrollbar,
+    .audio-edit-tools::-webkit-scrollbar {
+        display: none;
+    }
+    .photo-tool-btn,
+    .photo-history-btn {
+        width: 40px;
+        height: 40px;
+        flex: 0 0 auto;
+    }
+    .photo-edit-history {
+        flex: 0 0 auto;
+    }
+    .photo-edit-actions,
+    .video-edit-actions,
+    .audio-edit-actions {
+        flex: 0 0 auto;
+        margin-left: auto;
+    }
+    .photo-edit-actions .btn-cancel,
+    .photo-edit-actions .btn-invite,
+    .video-edit-actions .btn-cancel,
+    .video-edit-actions .btn-invite,
+    .audio-edit-actions .btn-cancel,
+    .audio-edit-actions .btn-invite {
+        padding: 9px 13px;
+        font-size: 12px;
+    }
+    .photo-brush-settings,
+    .photo-edit-draw-actions {
+        padding: 8px 10px;
+        gap: 10px;
+    }
+    .photo-bs-label input[type="range"] {
+        width: 72px;
+    }
+    .photo-crop-handle {
+        width: 18px;
+        height: 18px;
+    }
+    .photo-crop-handle-tl { top: -9px; left: -9px; }
+    .photo-crop-handle-tr { top: -9px; right: -9px; }
+    .photo-crop-handle-bl { bottom: -9px; left: -9px; }
+    .photo-crop-handle-br { bottom: -9px; right: -9px; }
+    /* The cut timeline keeps its toolbar on one row but lets the hint wrap. */
+    .video-cut-timeline {
+        padding: 10px;
+    }
+    .video-cut-toolbar {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    .video-cut-hint {
+        flex: 1 1 100%;
+        margin-left: 0;
+    }
+    .video-crop-preview {
+        max-width: 40%;
+        padding: 4px;
+    }
+    .video-crop-preview canvas {
+        max-width: 110px;
+        max-height: 84px;
+    }
+    .audio-edit-body {
+        padding: 12px;
+        gap: 10px;
+    }
+    .audio-edit-waveform {
+        height: 70px;
+    }
+    .audio-cut-timeline {
+        padding: 10px;
+    }
+    .audio-vol-label input[type="range"] {
+        width: 120px;
+    }
+    /* PDF editor (built in doc-preview.js): the two side panels become a
+       horizontal thumbnail strip on top and a wrapping tool area below. */
+    #pdf-editor-overlay .pdf-editor-header {
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 8px 10px;
+    }
+    #pdf-editor-overlay .pdf-editor-header > div {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    #pdf-editor-overlay .pdf-editor-main {
+        flex-direction: column;
+    }
+    #pdf-thumb-panel {
+        width: auto !important;
+        flex-direction: row !important;
+        max-height: 128px;
+        padding: 6px !important;
+        overflow-x: auto;
+        overflow-y: hidden;
+        border-right: none !important;
+        border-bottom: 1px solid #333;
+    }
+    #pdf-tools-panel {
+        width: auto !important;
+        flex-direction: row !important;
+        flex-wrap: wrap;
+        align-items: center;
+        max-height: 34vh;
+        padding: 8px !important;
+        border-left: none !important;
+        border-top: 1px solid #333;
+    }
+}
+
 /* ===== Multi-File Gallery in Messages ===== */
 .msg-file-gallery {
     background: var(--bg-secondary);

@@ -469,7 +469,15 @@ test.describe('Photo & Video Edit System', () => {
 
         test('quick action buttons hidden for non-media files', async ({ page }) => {
             await registerAndSetup(page);
-            await uploadTestText(page);
+            // A file with no editor at all. `.txt` is deliberately NOT used any
+            // more: text files open in the text editor, so they correctly show
+            // the row (that case lives in the text-editor tests).
+            await page.locator('#file-input').setInputFiles({
+                name: 'archive.bin',
+                mimeType: 'application/octet-stream',
+                buffer: Buffer.from([0, 1, 2, 3, 4, 5]),
+            });
+            await page.waitForSelector('#upload-modal', { state: 'visible', timeout: 5000 });
             await expect(page.locator('#upload-quick-actions')).toBeHidden();
         });
 

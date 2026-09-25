@@ -25,6 +25,11 @@ const COMMANDS: &[&str] = &[
     // the shell: Windows CF_HDROP / macOS pasteboard / X11 text-uri-list in
     // Rust, ClipData + FileProvider in Kotlin. One command name for both.
     "copyFileToClipboard",
+    // Saving a file to disk: the WebView drops an `<a download>` on a blob:
+    // URL in every shell (desktop and Android), so a "Download"/"Save a
+    // copy"/export has to be written by native code. Rust on desktop (the
+    // user's Downloads dir), MediaStore in Kotlin on Android.
+    "saveFile",
 ];
 
 fn main() {

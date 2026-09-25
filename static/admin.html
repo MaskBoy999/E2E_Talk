@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>E2E Chat - Admin</title>
     <link rel="icon" href="/favicon.ico" sizes="any">
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=5">
     <style>
         .admin-card { max-width: 1200px; }
         .admin-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
@@ -851,6 +851,9 @@
     <script src="crypto.js?v=8"></script>
     <script src="secure-storage.js?v=3"></script>
     <script src="ui-dialog.js?v=1"></script>
-    <script src="admin.js?v=6"></script>
+    <!-- Native save bridge: an <a download> writes nothing inside a shell, so
+         the DB export needs the shell's own file write. -->
+    <script src="box-shell.js?v=3"></script>
+    <script src="admin.js?v=7"></script>
 </body>
 </html>

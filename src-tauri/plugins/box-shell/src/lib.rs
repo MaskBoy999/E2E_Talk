@@ -58,6 +58,12 @@ const PLUGIN_IDENTIFIER: &str = "com.e2echat.boxshell";
 #[cfg(not(target_os = "android"))]
 mod clipboard;
 
+/// Desktop-only: writing a decrypted file to disk, which an `<a download>`
+/// cannot do inside the WebView (see `save.rs`). Android implements the same
+/// command in Kotlin.
+#[cfg(not(target_os = "android"))]
+mod save;
+
 /// Put a decrypted attachment on the OS clipboard.
 ///
 /// One command name, two platforms: on Android the same call is handled by the
@@ -87,21 +93,44 @@ fn copyFileToClipboard<R: Runtime>(
     Ok(())
 }
 
+/// Save decrypted bytes to disk under their real name.
+///
+/// Same command name and same raw body as [`copyFileToClipboard`]
+/// (`[u32 LE name length][name UTF-8][file bytes]`), because the page builds one
+/// body and picks the command: the WebView's `<a download>` is a silent no-op
+/// inside the shell, so every "Download"/"Save a copy"/export has to go through
+/// native code to actually produce a file. Returns the absolute path written
+/// (shown in a toast — there is no save dialog to confirm it).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+#[allow(non_snake_case)]
+fn saveFile<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("saveFile: expected the raw request body".to_string());
+    };
+    let (name, bytes) = split_body(body)?;
+    let path = save::save_file(&app, name, bytes)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Split the raw body described on [`copyFileToClipboard`].
 #[cfg(not(target_os = "android"))]
 fn split_body(body: &[u8]) -> Result<(&str, &[u8]), String> {
     if body.len() < 4 {
-        return Err("copyFileToClipboard: body is too short to hold a name".to_string());
+        return Err("file body is too short to hold a name".to_string());
     }
     let len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
     if body.len() < 4 + len {
         return Err(format!(
-            "copyFileToClipboard: body is {} bytes but claims a {len}-byte name",
+            "file body is {} bytes but claims a {len}-byte name",
             body.len()
         ));
     }
     let name = std::str::from_utf8(&body[4..4 + len])
-        .map_err(|_| "copyFileToClipboard: name is not UTF-8".to_string())?;
+        .map_err(|_| "file body: name is not UTF-8".to_string())?;
     Ok((name, &body[4 + len..]))
 }
 
@@ -112,7 +141,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
     // half is Kotlin — registering a Rust handler for the same name there would
     // shadow it, so the handler is compiled out instead of branched at runtime.
     #[cfg(not(target_os = "android"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![copyFileToClipboard]);
+    let builder =
+        builder.invoke_handler(tauri::generate_handler![copyFileToClipboard, saveFile]);
     builder
         .setup(|app, api| {
             #[cfg(target_os = "android")]
