@@ -109,9 +109,11 @@ class SharedReadArgs {
  * Arguments for `copyFileToClipboard`: the file's real name, its MIME type, and
  * the decrypted bytes as base64.
  *
- * Base64 (and not a raw body) because Android's IPC has no request body — the
- * desktop half of this same command reads the bytes raw, and the page picks the
- * shape for the platform it is running on.
+ * Base64 inside a JSON argument — the one shape that works on both platforms:
+ * Android's IPC has no request body at all, and on desktop the raw-body path is
+ * blocked by the page's server-supplied CSP (Tauri falls back to an interface
+ * that serialises JSON and cannot carry a body), so the page sends this shape
+ * everywhere. See `file_payload` in the desktop half.
  */
 @InvokeArg
 class CopyFileArgs {
@@ -123,8 +125,8 @@ class CopyFileArgs {
 /**
  * Arguments for `saveFile`: the file's real name, its MIME type, and the
  * decrypted bytes as base64 — the same shape (and the same reason) as
- * [CopyFileArgs]: Android's IPC has no request body, so the desktop half reads
- * the bytes raw while the phone carries them base64.
+ * [CopyFileArgs]: base64 inside JSON is what both platforms accept, so the page
+ * builds one payload.
  */
 @InvokeArg
 class SaveFileArgs {

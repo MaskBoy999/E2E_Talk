@@ -21,8 +21,12 @@ function makeWorkbookBuffer() {
 // ── A shell stub ─────────────────────────────────────────────────────────────
 // box-shell.js reads `window.__TAURI__` live (it never captures the bridge), so
 // a stub installed at any point makes the page believe it is inside the app.
-// The recorder decodes both saveFile body shapes, so the test asserts on the
-// *contents* the page handed over, not just the command name.
+//
+// The payload is JSON with the bytes in base64 — the same shape on both
+// platforms, because the raw request body the desktop half used to take never
+// arrives (a server-supplied CSP blocks Tauri's custom-protocol IPC and the
+// fallback interface cannot carry a body). The recorder decodes it, so the test
+// asserts on the *contents* the page handed over, not just the command name.
 function installShellStub(page: Page, opts: { android?: boolean } = {}) {
     return page.evaluate((android) => {
         window.__saveCalls = [];
@@ -30,17 +34,17 @@ function installShellStub(page: Page, opts: { android?: boolean } = {}) {
             core: {
                 invoke: function (cmd: string, args: any) {
                     const record: any = { cmd: cmd };
-                    if (args && args.byteLength !== undefined) {
-                        // Desktop body: [u32 LE name length][name][bytes]
-                        const u8 = new Uint8Array(args);
-                        const len = new DataView(u8.buffer).getUint32(0, true);
-                        record.name = new TextDecoder().decode(u8.subarray(4, 4 + len));
-                        record.body = new TextDecoder().decode(u8.subarray(4 + len));
-                    } else if (args) {
-                        // Android arguments: { name, mime, data(base64) }
+                    if (args && typeof args === 'object' && args.data !== undefined) {
                         record.name = args.name;
                         record.mime = args.mime;
-                        record.body = android && args.data ? atob(args.data) : args.data;
+                        record.body = atob(args.data);
+                    } else if (args && args.byteLength !== undefined) {
+                        // Defence in depth: nothing sends this shape any more, but
+                        // if something does, record it rather than pass silently.
+                        const u8 = new Uint8Array(args);
+                        const len = new DataView(u8.buffer).getUint32(0, true);
+                        record.rawBody = true;
+                        record.name = new TextDecoder().decode(u8.subarray(4, 4 + len));
                     }
                     window.__saveCalls.push(record);
                     return Promise.resolve(
@@ -54,7 +58,7 @@ function installShellStub(page: Page, opts: { android?: boolean } = {}) {
 }
 
 test.describe('native save to disk (desktop shell)', () => {
-    test('boxSaveFile writes the raw body and reports success', async ({ page }) => {
+    test('boxSaveFile sends the bytes as base64 JSON and reports success', async ({ page }) => {
         await page.goto('about:blank');
         await page.addScriptTag({ path: 'static/box-shell.js' });
         await installShellStub(page);
@@ -70,6 +74,30 @@ test.describe('native save to disk (desktop shell)', () => {
         expect(calls[0].cmd).toBe('plugin:box-shell|saveFile');
         expect(calls[0].name).toBe('note.txt');
         expect(calls[0].body).toBe('hello world');
+        expect(calls[0].rawBody).toBeUndefined();
+        // One payload shape for desktop and Android.
+        expect(calls[0].mime).toBe('application/octet-stream');
+    });
+
+    test('a file over the shell transfer ceiling is refused before a payload is built', async ({ page }) => {
+        await page.goto('about:blank');
+        await page.addScriptTag({ path: 'static/box-shell.js' });
+        await installShellStub(page);
+
+        const result = await page.evaluate(async () => {
+            // The ceiling is the shell's own (100 MB). Assembling a 1.3x base64
+            // string for something the shell would refuse is the crash, not the
+            // fix, so the page checks first.
+            const big = new Blob([new Uint8Array(100 * 1024 * 1024 + 1)]);
+            const toasts: string[] = [];
+            (window as any).showToast = (m: string) => toasts.push(m);
+            const ok = await window.boxSaveFile(big, 'huge.iso');
+            return { ok, calls: window.__saveCalls.length, toasts };
+        });
+
+        expect(result.ok).toBe(false);
+        expect(result.calls).toBe(0);
+        expect(result.toasts.join(' ')).toContain('too large');
     });
 
     test('no shell → no native save; the helper still resolves', async ({ page }) => {

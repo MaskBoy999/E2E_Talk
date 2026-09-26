@@ -12114,3 +12114,77 @@ body.e2e-pip-active .e2e-pip-wrap * {
 .captions-text {
     word-break: break-word;
 }
+/* Document views built in doc-preview.js. Each renderer sets its own colours
+   (a Word page is white paper), but the shared pieces live here so every view
+   is legible on a phone as well as a desktop. */
+.doc-view {
+    width: 100%;
+    box-sizing: border-box;
+}
+/* A file this app genuinely cannot render (a Word 97-2003 .doc): the card
+   names the format and the way out. Sized for a phone first, centred on a
+   desktop. */
+.doc-view-notice {
+    max-width: 520px;
+    margin: 0 auto;
+    padding: 28px 20px;
+    text-align: center;
+    color: var(--text-muted);
+}
+.doc-view-notice-icon {
+    color: var(--accent);
+    margin-bottom: 10px;
+}
+.doc-view-notice-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+}
+.doc-view-notice-body {
+    font-size: 13px;
+    line-height: 1.55;
+}
+.doc-view-notice-name {
+    margin-top: 12px;
+    font-size: 12px;
+    font-family: ui-monospace, Consolas, monospace;
+    opacity: 0.75;
+    word-break: break-all;
+}
+/* Extracted text (an RTF .doc, the text inside .gz): monospace, wrapping, and
+   never wider than the viewport. */
+.doc-view-extract {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 16px;
+}
+.doc-view-note {
+    font-size: 12px;
+    color: var(--text-muted);
+    border-left: 3px solid var(--accent);
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin-bottom: 14px;
+}
+.doc-view-text {
+    margin: 0;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary, #eee);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 700px) {
+    .doc-view-notice {
+        padding: 20px 14px;
+    }
+    .doc-view-extract {
+        padding: 10px;
+    }
+    .doc-view-text {
+        font-size: 12.5px;
+    }
+}

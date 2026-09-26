@@ -76,10 +76,15 @@ var DocPreview = (function () {
         pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         ppt:  'application/vnd.ms-powerpoint',
         zip:  'application/zip',
-        '7z':  'application/x-7z-compressed',
-        rar:  'application/vnd.rar',
+        // `.tar`, `.gz`, `.tgz` and `.tar.gz` are listed *and* worked (see
+        // `listArchiveEntries`) — a claimed view that cannot render is worse
+        // than no view. `.rar` and `.7z` are deliberately absent: reading them
+        // needs a real codec (not a library this app ships), so they are
+        // ordinary attachments you download instead of files whose Preview
+        // button opens a failure.
         tar:  'application/x-tar',
         gz:   'application/gzip',
+        tgz:  'application/gzip',
         'tar.gz': 'application/gzip'
     };
 
@@ -95,7 +100,12 @@ var DocPreview = (function () {
             if (m.includes('sheet') || m.includes('excel')) return true;
             if (m.includes('presentation') || m.includes('powerpoint')) return true;
             if (m === 'text/csv' || m === 'text/tab-separated-values') return true;
-            if (m.includes('zip') || m.includes('rar') || m.includes('7z') || m.includes('tar') || m.includes('gzip')) return true;
+            if (m.includes('zip') || m.includes('tar') || m.includes('gzip')) return true;
+            // `.rar`/`.7z` (`application/vnd.rar`, `application/x-7z-compressed`)
+            // are NOT documents: no shipped reader can open either, so they are
+            // ordinary downloads rather than a Preview button that fails. Note
+            // the old check matched on `compressed` — which is how `.7z` was
+            // being claimed as previewable in the first place.
         }
         // Check extension
         if (filename) {
@@ -116,8 +126,8 @@ var DocPreview = (function () {
         if (ext === 'xlsx' || ext === 'xls' || ext === 'ods') return 'xlsx';
         if (ext === 'pptx' || ext === 'ppt') return 'pptx';
         if (ext === 'csv' || ext === 'tsv') return 'csv';
-        if (ext === 'zip' || ext === '7z' || ext === 'rar' || ext === 'tar' || ext === 'gz') return 'zip';
-        if (filename && (filename.toLowerCase().endsWith('.tar.gz') || filename.toLowerCase().endsWith('.tgz'))) return 'zip';
+        if (ext === 'zip' || ext === 'tar' || ext === 'gz' || ext === 'tgz') return 'zip';
+        if (filename && filename.toLowerCase().endsWith('.tar.gz')) return 'zip';
         // Check by mime type (OOXML types: check specific substrings before 'document')
         if (mimeType) {
             var m = mimeType.toLowerCase();
@@ -126,32 +136,50 @@ var DocPreview = (function () {
             if (m.includes('presentation') || m.includes('powerpoint')) return 'pptx';
             if (m.includes('word')) return 'docx';
             if (m === 'text/csv' || m === 'text/tab-separated-values') return 'csv';
-            if (m.includes('zip') || m.includes('rar') || m.includes('7z') || m.includes('tar') || m.includes('gzip')) return 'zip';
+            if (m.includes('zip') || m.includes('tar') || m.includes('gzip')) return 'zip';
         }
         return null;
     }
 
     // ── Modal ──────────────────────────────────────────────────────────
 
+    // Is this a phone-sized viewport? A Word page rendered by docx-preview is a
+    // *fixed* ~794px-wide sheet (A4 at 96dpi), so on a 380px phone the right
+    // half of every line used to sit outside the modal with nothing to scroll —
+    // the cropped document. Below this width the renderer is asked to drop the
+    // page geometry instead, so the text reflows to the device width.
+    function isNarrowView() {
+        try { return window.matchMedia('(max-width: 700px)').matches; } catch (_) { return false; }
+    }
+
     function openDocModal(title) {
         // Remove existing modal if any
         closeDocModal();
 
+        var narrow = isNarrowView();
+
         var overlay = document.createElement('div');
         overlay.id = 'doc-preview-overlay';
-        overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:20px';
+        // On a phone the modal *is* the screen: the 20px frame around a 90vh x
+        // 95vw box wasted a tenth of the display, so it goes edge to edge.
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:' + (narrow ? '0' : '20px');
 
         var modal = document.createElement('div');
-        modal.style.cssText = 'background:var(--bg-secondary,#1e1e2e);border-radius:12px;width:min(95vw,1100px);height:min(90vh,800px);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5)';
+        modal.id = 'doc-preview-modal';
+        modal.style.cssText = narrow
+            ? 'background:var(--bg-secondary,#1e1e2e);width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden'
+            : 'background:var(--bg-secondary,#1e1e2e);border-radius:12px;width:min(95vw,1100px);height:min(90vh,800px);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5)';
 
         // Header
         var header = document.createElement('div');
-        header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--bg-border,#333);background:var(--bg-primary,#1a1a2e)';
+        // The header owns its row and must not be squeezed by a long filename on
+        // a phone; the close button stays a 40px tap target either way.
+        header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px;border-bottom:1px solid var(--bg-border,#333);background:var(--bg-primary,#1a1a2e);flex-shrink:0';
         header.innerHTML = '<span style="color:var(--text-primary,#eee);font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' +
             escapeHtml(title) + '</span>';
         var closeBtn = document.createElement('button');
         closeBtn.innerHTML = '<svg class="ui-icon" width="16" height="16"><use href="#icon-close"/></svg>';
-        closeBtn.style.cssText = 'background:none;border:none;color:var(--text-muted,#999);font-size:20px;cursor:pointer;padding:4px 8px;margin-left:8px';
+        closeBtn.style.cssText = 'background:none;border:none;color:var(--text-muted,#999);font-size:20px;cursor:pointer;padding:4px 8px;margin-left:8px;flex:0 0 auto';
 
         closeBtn.onclick = closeDocModal;
         header.appendChild(closeBtn);
@@ -223,6 +251,160 @@ var DocPreview = (function () {
         }
     }
 
+    // ── Legacy Office: Word/PowerPoint 97-2003, and RTF ────────────────
+    //
+    // `.doc` and `.ppt` are OLE2 compound files (`D0 CF 11 E0 …`) — the format
+    // before OOXML. Both renderers here read the zip-based OOXML, so a legacy
+    // file threw inside the renderer and the view answered "Failed to render
+    // document": a view the app claimed and never had. Nothing here can read
+    // OLE2 (the text lives in a stream you reach through the piece table, and
+    // *guessing* at the byte layout yields garbled text, which is worse than an
+    // honest sentence), so a legacy file is handled by what it actually is:
+    //
+    //  * a `.doc` that is really RTF — very common, from mail merges and
+    //    LibreOffice exports — is shown as its extracted text, because RTF is a
+    //    text format that can be read exactly;
+    //  * a real OLE2 file gets a card that names the format and the way out,
+    //    instead of an error message.
+
+    function isOle2Bytes(bytes) {
+        return magic(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+    }
+
+    /// What is this blob, really? `'ole2'`, `'rtf'`, `'zip'` (real OOXML) or
+    /// `'other'`. Read from the *bytes*, because an extension can lie either way.
+    async function sniffOfficeFormat(blob) {
+        var head = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+        if (isOle2Bytes(head)) return 'ole2';
+        if (isZipBytes(head)) return 'zip';
+        var six = new Uint8Array(await blob.slice(0, 6).arrayBuffer());
+        if (String.fromCharCode.apply(null, six) === '{\\rtf1') return 'rtf';
+        return 'other';
+    }
+
+    /// RTF → plain text.
+    ///
+    /// Deliberately a *text* extractor, not a renderer: control words become the
+    /// characters they stand for (`\par` a newline, `\tab` a tab, `\uN` its code
+    /// point, `\'hh` its byte), and the groups that carry no prose (font table,
+    /// colour table, stylesheet, embedded pictures, revision info) are skipped
+    /// whole. Tables and layout are lost — the card says so.
+    function extractRtfText(bytes) {
+        var src = '';
+        for (var i = 0; i < bytes.length; i++) src += String.fromCharCode(bytes[i]);
+        var skipDest = {
+            fonttbl: 1, colortbl: 1, stylesheet: 1, info: 1, pict: 1, object: 1, themedata: 1,
+            datastore: 1, latentstyles: 1, generator: 1, listtable: 1, listoverridetable: 1,
+            rsidtbl: 1, xmlnstbl: 1, filetbl: 1, revtbl: 1, filedata: 1, shppict: 1, nonshppict: 1,
+        };
+        var out = '';
+        var skipDepth = 0;
+        var pendingSkip = false;
+        var skipStack = [];
+        var at = 0;
+        while (at < src.length) {
+            var ch = src.charAt(at);
+            if (ch === '{') {
+                skipStack.push(pendingSkip);
+                if (pendingSkip) skipDepth++;
+                pendingSkip = false;
+                at++;
+                continue;
+            }
+            if (ch === '}') {
+                if (skipStack.pop()) skipDepth--;
+                at++;
+                continue;
+            }
+            if (ch === '\\') {
+                var m = /^\\([a-zA-Z]+)(-?\d+)? ?/.exec(src.substring(at, at + 40));
+                if (m) {
+                    var word = m[1];
+                    if (!skipDepth) {
+                        if (skipDest[word]) pendingSkip = true;
+                        else if (word === 'par' || word === 'line' || word === 'sect' || word === 'page' || word === 'row') out += '\n';
+                        else if (word === 'cell' || word === 'tab') out += '\t';
+                        else if (word === 'bullet') out += '•';
+                        else if (word === 'u' && m[2] !== undefined) out += String.fromCharCode(((parseInt(m[2], 10) % 65536) + 65536) % 65536);
+                    }
+                    at += m[0].length;
+                    continue;
+                }
+                var next = src.charAt(at + 1);
+                if (next === '*') { pendingSkip = true; at += 2; continue; }
+                if (next === "'") {
+                    if (!skipDepth) {
+                        var code = parseInt(src.substr(at + 2, 2), 16);
+                        out += isNaN(code) ? '' : String.fromCharCode(code);
+                    }
+                    at += 4;
+                    continue;
+                }
+                if (!skipDepth) {
+                    if (next === '{' || next === '}' || next === '\\') out += next;
+                    else if (next === '~') out += ' ';
+                }
+                at += 2;
+                continue;
+            }
+            if (!skipDepth) {
+                // A bare CR/LF in the source is a line break *for the RTF file*,
+                // never part of the document.
+                if (ch !== '\r' && ch !== '\n') out += ch;
+            }
+            at++;
+        }
+        return out.replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    /// The card for a file this app genuinely cannot render, naming the format
+    /// and the way out. Never an error message: the file is fine, the viewer is
+    /// simply not a Word/PowerPoint 97-2003 reader.
+    function renderLegacyNotice(container, filename, label, advice) {
+        container.innerHTML = '';
+        container.style.cssText += ';padding:0';
+        var wrap = document.createElement('div');
+        wrap.className = 'doc-view doc-view-notice';
+        var iconEl = document.createElement('div');
+        iconEl.className = 'doc-view-notice-icon';
+        iconEl.innerHTML = icon('warning', 28);
+        var title = document.createElement('div');
+        title.className = 'doc-view-notice-title';
+        title.textContent = label;
+        var body = document.createElement('div');
+        body.className = 'doc-view-notice-body';
+        body.textContent = advice;
+        var name = document.createElement('div');
+        name.className = 'doc-view-notice-name';
+        name.textContent = filename || '';
+        wrap.appendChild(iconEl);
+        wrap.appendChild(title);
+        wrap.appendChild(body);
+        wrap.appendChild(name);
+        container.appendChild(wrap);
+    }
+
+    /// Extracted text (an RTF `.doc`, a plain `.gz` of a text file): shown as
+    /// text, with a one-line note saying where it came from. `textContent`, not
+    /// `innerHTML` — this is a document's own words, and they are untrusted.
+    function renderExtractedText(container, filename, text, note) {
+        container.innerHTML = '';
+        container.style.cssText += ';padding:0';
+        var wrap = document.createElement('div');
+        wrap.className = 'doc-view doc-view-extract';
+        if (note) {
+            var noteEl = document.createElement('div');
+            noteEl.className = 'doc-view-note';
+            noteEl.textContent = note;
+            wrap.appendChild(noteEl);
+        }
+        var pre = document.createElement('pre');
+        pre.className = 'doc-view-text';
+        pre.textContent = text && text.length ? text : '(no text found in ' + (filename || 'this file') + ')';
+        wrap.appendChild(pre);
+        container.appendChild(wrap);
+    }
+
     // ── DOCX Preview ───────────────────────────────────────────────────
 
     async function renderDocx(blob, container) {
@@ -232,16 +414,40 @@ var DocPreview = (function () {
             return;
         }
 
-        container.style.cssText += ';background:#fff;color:#333;padding:24px;overflow-y:auto';
+        // Two renderings, one document. On a desktop-sized viewport a Word page
+        // should look like a Word page: a white sheet with margins, page breaks
+        // and all. On a phone that same fixed 794px sheet is *wider than the
+        // screen*, which is why the document arrived cropped with half of every
+        // line missing — so below 700px the page geometry is dropped instead
+        // (`ignoreWidth`/`ignoreHeight`), the page wrapper is skipped and pages
+        // stop breaking: the text simply reflows to the device width.
+        var narrow = isNarrowView();
+        container.className = (container.className ? container.className + ' ' : '') + 'doc-view doc-view-docx';
+        container.style.cssText += ';background:#fff;color:#333;padding:' + (narrow ? '10px' : '24px') + ';overflow:auto';
+
+        // A document is built for paper, and paper is narrower than a phone in
+        // portrait: images and tables are told to fit the column instead of
+        // pushing a horizontal scrollbar across every paragraph.
+        if (narrow) {
+            var fit = document.createElement('style');
+            fit.textContent = '.doc-view-docx img { max-width: 100% !important; height: auto !important; }'
+                + ' .doc-view-docx table { max-width: 100% !important; }'
+                + ' .doc-view-docx .docx-narrow { padding: 0 !important; }';
+            container.appendChild(fit);
+        }
+
         var wrapper = document.createElement('div');
         wrapper.className = 'docx-container';
-        wrapper.style.cssText = 'max-width:800px;margin:0 auto;font-family:Calibri,Arial,sans-serif;font-size:14px;line-height:1.6';
+        wrapper.style.cssText = 'max-width:800px;margin:0 auto;font-family:Calibri,Arial,sans-serif;font-size:14px;line-height:1.6;width:100%';
         container.appendChild(wrapper);
 
         try {
             await docx.renderAsync(blob, wrapper, wrapper, {
-                className: 'docx',
-                breakPages: true,
+                className: narrow ? 'docx docx-narrow' : 'docx',
+                breakPages: !narrow,
+                ignoreWidth: narrow,
+                ignoreHeight: narrow,
+                inWrapper: !narrow,
                 ignoreLastRenderedPageBreak: false,
                 renderHeaders: true,
                 renderFooters: true,
@@ -396,20 +602,181 @@ var DocPreview = (function () {
 
     // ── ZIP Preview ───────────────────────────────────────────────────
 
-    async function renderZip(blob, container, filename) {
+    // ── Archive listing: zip, tar, gzip ────────────────────────────────
+    //
+    // `.tar`, `.gz`, `.tgz` and `.tar.gz` were claimed as previewable but JSZip
+    // is a *zip* reader: handed a tar or a gzip stream it refuses, the view fell
+    // into its error branch, and the file looked broken. Browsers already
+    // decompress gzip natively (`DecompressionStream`) and tar is a plain
+    // 512-byte-header format, so the whole family works here with no new library.
+    // Every entry exposes the same `async('uint8array')` the JSZip entries do, so
+    // the row click / inline preview below is unchanged for all three.
+
+    function magic(bytes, sig) {
+        if (bytes.length < sig.length) return false;
+        for (var i = 0; i < sig.length; i++) if (bytes[i] !== sig[i]) return false;
+        return true;
+    }
+
+    function isGzipBytes(bytes) {
+        return magic(bytes, [0x1f, 0x8b]);
+    }
+
+    function isZipBytes(bytes) {
+        return magic(bytes, [0x50, 0x4b, 0x03, 0x04]);
+    }
+
+    // A tar header is 512 bytes whose checksum (eight octal digits at 148, with
+    // that field read as eight spaces) must equal the sum of all 512 bytes. That
+    // is the format's own integrity check, and unlike the `ustar` magic it also
+    // accepts the older POSIX/v7 headers that have no magic at all.
+    function tarHeaderOk(bytes, at) {
+        if (at + 512 > bytes.length) return false;
+        var sum = 0;
+        for (var i = 0; i < 512; i++) {
+            sum += (i >= 148 && i < 156) ? 32 : bytes[at + i];
+        }
+        var text = '';
+        for (var j = 148; j < 156; j++) {
+            var c = bytes[at + j];
+            if (c === 0 || c === 32) continue;
+            text += String.fromCharCode(c);
+        }
+        if (!/^[0-7]+$/.test(text)) return false;
+        var declared = parseInt(text, 8);
+        // GNU tar writes the checksum with a trailing NUL/space and can be signed;
+        // both readings are accepted.
+        return declared === sum;
+    }
+
+    function isZeroBlock(bytes, at) {
+        for (var i = 0; i < 512; i++) if (bytes[at + i] !== 0) return false;
+        return true;
+    }
+
+    // One valid header is not enough to call a blob a tar (a JPEG's first 512
+    // bytes could in principle pass by accident), so the *next* block has to
+    // agree with the first header's size: another valid header, the two zero
+    // blocks that end an archive, or the end of the data. A tar of a single
+    // small file is header + padding + the end blocks, which is exactly the
+    // case that used to slip through here and be listed as one gzipped file.
+    function looksLikeTar(bytes) {
+        if (!tarHeaderOk(bytes, 0)) return false;
+        var size = parseTarNumber(bytes, 124, 12);
+        if (!isFinite(size) || size < 0) return false;
+        var next = 512 + Math.ceil(size / 512) * 512;
+        if (next >= bytes.length) return true;
+        if (bytes.length >= next + 512 && isZeroBlock(bytes, next)) return true;
+        return tarHeaderOk(bytes, next);
+    }
+
+    function parseTarText(bytes, at, len) {
+        var end = at + len;
+        for (var i = at; i < end; i++) if (bytes[i] === 0) { end = i; break; }
+        return new TextDecoder().decode(bytes.subarray(at, Math.min(end, at + len)));
+    }
+
+    function parseTarNumber(bytes, at, len) {
+        var text = '';
+        for (var i = at; i < at + len; i++) {
+            var c = bytes[i];
+            if (c === 0 || c === 32) continue;
+            text += String.fromCharCode(c);
+        }
+        return text ? parseInt(text, 8) : 0;
+    }
+
+    // Walk the headers. GNU's `L`/`K` entries carry the name/link of the *next*
+    // entry, `x`/`g` are pax metadata for it, and `5` is a directory.
+    function listTarEntries(bytes, fileName) {
+        var out = [];
+        var at = 0;
+        var longName = null;
+        while (at + 512 <= bytes.length) {
+            var allZero = true;
+            for (var z = 0; z < 512; z++) if (bytes[at + z] !== 0) { allZero = false; break; }
+            if (allZero) break;
+            if (!tarHeaderOk(bytes, at)) break;
+            var name = longName || parseTarText(bytes, at, 100);
+            var prefix = parseTarText(bytes, at + 345, 155);
+            if (prefix) name = prefix + '/' + name;
+            var size = parseTarNumber(bytes, 124, 12);
+            var type = String.fromCharCode(bytes[at + 156] || 48);
+            var dataAt = at + 512;
+            if (type === 'L') {
+                longName = parseTarText(bytes, dataAt, size);
+            } else if (type !== 'x' && type !== 'g') {
+                longName = null;
+                out.push({
+                    path: name.replace(/^(\.\/)+/, ''),
+                    size: type === '5' ? 0 : size,
+                    async: function (offset, length) {
+                        return Promise.resolve(bytes.subarray(offset, offset + length));
+                    }.bind(null, dataAt, size),
+                });
+            }
+            at = dataAt + Math.ceil(size / 512) * 512;
+        }
+        if (!out.length) {
+            throw new Error('"' + (fileName || 'archive') + '" is a tar file with no readable entries');
+        }
+        return out;
+    }
+
+    async function gunzipBytes(bytes) {
+        if (typeof DecompressionStream !== 'function') {
+            throw new Error('this engine cannot decompress gzip');
+        }
+        var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+
+    // One entry point for every archive the app claims: the container is
+    // detected from the *bytes*, not the name (a `.tar.gz` arrives as gzip, a
+    // `.zip` renamed to `.tar` still lists).
+    async function listArchiveEntries(blob, filename) {
+        var bytes = new Uint8Array(await blob.arrayBuffer());
+        if (isGzipBytes(bytes)) {
+            var inner = await gunzipBytes(bytes);
+            if (inner.length && looksLikeTar(inner)) {
+                return { kind: 'tar', entries: listTarEntries(inner, filename) };
+            }
+            // A plain `.gz` of a single file: it has no entries of its own, so it
+            // is listed as the one file it decompresses to.
+            var plain = (filename || 'file.gz').replace(/\.(tar\.)?(gz|tgz)$/i, '') || 'file';
+            return {
+                kind: 'gzip',
+                entries: [{
+                    path: plain,
+                    size: inner.length,
+                    async: function () { return Promise.resolve(inner); },
+                }],
+            };
+        }
+        if (looksLikeTar(bytes)) {
+            return { kind: 'tar', entries: listTarEntries(bytes, filename) };
+        }
         await loadDocxPreview(); // loads jszip
         if (!window.JSZip) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">JSZip failed to load</div>';
-            return;
+            throw new Error('JSZip failed to load');
         }
-
         var zip = await JSZip.loadAsync(blob);
         var entries = [];
         zip.forEach(function (relativePath, entry) {
             if (!entry.dir) {
-                entries.push({ path: relativePath, size: entry._data ? entry._data.uncompressedSize || 0 : 0, entry: entry });
+                entries.push({
+                    path: relativePath,
+                    size: entry._data ? entry._data.uncompressedSize || 0 : 0,
+                    async: function (type) { return entry.async(type || 'uint8array'); },
+                });
             }
         });
+        return { kind: 'zip', entries: entries };
+    }
+
+    async function renderZip(blob, container, filename) {
+        var listed = await listArchiveEntries(blob, filename);
+        var entries = listed.entries;
         entries.sort(function (a, b) { return a.path.localeCompare(b.path); });
 
         container.innerHTML = '';
@@ -458,7 +825,7 @@ var DocPreview = (function () {
             // Click to preview text/image files inside the zip
             row.addEventListener('click', async function () {
                 try {
-                    var data = await item.entry.async('uint8array');
+                    var data = await item.async('uint8array');
                     var ext = item.path.split('.').pop().toLowerCase();
                     var textExts = ['txt','js','ts','jsx','tsx','py','cpp','c','h','hpp','java','rs','go','sh','sql','html','htm','css','json','xml','md','csv','yaml','yml','toml','ini','log','env','svg'];
                     var imgExts = ['png','jpg','jpeg','gif','bmp','webp','svg'];
@@ -582,11 +949,37 @@ var DocPreview = (function () {
             }
         });
 
+        // A slide is laid out at absolute pixel coordinates (renderPptxSlide
+        // positions every shape), so on a phone the canvas is wider than the
+        // screen and each slide arrived cropped. The whole canvas is scaled down
+        // instead — layout intact — and the wrapper takes the scaled height, so
+        // the slides stay stacked with no gaps and no overlap.
+        var avail = container.clientWidth || Math.round(container.getBoundingClientRect().width) || 0;
+
         // Render each slide
         for (var si = 0; si < slideFiles.length; si++) {
             var xmlStr = await slideFiles[si].entry.async('string');
             var slideDiv = await renderPptxSlide(xmlStr, si + 1, mediaCache, zip);
-            container.appendChild(slideDiv);
+            // The canvas size is written on the element by the renderer.
+            var PX_W = parseFloat(slideDiv.style.width) || 0;
+            var slideScale = (avail > 0 && PX_W > avail) ? Math.max(avail / PX_W, 0.2) : 1;
+            if (slideScale < 1) {
+                var fitWrap = document.createElement('div');
+                fitWrap.className = 'doc-view-slide';
+                // `overflow:hidden`: a transform does not change the *layout*
+                // box, so the unscaled width would still push a horizontal
+                // scrollbar across the modal even though nothing visible
+                // overflows it.
+                fitWrap.style.cssText = 'width:100%;display:flex;justify-content:center;flex-shrink:0;overflow:hidden';
+                slideDiv.style.transform = 'scale(' + slideScale + ')';
+                slideDiv.style.transformOrigin = 'top center';
+                var PX_H = parseFloat(slideDiv.style.height) || 0;
+                slideDiv.style.marginBottom = Math.round(PX_H * (slideScale - 1)) + 'px';
+                fitWrap.appendChild(slideDiv);
+                container.appendChild(fitWrap);
+            } else {
+                container.appendChild(slideDiv);
+            }
         }
     }
 
@@ -807,19 +1200,52 @@ var DocPreview = (function () {
         var title = filename || 'Document';
         var container = openDocModal(title);
 
+        // Every renderer *appends* to this container, so the "Loading
+        // document…" placeholder has to be cleared here — for the ones that do
+        // not overwrite it themselves (docx, xlsx, csv, pptx) it used to stay
+        // as a full-viewport-height first child, which is the "stuck loading"
+        // document: the file was there all along, one screen down.
+        container.innerHTML = '';
+
         try {
             switch (docType) {
                 case 'pdf':
                     await renderPdf(blob, container);
                     break;
                 case 'docx':
-                case 'pptx':
+                case 'pptx': {
+                    // The renderers read OOXML (a zip); a legacy OLE2 `.doc`/`.ppt`
+                    // or an RTF `.doc` used to reach them anyway and fail. The
+                    // bytes decide, not the extension.
+                    var format = await sniffOfficeFormat(blob);
+                    var newer = docType === 'pptx' ? 'pptx' : 'docx';
+                    if (format === 'ole2') {
+                        renderLegacyNotice(
+                            container,
+                            filename,
+                            docType === 'pptx' ? 'PowerPoint 97–2003 file' : 'Word 97–2003 file',
+                            'This is a legacy .' + (docType === 'pptx' ? 'ppt' : 'doc') + ' file, which is a completely different format '
+                                + 'from the .' + newer + ' this app reads. Open it in Word, PowerPoint or LibreOffice and '
+                                + 'save a copy as .' + newer + ' to view it here — or use "Save a copy" to keep the original.'
+                        );
+                        break;
+                    }
                     if (docType === 'pptx') {
                         await renderPptx(blob, container);
-                    } else {
-                        await renderDocx(blob, container);
+                        break;
                     }
+                    if (format === 'rtf') {
+                        renderExtractedText(
+                            container,
+                            filename,
+                            extractRtfText(new Uint8Array(await blob.arrayBuffer())),
+                            'Rich text (.doc/.rtf) — text extracted, formatting not preserved'
+                        );
+                        break;
+                    }
+                    await renderDocx(blob, container);
                     break;
+                }
                 case 'xlsx':
                     await renderXlsx(blob, container);
                     break;
@@ -864,6 +1290,38 @@ var DocPreview = (function () {
         historyIdx: -1,
         filename: '',
     };
+
+    // The pages array is an *order*, not a map onto the PDF file. Duplicating,
+    // deleting, merging and drag-reordering each desynchronise a slot from the
+    // page number it holds, and `page.index` is the only value that stays true —
+    // so every pdf-lib call addresses `page.index` and nothing else. Addressing
+    // the array slot instead asked pdf-lib for a page outside the document,
+    // which is what threw "Cannot read properties of undefined (reading 'node')"
+    // the moment a page was duplicated — and silently rendered the wrong page
+    // after a delete.
+    function pdfVisiblePages() {
+        return _pdfEditor.pages.filter(function (p) { return !p.deleted; });
+    }
+
+    function pdfCurrentPageEntry() {
+        var visible = pdfVisiblePages();
+        if (!visible.length) return null;
+        var at = Math.min(Math.max(_pdfEditor.currentPage, 0), visible.length - 1);
+        return visible[at];
+    }
+
+    // Snapshot after a change to the *document* itself (text, whiteout, drawing,
+    // crop, merge). History stores bytes because a pdf-lib document cannot be
+    // cloned, and those bytes used to be taken only when the file was opened —
+    // so Undo after an annotation reverted to the untouched original while the
+    // page metadata kept the newer pages, and Export then asked for pages that
+    // no longer existed.
+    async function pdfEditorCommit() {
+        if (_pdfEditor.pdfDoc) {
+            try { _pdfEditor.pdfBytes = await _pdfEditor.pdfDoc.save(); } catch (_) {}
+        }
+        pdfEditorSaveState();
+    }
 
     function pdfEditorSaveState() {
         // Save both page metadata AND the actual PDF bytes for undo/redo
@@ -1175,7 +1633,7 @@ var DocPreview = (function () {
                     var ctx = c.getContext('2d');
                     await page2.render({ canvasContext: ctx, viewport: viewport }).promise;
                 } catch (_) {}
-            })(canvas, i, page.rotation);
+            })(canvas, page.index, page.rotation);
 
             visibleIdx++;
         });
@@ -1187,20 +1645,12 @@ var DocPreview = (function () {
         if (!panel) return;
         panel.innerHTML = '<div style="color:#999">Loading page...</div>';
 
-        var visibleIdx = 0;
-        var targetIdx = -1;
-        for (var i = 0; i < _pdfEditor.pages.length; i++) {
-            if (_pdfEditor.pages[i].deleted) continue;
-            if (visibleIdx === _pdfEditor.currentPage) { targetIdx = i; break; }
-            visibleIdx++;
-        }
-        if (targetIdx === -1) { panel.innerHTML = '<div style="color:#999">No pages</div>'; return; }
-
-        var page = _pdfEditor.pages[targetIdx];
+        var page = pdfCurrentPageEntry();
+        if (!page) { panel.innerHTML = '<div style="color:#999">No pages</div>'; return; }
 
         try {
             var tempDoc = await PDFLib.PDFDocument.create();
-            var copiedPages = await tempDoc.copyPages(_pdfEditor.pdfDoc, [targetIdx]);
+            var copiedPages = await tempDoc.copyPages(_pdfEditor.pdfDoc, [page.index]);
             var copied = copiedPages[0];
             if (page.rotation) copied.setRotation(PDFLib.degrees(page.rotation));
             tempDoc.addPage(copied);
@@ -1210,9 +1660,14 @@ var DocPreview = (function () {
 
             // Scale to fit panel
             var panelRect = panel.getBoundingClientRect();
+            // Fit the page to the panel, with a floor: on a phone the panel can
+            // measure 0 on the frame the editor opens (the layout lands a tick
+            // later), and a scale of 0 produced an empty canvas that looked like
+            // a page that never finished rendering.
+            var natural = pdfPage.getViewport({ scale: 1 });
             var scale = Math.min(
-                (panelRect.width - 40) / pdfPage.getViewport({ scale: 1 }).width,
-                (panelRect.height - 40) / pdfPage.getViewport({ scale: 1 }).height,
+                Math.max((panelRect.width - 40) / natural.width, 0.15),
+                Math.max((panelRect.height - 40) / natural.height, 0.15),
                 2.0
             );
             var viewport = pdfPage.getViewport({ scale: scale });
@@ -1283,20 +1738,33 @@ var DocPreview = (function () {
         }
     }
 
-    function pdfEditorDuplicatePage() {
-        var visibleIdx = 0;
-        for (var i = 0; i < _pdfEditor.pages.length; i++) {
-            if (_pdfEditor.pages[i].deleted) continue;
-            if (visibleIdx === _pdfEditor.currentPage) {
-                var copy = Object.assign({}, _pdfEditor.pages[i]);
-                _pdfEditor.pages.splice(i + 1, 0, copy);
-                _pdfEditor.currentPage = visibleIdx + 1;
-                pdfEditorSaveState();
-                pdfEditorRenderThumbnails();
-                pdfEditorRenderPreview();
-                return;
-            }
-            visibleIdx++;
+    // Duplicate the current page as a **real** page of the file.
+    //
+    // Copying only the metadata (what this used to do) pointed two entries at
+    // one page number: the second copy could not be edited on its own, and the
+    // page after it shifted by one so every later lookup read the wrong page. A
+    // duplicate is a new page in the document (`copyPages` → `addPage`), the
+    // order list gets the *new* number inserted next to the original, and the
+    // file is snapshotted so Undo/Duplicate/Export all agree.
+    async function pdfEditorDuplicatePage() {
+        var entry = pdfCurrentPageEntry();
+        if (!entry) return;
+        try {
+            var copiedPages = await _pdfEditor.pdfDoc.copyPages(_pdfEditor.pdfDoc, [entry.index]);
+            _pdfEditor.pdfDoc.addPage(copiedPages[0]);
+            var newIndex = _pdfEditor.pdfDoc.getPageCount() - 1;
+            var slot = _pdfEditor.pages.indexOf(entry);
+            _pdfEditor.pages.splice(slot + 1, 0, {
+                index: newIndex,
+                rotation: entry.rotation || 0,
+                deleted: false,
+            });
+            _pdfEditor.currentPage = Math.min(_pdfEditor.currentPage + 1, pdfVisiblePages().length - 1);
+            await pdfEditorCommit();
+            pdfEditorRenderThumbnails();
+            pdfEditorRenderPreview();
+        } catch (e) {
+            alert('Failed to duplicate the page: ' + e.message);
         }
     }
 
@@ -1321,7 +1789,7 @@ var DocPreview = (function () {
                     _pdfEditor.pdfDoc.addPage(copiedPage);
                     _pdfEditor.pages.push({ index: _pdfEditor.pdfDoc.getPageCount() - 1, rotation: 0, deleted: false });
                 }
-                pdfEditorSaveState();
+                await pdfEditorCommit();
                 pdfEditorRenderThumbnails();
                 pdfEditorRenderPreview();
                 alert('Merged ' + mergePageCount + ' page(s)');
@@ -1377,23 +1845,20 @@ var DocPreview = (function () {
         var size = parseFloat(await uiPrompt('Font size:', '14')) || 14;
 
         try {
-            var visibleIdx = 0;
-            for (var i = 0; i < _pdfEditor.pages.length; i++) {
-                if (_pdfEditor.pages[i].deleted) continue;
-                if (visibleIdx === _pdfEditor.currentPage) {
-                    var page = _pdfEditor.pdfDoc.getPage(i);
-                    page.drawText(text, {
-                        x: x * 72,
-                        y: y * 72,
-                        size: size,
-                        color: PDFLib.rgb(0, 0, 0),
-                    });
-                    pdfEditorSaveState();
-                    pdfEditorRenderPreview();
-                    return;
-                }
-                visibleIdx++;
-            }
+            var entry = pdfCurrentPageEntry();
+            if (!entry) return;
+            var page = _pdfEditor.pdfDoc.getPage(entry.index);
+            page.drawText(text, {
+                x: x * 72,
+                y: y * 72,
+                size: size,
+                color: PDFLib.rgb(0, 0, 0),
+            });
+            await pdfEditorCommit();
+            // The thumbnail has to be redrawn too, or the page rail keeps
+            // showing the page as it was before the text landed.
+            pdfEditorRenderThumbnails();
+            pdfEditorRenderPreview();
         } catch (e) {
             alert('Failed to add text: ' + e.message);
         }
@@ -1406,25 +1871,20 @@ var DocPreview = (function () {
         var h = parseFloat(await uiPrompt('Height (inches):', '1')) || 1;
 
         try {
-            var visibleIdx = 0;
-            for (var i = 0; i < _pdfEditor.pages.length; i++) {
-                if (_pdfEditor.pages[i].deleted) continue;
-                if (visibleIdx === _pdfEditor.currentPage) {
-                    var page = _pdfEditor.pdfDoc.getPage(i);
-                    page.drawRectangle({
-                        x: x * 72,
-                        y: y * 72,
-                        width: w * 72,
-                        height: h * 72,
-                        color: PDFLib.rgb(1, 1, 1),
-                        borderColor: PDFLib.rgb(1, 1, 1),
-                    });
-                    pdfEditorSaveState();
-                    pdfEditorRenderPreview();
-                    return;
-                }
-                visibleIdx++;
-            }
+            var entry = pdfCurrentPageEntry();
+            if (!entry) return;
+            var page = _pdfEditor.pdfDoc.getPage(entry.index);
+            page.drawRectangle({
+                x: x * 72,
+                y: y * 72,
+                width: w * 72,
+                height: h * 72,
+                color: PDFLib.rgb(1, 1, 1),
+                borderColor: PDFLib.rgb(1, 1, 1),
+            });
+            await pdfEditorCommit();
+            pdfEditorRenderThumbnails();
+            pdfEditorRenderPreview();
         } catch (e) {
             alert('Failed to whiteout: ' + e.message);
         }
@@ -1465,27 +1925,43 @@ var DocPreview = (function () {
         ctx.lineCap = 'round';
         var drawing = false;
 
+        // The page this overlay was opened on, captured *now*: the tools panel
+        // stays reachable while drawing, so reading the current page at "Apply"
+        // time could paste the strokes onto a page the user switched to.
+        var drawEntry = pdfCurrentPageEntry();
+
         // Scale factor: canvas pixel dimensions vs CSS display dimensions
         function getScale() {
             var rect = drawCanvas.getBoundingClientRect();
             return { sx: canvas.width / rect.width, sy: canvas.height / rect.height };
         }
 
-        drawCanvas.onmousedown = function (e) {
+        // Pointer events, not mouse events: on a phone there is no mouse, and
+        // `pointerdown/move/up` covers mouse, stylus and finger through one path
+        // (a finger drag also has to be kept out of the page's scroll, hence
+        // `touch-action: none` above and the pointer capture below).
+        drawCanvas.style.touchAction = 'none';
+        drawCanvas.onpointerdown = function (e) {
             drawing = true;
-            ctx.beginPath();
+            if (drawCanvas.setPointerCapture) {
+                try { drawCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+            }
             var rect = drawCanvas.getBoundingClientRect();
             var sc = getScale();
+            ctx.beginPath();
             ctx.moveTo((e.clientX - rect.left) * sc.sx, (e.clientY - rect.top) * sc.sy);
+            e.preventDefault();
         };
-        drawCanvas.onmousemove = function (e) {
+        drawCanvas.onpointermove = function (e) {
             if (!drawing) return;
             var rect = drawCanvas.getBoundingClientRect();
             var sc = getScale();
             ctx.lineTo((e.clientX - rect.left) * sc.sx, (e.clientY - rect.top) * sc.sy);
             ctx.stroke();
+            e.preventDefault();
         };
-        drawCanvas.onmouseup = function () { drawing = false; };
+        drawCanvas.onpointerup = function () { drawing = false; };
+        drawCanvas.onpointercancel = function () { drawing = false; };
 
         // Confirm/cancel buttons
         var drawBar = document.createElement('div');
@@ -1504,25 +1980,17 @@ var DocPreview = (function () {
                 var imgBytes = Uint8Array.from(atob(imgDataUrl.split(',')[1]), function (c) { return c.charCodeAt(0); });
                 var img = await _pdfEditor.pdfDoc.embedPng(imgBytes);
 
-                var visibleIdx = 0;
-                for (var i = 0; i < _pdfEditor.pages.length; i++) {
-                    if (_pdfEditor.pages[i].deleted) continue;
-                    if (visibleIdx === _pdfEditor.currentPage) {
-                        var page = _pdfEditor.pdfDoc.getPage(i);
-                        var dims = page.getSize();
-                        var scaleX = dims.width / drawCanvas.width;
-                        var scaleY = dims.height / drawCanvas.height;
-                        page.drawImage(img, {
-                            x: 0,
-                            y: 0,
-                            width: dims.width,
-                            height: dims.height,
-                        });
-                        break;
-                    }
-                    visibleIdx++;
+                if (drawEntry) {
+                    var page = _pdfEditor.pdfDoc.getPage(drawEntry.index);
+                    var dims = page.getSize();
+                    page.drawImage(img, {
+                        x: 0,
+                        y: 0,
+                        width: dims.width,
+                        height: dims.height,
+                    });
                 }
-                pdfEditorSaveState();
+                await pdfEditorCommit();
                 drawBar.remove();
                 // Unwrap: move canvas back to its original parent and remove wrapper
                 if (wrap && wrap.parentNode) {
@@ -1556,30 +2024,38 @@ var DocPreview = (function () {
         var right = parseFloat(await uiPrompt('Right margin to remove (inches):', '0.5')) || 0;
         var top = parseFloat(await uiPrompt('Top margin to remove (inches):', '0.5')) || 0;
 
-        if (left + right >= 8.5 || bottom + top >= 11) {
-            alert('Crop margins too large');
+        if (left < 0 || bottom < 0 || right < 0 || top < 0) {
+            alert('Crop margins cannot be negative');
             return;
         }
-
+        // The size guard used to assume US-Letter whatever the page actually
+        // was; it is checked against the real page below, where the page is
+        // known.
         try {
-            var visibleIdx = 0;
-            for (var i = 0; i < _pdfEditor.pages.length; i++) {
-                if (_pdfEditor.pages[i].deleted) continue;
-                if (visibleIdx === _pdfEditor.currentPage) {
-                    var page = _pdfEditor.pdfDoc.getPage(i);
-                    var dims = page.getSize();
-                    page.setCropBox(
-                        left * 72,
-                        bottom * 72,
-                        dims.width - right * 72,
-                        dims.height - top * 72
-                    );
-                    pdfEditorSaveState();
-                    pdfEditorRenderPreview();
-                    return;
-                }
-                visibleIdx++;
+            var entry = pdfCurrentPageEntry();
+            if (!entry) return;
+            var page = _pdfEditor.pdfDoc.getPage(entry.index);
+            var dims = page.getSize();
+            var iw = dims.width / 72;
+            var ih = dims.height / 72;
+            if (left + right >= iw || bottom + top >= ih) {
+                alert('Crop margins too large for this page (' + iw.toFixed(2) + '" × ' + ih.toFixed(2) + '")');
+                return;
             }
+            // `setCropBox(x, y, width, height)` — the last two arguments are the
+            // box's *size*, not its right/top edge. Passing `width - right` and
+            // `height - top` (what this did) made a box that started `left` in
+            // from the edge but still measured almost the full page, so it hung
+            // off the right/top of the page and the "crop" did nothing visible.
+            page.setCropBox(
+                left * 72,
+                bottom * 72,
+                dims.width - (left + right) * 72,
+                dims.height - (bottom + top) * 72
+            );
+            await pdfEditorCommit();
+            pdfEditorRenderThumbnails();
+            pdfEditorRenderPreview();
         } catch (e) {
             alert('Failed to crop: ' + e.message);
         }
@@ -1599,7 +2075,12 @@ var DocPreview = (function () {
         openPdfEditor: openPdfEditor,
         loadSheetJs: loadSheetJs,
         close: closeDocModal,
+        _isNarrowView: isNarrowView,
         _loadPdfLibForTest: _loadPdfLibForTest,
-        _getEditorState: function () { return JSON.parse(JSON.stringify(_pdfEditor.pages)); }
+        _getEditorState: function () { return JSON.parse(JSON.stringify(_pdfEditor.pages)); },
+        // Test helper: the edited file as it stands (a copy — the editor keeps
+        // its own bytes so Undo/Redo can swap them). It is what "Save & Download"
+        // writes, so a test can load it back and check what a tool really did.
+        _getPdfBytes: function () { return _pdfEditor.pdfBytes ? _pdfEditor.pdfBytes.slice() : null; }
     };
 })();

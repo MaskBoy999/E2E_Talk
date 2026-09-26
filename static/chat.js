@@ -3577,141 +3577,9 @@ window.__deepLinkListen = function () {
     } catch (_) {}
 };
 
-// ── 3.3: region snip ───────────────────────────────────────────────────
-// One frame from getDisplayMedia → drag a rectangle → the CROP goes into the
-// same file queue the picker feeds, so encryption/upload/preview are the
-// existing tested paths. The frame lives only in this page's memory while the
-// overlay is open — nothing is written outside the app sandbox (plan: avoid
-// saving to shared MediaStore). Tracks stop the moment the frame is drawn:
-// the screen itself is never held open.
-async function snipScreenRegion() {
-    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-        if (typeof showToast === 'function') showToast('Screen snip is not available here.');
-        return;
-    }
-    var stream;
-    try {
-        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-    } catch (_) {
-        if (typeof showToast === 'function') showToast('Screen pick declined — nothing snipped.');
-        return;
-    }
-    var video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = stream;
-    var frameReady = new Promise(function (resolve) {
-        var done = false;
-        var finish = function () { if (!done) { done = true; resolve(); } };
-        video.onloadeddata = finish;
-        setTimeout(finish, 2000); // some pickers never fire it — take what exists
-    });
-    try { await video.play(); } catch (_) {}
-    await frameReady;
-    var w = video.videoWidth || 1280, h = video.videoHeight || 720;
-    var src = document.createElement('canvas');
-    src.width = w; src.height = h;
-    try { src.getContext('2d').drawImage(video, 0, 0, w, h); } catch (_) {}
-    try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
-    try { video.srcObject = null; } catch (_) {}
-    openSnipOverlay(src, w, h);
-}
-
-function openSnipOverlay(srcCanvas, w, h) {
-    closeSnipOverlay();
-    var style = document.getElementById('snip-style');
-    if (!style) {
-        style = document.createElement('style');
-        style.id = 'snip-style';
-        style.textContent = [
-            '#snip-overlay { position:fixed; inset:0; z-index:10000; background:rgba(0,0,0,.82); cursor:crosshair; display:flex; align-items:center; justify-content:center; }',
-            '#snip-stage { position:relative; }',
-            '#snip-img { max-width:96vw; max-height:78vh; display:block; box-shadow:0 0 0 1px #444; }',
-            '#snip-rect { position:absolute; border:2px dashed #57f287; background:rgba(87,242,135,.12); pointer-events:none; display:none; }',
-            '#snip-hintbar { position:absolute; left:0; right:0; bottom:-42px; display:flex; gap:10px; justify-content:center; align-items:center; color:#eee; font-size:13px; }',
-            '#snip-hintbar button { padding:6px 12px; border-radius:6px; border:1px solid #444; background:#1f2023; color:#eee; cursor:pointer; }',
-            '#snip-hintbar button:disabled { opacity:.45; cursor:default; }',
-        ].join('\n');
-        document.head.appendChild(style);
-    }
-    var overlay = document.createElement('div');
-    overlay.id = 'snip-overlay';
-    var stage = document.createElement('div');
-    stage.id = 'snip-stage';
-    var img = document.createElement('canvas');
-    img.id = 'snip-img';
-    img.width = w; img.height = h;
-    img.getContext('2d').drawImage(srcCanvas, 0, 0);
-    var rect = document.createElement('div');
-    rect.id = 'snip-rect';
-    var bar = document.createElement('div');
-    bar.id = 'snip-hintbar';
-    bar.innerHTML = '<span>Drag a rectangle — Enter uses it, Esc cancels</span>'
-        + '<button id="snip-use" disabled>Use selection</button>'
-        + '<button id="snip-cancel">Cancel</button>';
-    stage.appendChild(img); stage.appendChild(rect); stage.appendChild(bar);
-    overlay.appendChild(stage);
-    document.body.appendChild(overlay);
-
-    var sel = null, dragging = false, start = null;
-    function imgRect() { return img.getBoundingClientRect(); }
-    function draw(a, b) {
-        var r = imgRect();
-        var x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y);
-        var x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
-        rect.style.display = 'block';
-        rect.style.left = x0 + 'px';
-        rect.style.top = y0 + 'px';
-        rect.style.width = (x1 - x0) + 'px';
-        rect.style.height = (y1 - y0) + 'px';
-        var kx = w / r.width, ky = h / r.height;
-        sel = {
-            x: Math.round(x0 * kx), y: Math.round(y0 * ky),
-            w: Math.round((x1 - x0) * kx), h: Math.round((y1 - y0) * ky),
-        };
-        document.getElementById('snip-use').disabled = !(sel.w > 4 && sel.h > 4);
-    }
-    function localPoint(e) {
-        var r = imgRect();
-        return {
-            x: Math.max(0, Math.min(r.width, e.clientX - r.left)),
-            y: Math.max(0, Math.min(r.height, e.clientY - r.top)),
-        };
-    }
-    overlay.addEventListener('mousedown', function (e) {
-        if (e.target.tagName === 'BUTTON') return;
-        dragging = true; start = localPoint(e); draw(start, start);
-    });
-    overlay.addEventListener('mousemove', function (e) { if (dragging && start) draw(start, localPoint(e)); });
-    overlay.addEventListener('mouseup', function () { dragging = false; });
-    document.getElementById('snip-cancel').addEventListener('click', closeSnipOverlay);
-    document.getElementById('snip-use').addEventListener('click', commitSnip);
-    var keyHandler = function (e) {
-        if (e.key === 'Escape') { closeSnipOverlay(); document.removeEventListener('keydown', keyHandler, true); }
-        else if (e.key === 'Enter' && sel && sel.w > 4 && sel.h > 4) { commitSnip(); document.removeEventListener('keydown', keyHandler, true); }
-    };
-    document.addEventListener('keydown', keyHandler, true);
-
-    function commitSnip() {
-        if (!sel || sel.w <= 4 || sel.h <= 4) return;
-        var out = document.createElement('canvas');
-        out.width = sel.w; out.height = sel.h;
-        out.getContext('2d').drawImage(img, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h);
-        out.toBlob(function (blob) {
-            closeSnipOverlay();
-            if (!blob) { if (typeof showToast === 'function') showToast('Could not read the selection.'); return; }
-            queueFilesForComposer([new File([blob], 'snip-' + Date.now() + '.png', { type: 'image/png' })]);
-        }, 'image/png');
-    }
-}
-function closeSnipOverlay() {
-    var o = document.getElementById('snip-overlay');
-    if (o) o.remove();
-}
-
 // Hand files to the SAME queue the picker uses — DataTransfer → #file-input →
-// handleFileSelect — so snips and share-sheet imports share the upload
-// pipeline (and its encryption) exactly.
+// handleFileSelect — so a share-sheet import (3.4) shares the upload pipeline
+// (and its encryption) exactly.
 function queueFilesForComposer(files) {
     var input = document.getElementById('file-input');
     if (!input || !files || !files.length) return false;
@@ -9143,8 +9011,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 openScheduleModal();
             } else if (action === 'vault-send') {
                 openVaultSendPicker();
-            } else if (action === 'snip') {
-                snipScreenRegion();
             }
             // 'record-audio' is handled by the record-audio click handler below
         });
@@ -18632,9 +18498,19 @@ document.getElementById('message-list').addEventListener('contextmenu', function
 
     var msgText = '';
 
+    // The timestamp is not a sibling of the message text: it lives *inside*
+    // `.text` as a `.time-hover` span (and edits add an `.edited-label`), which
+    // is what positions it at the end of the line on hover. Reading
+    // `textContent` off the element therefore appended "14:32" (and "(edited)")
+    // to every copied message. Copy the element, drop the chrome, keep the words.
     var textEl = msgDiv.querySelector('.text');
 
-    if (textEl) msgText = textEl.textContent || '';
+    if (textEl) {
+        var textCopy = textEl.cloneNode(true);
+        var chrome = textCopy.querySelectorAll('.time-hover, .edited-label');
+        for (var ci = 0; ci < chrome.length; ci++) chrome[ci].remove();
+        msgText = (textCopy.textContent || '').trim();
+    }
 
     var items = [];
 
@@ -28576,6 +28452,17 @@ function showContextDownloadMenu(e, src, label, filename, mimeType, onClick) {
 //    was really reporting. A file needs a platform format (Windows CF_HDROP, the
 //    macOS file pasteboard, X11/Wayland text/uri-list, an Android FileProvider
 //    URI) and only native code can build one.
+//
+//    The bytes travel as **base64 inside a JSON argument**, on desktop and
+//    Android alike. Desktop used to send them as one raw request body, which is
+//    smaller and never a string — and which, it turned out, cannot be relied on:
+//    the page is served by a *server-supplied* CSP, and the app's own server
+//    sends `connect-src 'self' ws: wss:`, so the engine blocks Tauri's
+//    custom-protocol IPC endpoint (`http://ipc.localhost`). Tauri notices, falls
+//    back to its `postMessage` interface, and that interface serialises the
+//    payload as JSON and **cannot carry a request body at all** — so the shell
+//    answered "expected the raw request body" and every file copy inside the app
+//    ended in "this browser only allows images" while the user was *in* the app.
 //  * **A plain browser** — the app opened from the server in a normal browser,
 //    with no shell behind it — can do neither for a file, so it says exactly
 //    that and points at Save a copy. A silent no-op would look like a broken
@@ -28602,47 +28489,46 @@ function blobToPngBlob(blob) {
     });
 }
 
+// The largest file worth handing to the shell as one base64 string. Mirrors the
+// shell's own ceiling (box-shell: `MAX_CLIPBOARD_BYTES` / the Kotlin half's
+// `MAX_SHARED_FILE_BYTES`) — the page checks it too, and *before* it builds the
+// payload: assembling 1.3x of a gigabyte only to be refused is the crash, not
+// the fix. Keep the numbers in step with the shell.
+var CLIPBOARD_SHELL_MAX_BYTES = 25 * 1024 * 1024;
+
 // Ask the shell to put the decrypted file on the OS clipboard.
 //
 // A file on the clipboard *is* a path on every platform, so the shell writes
 // the bytes into the app's own cache directory and hands the path over in the
-// platform's file format. Returns true only when the OS took it — the caller
-// keeps a visible fallback, so a refusal is never silent.
+// platform's file format — on Android a `FileProvider` URI, which is what a
+// paste in another app reads.
+//
+// Resolves `{ ok: true }` only when the OS took it, and `{ ok: false, reason }`
+// with the shell's own words when it refused (too large, a held clipboard, a
+// permission), or `{ ok: false }` with no reason when there is no shell at all
+// — the caller keeps a visible fallback for every case, so a refusal is never
+// silent.
 async function copyFileToOsClipboard(blob, filename, mime) {
     var t = window.__TAURI__;
-    if (!t || !t.core || typeof t.core.invoke !== 'function') return false;
+    if (!t || !t.core || typeof t.core.invoke !== 'function') return { ok: false };
     var name = filename || 'attachment';
+    if (!blob || !blob.size) return { ok: false, reason: 'the file is empty' };
+    if (blob.size > CLIPBOARD_SHELL_MAX_BYTES) {
+        return {
+            ok: false,
+            reason: 'it is over ' + (CLIPBOARD_SHELL_MAX_BYTES / (1024 * 1024)) + ' MB, more than a clipboard copy carries',
+        };
+    }
     try {
-        if (isAndroidBox()) {
-            // Android has no request-body IPC, so the bytes travel base64 and
-            // the Kotlin half writes them to its cache and shares them through
-            // the app's FileProvider — a clipboard *URI* is what an Android
-            // paste reads.
-            await t.core.invoke('plugin:box-shell|copyFileToClipboard', {
-                name: name,
-                mime: mime || 'application/octet-stream',
-                data: E2ECrypto.arrayBufferToBase64(await blob.arrayBuffer()),
-            });
-        } else {
-            // Desktop sends one raw body — [u32 LE name length][name][bytes] —
-            // so a large attachment is not base64'd, re-parsed and copied three
-            // times on the way to disk. The name rides in the body rather than
-            // in a header because an attachment name is arbitrary text and a
-            // header is not.
-            var nameBytes = new TextEncoder().encode(name);
-            var head = new Uint8Array(4);
-            new DataView(head.buffer).setUint32(0, nameBytes.length, true);
-            var data = new Uint8Array(await blob.arrayBuffer());
-            var body = new Uint8Array(4 + nameBytes.length + data.length);
-            body.set(head, 0);
-            body.set(nameBytes, 4);
-            body.set(data, 4 + nameBytes.length);
-            await t.core.invoke('plugin:box-shell|copyFileToClipboard', body);
-        }
-        return true;
+        await t.core.invoke('plugin:box-shell|copyFileToClipboard', {
+            name: name,
+            mime: mime || 'application/octet-stream',
+            data: E2ECrypto.arrayBufferToBase64(await blob.arrayBuffer()),
+        });
+        return { ok: true };
     } catch (err) {
         console.warn('Native clipboard copy failed:', err);
-        return false;
+        return { ok: false, reason: (err && err.message) ? String(err.message) : String(err) };
     }
 }
 
@@ -28673,13 +28559,22 @@ async function copyBlobToClipboard(blob, label, filename, mime) {
         }
     }
 
-    if (await copyFileToOsClipboard(blob, name, type)) {
+    var copy = await copyFileToOsClipboard(blob, name, type);
+    if (copy.ok) {
         showToast('"' + name + '" copied to clipboard — paste it anywhere');
         return true;
     }
 
-    showToast('Copying a file to the clipboard needs the app — this browser only allows images. ' +
-        'Use "Save a copy" to download "' + name + '" instead');
+    // Two different refusals deserve two different sentences: inside the app the
+    // shell was there and said why (too large, clipboard held by another app,
+    // permission), while a plain browser genuinely cannot put a file on the
+    // clipboard at all.
+    if (copy.reason) {
+        showToast('Could not copy "' + name + '" to the clipboard: ' + copy.reason);
+    } else {
+        showToast('Copying a file to the clipboard needs the app — this browser only allows images. ' +
+            'Use "Save a copy" to download "' + name + '" instead');
+    }
     return false;
 }
 

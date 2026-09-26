@@ -1,5 +1,80 @@
 # PROGRESS
 
+## In-app file copy, PDF editing, phone-proof document views, honest Copy Text (0.2.32)
+
+**Copying a file finally works inside the app.** The toast "Copying a file to the
+clipboard needs the app — this browser only allows images" appeared *while the
+user was in the app*. The real cause was not the platform API but the transport:
+the page is served with a **server-supplied** CSP (`connect-src 'self' ws: wss:`),
+so the engine blocks Tauri's custom-protocol IPC endpoint (`http://ipc.localhost`);
+Tauri falls back to its `postMessage` interface, and that interface serialises
+its payload as JSON and **cannot carry a request body at all** — which is exactly
+what the desktop half's raw-body file commands expected, so every one of them
+failed. Both file commands (`copyFileToClipboard`, `saveFile`) now take the bytes
+as **base64 inside a JSON argument on every platform**, which is the shape
+Android already used; the desktop half's `file_payload`/`decode_base64` helpers
+and the `base64` crate replace the raw-body reader, and the page's size checks
+(25 MB copy / 100 MB save) mirror the shell's caps so nothing is assembled only
+to be refused.
+
+**PDF editing was reading the page at the wrong address.** Every tool indexed a
+page by its *slot in the editor's array* while the renderer and the edits used the
+*page number of the document*; duplicating, deleting or merging shifted one and
+not the other, so a tool acted on the wrong page and the renderer was handed an
+`undefined` slot — the literal `Error rendering page: Cannot read properties of
+undefined (reading 'node')`. Slots and page numbers are now converted explicitly
+at every boundary (`pdfSlotToPage` / `pdfPageToSlot`), so duplicate/delete/
+drag-reorder/merge/crop/draw/white-out/add-text each hit the page you are looking
+at, a duplicate is a real page that can be edited on its own, and undo/redo and
+*Save & Download* operate on the array the renderer shows.
+
+**Every document view now works on a phone.** The views were laid out for a
+desktop page: a DOCX page carried its fixed 794px Word geometry, so on a phone it
+was cropped on the right, and the *Loading document…* placeholder was never
+cleared when the render finished (the "infinite loading page"). Below 700px each
+view now reflows to the device width — Word drops the fixed geometry, PPTX is
+scaled as a canvas, tables scroll inside their own box, the viewer takes the full
+screen — and the placeholder is cleared on every path, success or failure. Pinned
+by `tests/doc-view-phone.spec.ts` for docx/pdf/xlsx/csv/zip/pptx.
+
+**The archive and legacy-Office views were claims without readers.** `.tar`,
+`.gz`, `.tgz` and `.tar.gz` were listed as previewable, but `JSZip` is a *zip*
+reader: handed a tar or a gzip stream it refuses, the view fell into its error
+branch, and the file looked broken. Gzip is native to the engine
+(`DecompressionStream`), tar is a 512-byte-header format that carries its own
+checksum, and the two together list the whole family — plus a `.gz` of one file,
+which is listed as that file — with no new library. The other direction is the
+same principle: `.rar` and `.7z` need real codecs this app does not ship, so they
+are no longer *claimed* — they download instead of offering a Preview that fails
+(the old mime check matched on `"compressed"`, which is how `.7z` had been
+claimed all along). And a Word 97-2003 `.doc`/`.ppt` is OLE2, not OOXML, so it
+used to reach the renderer and die in it: a `.doc` that is really RTF shows its
+extracted text, and a genuine OLE2 file gets a card naming the format and the way
+out. The test's own fixtures caught a real bug in the tar sniffer while it was
+being written — a one-file tar (header + padding + the two zero blocks that end
+an archive) was being listed as a single gzipped file.
+
+**The rest of the PDF toolbar worked as little as duplicate did.** Two more real
+bugs, found in the same read: `pdfEditorCrop` called
+`setCropBox(x, y, width, height)` with `width - right` and `height - top` — the
+box's *size*, not its right/top edge — so every crop hung off the page and
+nothing visibly changed (and its size guard assumed US-Letter whatever the page
+was); and the draw overlay listened only for *mouse* events, so on a phone — or
+with a stylus — Draw could not draw a single stroke. Both are fixed, the tool
+refreshes the page thumbnail it changed, and Draw now records the page it was
+opened on instead of whatever page you had switched to by the time you pressed
+Apply.
+
+**Copy Text copies the text.** The timestamp and the *(edited)* marker live
+*inside* the message's text element in the DOM, so copying the element's text
+picked them up. Both are now cloned out (`.time-hover`, `.edited-label`) before
+the clipboard is written, so a paste is the words only.
+
+**Region snip removed.** It never worked in practice, so it was deleted outright
+— attach-menu entry, overlay code, CSS and test references — instead of being
+left as a button that lies. Share-into-app, drag-out and the rest of the attach
+menu are untouched.
+
 ## Saving works inside the shells, editing covers more types, editors fit a phone
 
 **Save to disk.** Every save in the app — attachments, gallery "Download all",

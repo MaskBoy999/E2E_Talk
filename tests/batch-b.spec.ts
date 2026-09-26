@@ -1,5 +1,5 @@
-// Batch B (1.3 audio routing / 4.2 mini window / 3.3 region snip / 3.4 share-in
-// / 4.4 deep links / 2.3 Quick Settings tile) — runtime + static assertions.
+// Batch B (1.3 audio routing / 4.2 mini window / 3.4 share-in / 4.4 deep links
+// / 2.3 Quick Settings tile) — runtime + static assertions.
 //
 // Everything here targets what the code ACTUALLY exposes. The shell-only paths
 // (TileService registration, share trampoline, setCommunicationDevice) are
@@ -186,62 +186,30 @@ test.describe('Batch B features', () => {
     expect(res.after).not.toBe(res.before);
   });
 
-  // ── 3.3 region snip ───────────────────────────────────────────────────
-  test('3.3 snip overlay opens, cancels, and crops into the composer queue', async ({ page }) => {
-    await register(page, unique('batchb_snip'));
+  // ── 3.3 region snip — REMOVED ──────────────────────────────────────────
+  // "Snip Screen Region" grabbed one frame with `getDisplayMedia` and cropped
+  // it. Neither shell the app runs in offers that API — WebView2 has no screen
+  // picker and neither does the Android WebView — so on every build the action
+  // could only answer "Screen snip is not available here." A dead button is
+  // worse than no button, so it is gone; this pins the removal in both places
+  // it lived (the attach menu and the page), and pins that the *call* screen
+  // share, which legitimately uses getDisplayMedia on desktop, is untouched.
+  test('3.3 the dead region-snip action is gone and cannot come back', async ({ page }) => {
+    await register(page, unique('batchb_snip_gone'));
 
-    // The overlay itself: opens over the frame, Esc/cancel tears it down.
-    const opened = await page.evaluate(() => {
-      const c = document.createElement('canvas');
-      c.width = 200; c.height = 120;
-      const ctx = c.getContext('2d')!;
-      ctx.fillStyle = '#123456'; ctx.fillRect(0, 0, 200, 120);
-      (window as any).openSnipOverlay(c, 200, 120);
-      const has = !!document.getElementById('snip-overlay')
-        && !!document.getElementById('snip-use')
-        && !!document.getElementById('snip-cancel');
-      document.getElementById('snip-cancel')!.click();
-      return { has, gone: !document.getElementById('snip-overlay') };
-    });
-    expect(opened.has).toBe(true);
-    expect(opened.gone).toBe(true);
+    await expect(page.locator('.attach-popup-item[data-action="snip"]')).toHaveCount(0);
+    expect(await page.evaluate(() => typeof (window as any).snipScreenRegion)).toBe('undefined');
+    expect(await page.evaluate(() => typeof (window as any).openSnipOverlay)).toBe('undefined');
+    expect(await page.evaluate(() => typeof (window as any).closeSnipOverlay)).toBe('undefined');
 
-    // Dragging a rectangle and committing hands a real PNG to the file queue.
-    const queued = await page.evaluate(async () => {
-      const c = document.createElement('canvas');
-      c.width = 200; c.height = 120;
-      c.getContext('2d')!.fillRect(0, 0, 200, 120);
-      (window as any).openSnipOverlay(c, 200, 120);
-      const img = document.getElementById('snip-img') as HTMLCanvasElement;
-      const box = img.getBoundingClientRect();
-      const fire = (type: string, x: number, y: number) =>
-        document.getElementById('snip-overlay')!.dispatchEvent(new MouseEvent(type, {
-          bubbles: true, clientX: x, clientY: y,
-        }));
-      fire('mousedown', box.left + 10, box.top + 10);
-      fire('mousemove', box.left + 110, box.top + 90);
-      fire('mouseup', box.left + 110, box.top + 90);
-      (document.getElementById('snip-use') as HTMLButtonElement).click();
-      await new Promise((r) => setTimeout(r, 500));
-      // handleFileSelect() clears the input and opens the upload modal — the
-      // crop reaching THAT modal is the real hand-off.
-      const modal = document.getElementById('upload-modal');
-      const info = document.getElementById('upload-file-info');
-      return {
-        overlayGone: !document.getElementById('snip-overlay'),
-        modalShown: !!modal && getComputedStyle(modal).display !== 'none',
-        info: info ? info.textContent : null,
-      };
-    });
-    expect(queued.overlayGone).toBe(true);
-    expect(queued.modalShown).toBe(true);
-    expect(queued.info).toMatch(/snip-\d+\.png/);
-  });
-
-  test('3.3 the attach menu offers the snip action and it is wired', async ({ page }) => {
-    await register(page, unique('batchb_snip_btn'));
-    await expect(page.locator('.attach-popup-item[data-action="snip"]')).toHaveCount(1);
-    expect(await page.evaluate(() => typeof (window as any).snipScreenRegion)).toBe('function');
+    const home = process.cwd();
+    const chat = readFileSync(home + '/static/chat.js', 'utf8');
+    expect(chat).not.toMatch(/snip-overlay|openSnipOverlay|snipScreenRegion|closeSnipOverlay/);
+    // Screen share in a call still uses it (voice.js) — only the attach path is
+    // supposed to be clean.
+    expect(chat).not.toMatch(/getDisplayMedia/);
+    const indexHtml = readFileSync(home + '/static/index.html', 'utf8');
+    expect(indexHtml).not.toMatch(/data-action="snip"/);
   });
 
   // ── 3.4 share-into-app ────────────────────────────────────────────────

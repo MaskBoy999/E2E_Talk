@@ -356,8 +356,7 @@ not a missing feature:
   init/chunk/complete, storage quota enforced server-side, **by-hash
   download** as the public handle
 - **Attach** — drag-and-drop, paste, file picker, **take photo** (with camera
-  flash), **record video**, and **Snip screen region** (drag a region → lands
-  in the composer queue, memory-only until you send)
+  flash) and **record video**
 - **Share into the app** (Android) — Gallery → Share → E2E Chat stages into
   the composer via a FIFO that's consumed once (empty FIFO = no-op)
 - **Drag files out** (desktop) — drag an attachment to your desktop; the app
@@ -370,9 +369,40 @@ not a missing feature:
   a browser's clipboard API accepts images and text only. One copy exists at a
   time — the next copy and the next launch delete the previous file — and there
   is deliberately **no** "paste a file from the clipboard": reading the host's
-  clipboard would let any page in the app window see what you copied there
-- **Photo/video editing** before send, **document preview**, image/video
-  media previews with manual-load mode
+  clipboard would let any page in the app window see what you copied there.
+  Images keep the page's own clipboard path, so a pasted sticker still arrives
+  as a picture. A copy is capped at **25 MB** (a paste, not a file transfer) and
+  a save at **100 MB**; larger files are named as too large instead of being
+  half-transferred
+- **Copy text copies the words** — the timestamp and the *(edited)* marker shown
+  at the end of a message live inside its text element, and they are stripped
+  before the text reaches your clipboard
+- **Copying happens inside the IPC that actually works**: file bytes travel as
+  base64 inside a JSON argument on both platforms. The smaller raw-body request
+  the desktop half used to take never arrived — the app's page is served with a
+  content-security policy that blocks the webview's IPC endpoint, so the engine
+  fell back to an interface that cannot carry a request body, and every in-app
+  copy reported that it "needs the app"
+- **Photo/video editing** before send, **document preview** (PDF, DOCX, XLSX,
+  CSV, PPTX, and the archives ZIP, TAR, TGZ and GZ — the last three are read by
+  the app's own tar/gzip reader, since a byte-for-byte `.tar.gz` is not a zip),
+  image/video media previews with manual-load mode
+- **Legacy Office files are named, not failed** — a Word 97-2003 `.doc` is an
+  OLE2 compound file, a format neither renderer here can read, so it gets a card
+  that says exactly what it is and how to view it (re-save as `.docx`), rather
+  than a broken view. A `.doc` that is really RTF — the common mail-merge case —
+  is shown as its extracted text. `.rar` and `.7z` need codecs this app does not
+  ship, so they are deliberate **downloads**, never a Preview button that fails
+- **Document viewing that works on a phone** — below 700px every view reflows to
+  the device width: a Word page drops its fixed page geometry instead of being
+  cropped at 794px, PowerPoint slides are scaled as a canvas, tables scroll
+  inside their own box, and the viewer takes the whole screen. No view is left
+  showing a *Loading document…* placeholder
+- **PDF editing** — rotate, delete, duplicate, drag-reorder, merge, crop,
+  draw-on-page, white-out and add text, with undo/redo and *Save & Download*;
+  a duplicated page is a real page of the file (it can be edited on its own) and
+  every tool addresses the page it is actually on. Drawing takes pointer input,
+  so a finger or a stylus works, not just a mouse
 - **Stickers & GIFs** — own sticker tab with upload, editable stickers (live
   edits propagate), GIF tab, emoji tab; downloaded media gets
   download/copy context menus

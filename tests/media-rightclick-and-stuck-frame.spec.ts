@@ -246,7 +246,10 @@ test.describe('message + attachment right-click menus', () => {
         expect(imgItems).not.toBeNull();
         expect(imgItems!.length).toBe(2);
         expect(imgItems![0].text).toContain('Download photo.jpg');
-        expect(imgItems![1].text).toBe('🖼 Copy image');
+        // The menu draws its glyphs from the icon sprite, so the label is the
+        // plain name (this expectation still carried the old emoji prefix).
+        expect(imgItems![1].text).toBe('Copy image');
+        expect(imgItems![1].iconRef).toBe('#icon-image');
 
         // Non-image file → "Copy file".
         await page.evaluate(() => {
@@ -257,7 +260,9 @@ test.describe('message + attachment right-click menus', () => {
         });
         const docItems = await rightClickAndReadMenu(page, '.file-card[data-file-id="file-2"]');
         console.log('DOC ATTACHMENT MENU:', JSON.stringify(docItems));
-        expect(docItems![1].text).toBe('📋 Copy file');
+        // Same as the image case: the glyph is an icon, so the label is plain.
+        expect(docItems![1].text).toBe('Copy file');
+        expect(docItems![1].iconRef).toBe('#icon-clipboard');
 
         // 3) A multi-file gallery renders the "Download all" button and the
         //    click wiring is present (the zip path itself is covered by the

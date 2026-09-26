@@ -536,4 +536,200 @@ test.describe('Document Preview', () => {
             if (el) el.remove();
         });
     });
+
+    test('PDF editor duplicate adds a real page, and every page still renders after it', async ({ page }) => {
+        await registerAndSetup(page);
+        const result = await page.evaluate(async () => {
+            const DP = (window as any).DocPreview;
+            await DP._loadPdfLibForTest();
+            if (!(window as any).PDFLib) return { loaded: false };
+
+            const PDFLib = (window as any).PDFLib;
+            const doc = await PDFLib.PDFDocument.create();
+            const one = doc.addPage([612, 792]);
+            one.drawText('First', { x: 40, y: 700, size: 20 });
+            const two = doc.addPage([612, 792]);
+            two.drawText('Second', { x: 40, y: 700, size: 20 });
+            const blob = new Blob([await doc.save()], { type: 'application/pdf' });
+
+            DP.openPdfEditor(blob, 'dup.pdf');
+            await new Promise(r => setTimeout(r, 2500));
+
+            const overlay = document.getElementById('pdf-editor-overlay');
+            if (!overlay) return { hasOverlay: false };
+            const clickTool = (title: string) => {
+                const btn = Array.from(overlay.querySelectorAll('button')).find(b => b.title === title) as any;
+                if (btn && btn.onclick) btn.onclick();
+            };
+            const previewText = () => document.querySelector('#pdf-preview-panel')?.textContent || '';
+            const hasCanvas = () => !!document.querySelector('#pdf-preview-panel canvas');
+
+            // The reported bug: "Duplicate Page" copied only the *metadata*, so two
+            // entries pointed at one page number; the preview then asked pdf-lib
+            // for an index past the end of the file and answered "Error rendering
+            // page: Cannot read properties of undefined (reading 'node')" — which
+            // is also why nothing but rotate felt usable.
+            clickTool('Duplicate Page');
+            await new Promise(r => setTimeout(r, 2000));
+
+            const afterDuplicate = {
+                thumbs: document.querySelectorAll('#pdf-thumb-panel [data-page-idx]').length,
+                state: DP._getEditorState(),
+                error: /Error rendering page/.test(previewText()),
+                canvas: hasCanvas(),
+            };
+
+            // Annotate the duplicated page (with the prompts answered for the
+            // test), then walk to the last page and render it: the page *after*
+            // the insert is the one that used to break.
+            const answers = ['DUPLICATED', '1', '9', '14', '0.5', '0.5', '0.5', '0.5'];
+            (window as any).uiPrompt = async () => (answers.length ? answers.shift() : null);
+            clickTool('Add Text');
+            await new Promise(r => setTimeout(r, 1500));
+            const afterAnnotate = { error: /Error rendering page|Failed to add text/.test(previewText() + String((window as any).__lastAlert || '')), canvas: hasCanvas() };
+
+            const thumbs = Array.from(document.querySelectorAll('#pdf-thumb-panel [data-page-idx]')) as HTMLElement[];
+            thumbs[thumbs.length - 1]?.click();
+            await new Promise(r => setTimeout(r, 1500));
+            const onLastPage = { error: /Error rendering page/.test(previewText()), canvas: hasCanvas() };
+
+            return { hasOverlay: true, afterDuplicate, afterAnnotate, onLastPage };
+        });
+
+        expect(result.hasOverlay).toBe(true);
+        // Three pages in the editor *of the file*: the duplicate is its own page
+        // number, not a second reference to the original.
+        expect(result.afterDuplicate.thumbs).toBe(3);
+        expect(result.afterDuplicate.state).toHaveLength(3);
+        expect(new Set(result.afterDuplicate.state.map((p: any) => p.index)).size).toBe(3);
+        expect(result.afterDuplicate.error).toBe(false);
+        expect(result.afterDuplicate.canvas).toBe(true);
+
+        expect(result.afterAnnotate.error).toBe(false);
+        expect(result.afterAnnotate.canvas).toBe(true);
+        expect(result.onLastPage.error).toBe(false);
+        expect(result.onLastPage.canvas).toBe(true);
+
+        await page.evaluate(() => {
+            var el = document.getElementById('pdf-editor-overlay');
+            if (el) el.remove();
+        });
+    });
+
+    // The other half of "only rotate works": Whiteout, Crop and Draw each had a
+    // bug that made them look like no-ops on the page you were looking at — the
+    // crop box was built from the wrong arguments (so it hung off the page), and
+    // the draw overlay only listened for *mouse* events, so a phone (or a stylus)
+    // could not draw at all. This drives all three and reads the result back out
+    // of the file itself.
+    test('PDF editor whiteout, crop and draw really change the file', async ({ page }) => {
+        await registerAndSetup(page);
+        const result = await page.evaluate(async () => {
+            const DP = (window as any).DocPreview;
+            await DP._loadPdfLibForTest();
+            const PDFLib = (window as any).PDFLib;
+            if (!PDFLib) return { loaded: false };
+
+            const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+            const doc = await PDFLib.PDFDocument.create();
+            const p = doc.addPage([612, 792]);
+            p.drawText('BLACK TEXT ON WHITE', { x: 80, y: 700, size: 24, color: PDFLib.rgb(0, 0, 0) });
+            DP.openPdfEditor(new Blob([await doc.save()], { type: 'application/pdf' }), 'tools.pdf');
+            await sleep(2500);
+
+            const overlay = document.getElementById('pdf-editor-overlay');
+            if (!overlay) return { loaded: true, hasOverlay: false };
+            const clickTool = (title: string) => {
+                const btn = Array.from(overlay.querySelectorAll('button')).find(b => b.title === title) as any;
+                if (btn && btn.onclick) btn.onclick();
+            };
+            // Dark pixels in the rendered page: the black text (a whiteout must
+            // remove them). The canvas background is transparent, not white, so
+            // counting only *dark* pixels is what makes this measurement honest.
+            const darkPixels = () => {
+                const canvas = document.querySelector('#pdf-preview-panel canvas') as HTMLCanvasElement | null;
+                if (!canvas) return -1;
+                const data = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+                let dark = 0;
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i + 3] > 40 && data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark++;
+                }
+                return dark;
+            };
+
+            const darkBefore = darkPixels();
+
+            // 1) Whiteout the whole page (inches, from the bottom-left).
+            const answers = ['0', '0', '8.5', '11', '1', '1', '1', '1'];
+            (window as any).uiPrompt = async () => (answers.length ? answers.shift() : null);
+            clickTool('Whiteout');
+            await sleep(2000);
+            const darkAfterWhiteout = darkPixels();
+
+            // 2) Crop one inch off every edge: 612×792pt − 144 = 468×648pt.
+            clickTool('Crop Page');
+            await sleep(2000);
+            const cropped = await PDFLib.PDFDocument.load(DP._getPdfBytes());
+            const cropBox = cropped.getPage(0).getCropBox();
+
+            // 3) Draw a line with *pointer* events (the same ones a finger sends),
+            //    then apply it — the strokes become an image on the page.
+            clickTool('Draw');
+            await sleep(500);
+            const wrapCanvases = document.querySelectorAll('#pdf-preview-panel .pdf-draw-overlay-wrapper canvas');
+            const drawCanvas = wrapCanvases[wrapCanvases.length - 1] as HTMLCanvasElement | undefined;
+            const ptr = (type: string, x: number, y: number) => {
+                const ev = new PointerEvent(type, { clientX: x, clientY: y, bubbles: true, pointerId: 1 });
+                drawCanvas!.dispatchEvent(ev);
+            };
+            let strokeOk = false;
+            if (drawCanvas) {
+                const r = drawCanvas.getBoundingClientRect();
+                ptr('pointerdown', r.left + 20, r.top + 20);
+                ptr('pointermove', r.left + 80, r.top + 60);
+                ptr('pointermove', r.left + 140, r.top + 100);
+                ptr('pointerup', r.left + 140, r.top + 100);
+                const ctx = drawCanvas.getContext('2d')!;
+                const px = ctx.getImageData(0, 0, drawCanvas.width, drawCanvas.height).data;
+                for (let i = 3; i < px.length; i += 4) {
+                    if (px[i] > 0) { strokeOk = true; break; }
+                }
+            }
+            const applyBtn = Array.from(overlay.querySelectorAll('button')).find(b => /Apply/.test(b.textContent || '')) as any;
+            if (applyBtn && applyBtn.onclick) await applyBtn.onclick();
+            await sleep(2000);
+
+            const drawn = await PDFLib.PDFDocument.load(DP._getPdfBytes());
+            const resources = drawn.getPage(0).node.Resources();
+            const xobject = resources ? resources.lookup(PDFLib.PDFName.of('XObject')) : null;
+
+            return {
+                loaded: true,
+                hasOverlay: true,
+                darkBefore,
+                darkAfterWhiteout,
+                cropWidth: cropBox.width,
+                cropHeight: cropBox.height,
+                strokeOk,
+                hasXObject: !!xobject,
+            };
+        });
+
+        expect(result.loaded).toBe(true);
+        expect(result.hasOverlay).toBe(true);
+        // The text was really on the page, and the whiteout covered it.
+        expect(result.darkBefore).toBeGreaterThan(0);
+        expect(result.darkAfterWhiteout).toBe(0);
+        // One inch off each edge, measured by pdf-lib from the saved file.
+        expect(result.cropWidth).toBeCloseTo(468, 0);
+        expect(result.cropHeight).toBeCloseTo(648, 0);
+        // The pointer drag drew, and applying it embedded an image on the page.
+        expect(result.strokeOk).toBe(true);
+        expect(result.hasXObject).toBe(true);
+
+        await page.evaluate(() => {
+            var el = document.getElementById('pdf-editor-overlay');
+            if (el) el.remove();
+        });
+    });
 });

@@ -13,11 +13,20 @@ tauri-plugin = { version = "2", features = ["build"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# The file-carrying commands take their bytes as base64 inside a JSON argument
+# (see `file_payload` in `src/lib.rs` for why the raw-body IPC cannot be relied
+# on under a server-supplied CSP). Already in the tree — tauri itself depends on
+# 0.22 — so this adds no new crate to the build.
+base64 = "0.22"
 
 # Windows-only: the clipboard file list (`CF_HDROP`) that `src/clipboard.rs`
 # builds. Every one of these features is the module that declares a call already
 # used by the clipboard code — no new crate is added to the tree (the `windows`
 # crate is already there for `toast.rs`/`win_webview.rs` in the app crate).
+[dev-dependencies]
+# Only the payload tests use it: `InvokeBody::Json` holds a `serde_json::Value`.
+serde_json = "1"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",

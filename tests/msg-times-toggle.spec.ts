@@ -166,4 +166,45 @@ test.describe('Message timestamps 3-state toggle + placement', () => {
         expect(on.displayOn).toBe('inline');
         expect(on.displayOff).toBe('none');
     });
+
+    test('Copy Text copies the message, not the timestamp or the (edited) label', async ({ browser }) => {
+        const ts = Date.now();
+        const page = await loginUser(browser, 'times_copy_' + ts);
+        await page.waitForSelector('#message-list', { timeout: 15000 });
+        await page.waitForTimeout(1000);
+
+        // The time is not a sibling of the text: it is a `.time-hover` span
+        // *inside* `.text` (that is what puts it at the end of the line on
+        // hover), and an edit adds an `.edited-label` next to it. Reading
+        // `textContent` off `.text` therefore copied "14:32" and "(edited)" with
+        // every message.
+        await page.evaluate(() => {
+            const list = document.getElementById('message-list')!;
+            const div = document.createElement('div');
+            div.className = 'message';
+            div.setAttribute('data-message-id', 'copy-probe-1');
+            div.setAttribute('data-sender-id', 'someone-else');
+            div.innerHTML = '<div class="text">ship it <span class="time-hover">14:32</span>'
+                + '<span class="edited-label">(edited)</span></div>';
+            list.appendChild(div);
+
+            // Capture what the Copy Text action writes, instead of reading the
+            // engine clipboard (which a headless browser cannot grant).
+            (window as any).__copied = [];
+            Object.defineProperty(navigator, 'clipboard', {
+                configurable: true,
+                value: { writeText: async (t: string) => { (window as any).__copied.push(t); } },
+            });
+        });
+
+        await page.locator('#message-list .message[data-message-id="copy-probe-1"]').click({ button: 'right' });
+        await page.locator('.context-menu-item', { hasText: 'Copy Text' }).first().click();
+        await page.waitForTimeout(300);
+
+        const copied = await page.evaluate(() => (window as any).__copied as string[]);
+        expect(copied).toHaveLength(1);
+        expect(copied[0]).toBe('ship it');
+        expect(copied[0]).not.toContain('14:32');
+        expect(copied[0]).not.toContain('(edited)');
+    });
 });

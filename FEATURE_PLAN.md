@@ -140,7 +140,7 @@ Effort letters are from `FEATURE_RESEARCH.md`. Verdict key:
 |---|---|---|---|
 | 3.1 System audio in screen share | Share a video *with sound*, not silent video | ✅ | Captured frames enter the existing pipeline → E2EE worker encrypts before send, same as video today. OS-level capture (`AudioPlaybackCapture`) excludes DRM/protected content by platform rule. |
 | 3.2 Per-app capture (Android 14+) | Share one app window, not your whole screen | ✅ | Strictly *less* exposure than the current whole-screen share; system picker UI. |
-| 3.3 Region screenshot + annotate | Snip part of the screen and send it | ✅ | Snip exists only in app memory → attachment path → encrypted like any upload. Nothing written outside the app sandbox (avoid saving to shared MediaStore). |
+| 3.3 Region screenshot + annotate | Snip part of the screen and send it | ❌ **removed (v0.2.32)** | Never worked reliably (the region overlay and its attachment path were dead in practice), so the feature was deleted outright rather than left as a button that lies: the attach menu, the overlay code, the CSS and the tests are gone. Nothing to review — no capture surface exists any more. |
 | 3.4 Share-into-app (Gallery → Share) | Send a photo straight into a channel | ✅ | Plaintext arrives *from* another app (user-initiated import — same trust as pasting) and is encrypted before it leaves. No new egress. The inbound intent FIFO holds file URIs only, never message text. |
 | 3.5 Drag files out | Drag a file from the app to the desktop | ✅ | User-initiated export; the file is decrypted locally on request — same as Save-as. No automation surface if the drop target is OS-blessed. |
 
@@ -267,7 +267,7 @@ the spec that goes red if it regresses. Run one with
 | **2.6** | The message chime is ringer/DND-aware; Settings' "Test sound" deliberately bypasses the gate | `quiet-hours.spec.ts` |
 | **3.1** | Screen share carries the app's own audio as native PCM on the same projection; a refused capture costs only the audio track, never the video | `screen-share-audio-mobile.spec.ts` |
 | **3.2** | The Android 14+ projection intent requests the user-choice config, so the system picker offers a single app | `android-plugin-startup.spec.ts` |
-| **3.3 / 3.4** | Snip overlay, and share-into-app staging consumed into the composer | `batch-b.spec.ts` |
+| **3.3 (removed) / 3.4** | Region snip is gone (the attach menu offers no capture entry at all); share-into-app staging is still consumed once into the composer | `batch-b.spec.ts` |
 | **3.5** | Drag-out hands the OS a DownloadURL, reusing the Save-as decryption (no new trust) | `drag-out.spec.ts` |
 | **4.1** | Global push-to-talk hotkey: the accelerator is parsed and rejected in Rust, press/release reaches the page as a boolean (default `Ctrl+Shift+Space`) | `ptt-hotkey.spec.ts`, box `cargo test` |
 | **4.2** | `?mini=1` renders only the controls view; the main window acts on its buttons | `batch-b.spec.ts` |

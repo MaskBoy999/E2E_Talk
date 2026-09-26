@@ -270,12 +270,13 @@ This is the feature that changed how everything else boots, so test it first.
 
 ---
 
-## 10. Media: snip (3.3), share-into-app (3.4), audio routes (1.3)
+## 10. Media: snip (3.3 — **removed**), share-into-app (3.4), audio routes (1.3)
 
 **Do**
 
-1. **Snip** — attach menu → *Snip region* → drag a region → the crop lands in
-   the composer's upload queue; cancelling adds nothing.
+1. **Snip** — no longer exists: the attach menu offers drag-and-drop, paste, the
+   file picker, take photo and record video, and nothing else. If you see a
+   *Snip region* entry anywhere (menu, tray, hotkey, docs) it is a regression.
 2. **Share-into-app** — from Gallery, *Share* → E2E Chat → the item arrives
    staged in the composer, then is consumed (a second open shows nothing).
 3. **Audio route** — in a call, pick earpiece / speaker / Bluetooth; the audio
@@ -285,8 +286,6 @@ This is the feature that changed how everything else boots, so test it first.
 
 * Share the **same** file twice quickly → the FIFO must not double-post, and an
   empty FIFO must be a no-op (no toast, no discard).
-* Snip a region containing a password / chat text → the snip is only in app
-  memory until you send it; nothing lands in the shared MediaStore.
 * Route change mid-call must not drop the call or leak the room name to the OS
   media panel (title stays generic).
 
@@ -528,3 +527,73 @@ for as long as the clipboard holds it. It goes in the app's own cache folder,
 only one at a time, and is deleted on the next copy or the next launch. There is
 deliberately no *paste a file from the clipboard* feature — reading the host's
 clipboard would let any page in the app window see whatever you copied there.
+
+**Do (desktop, in the app, non-image):** the same copy, in the app window rather
+than a browser.
+**Expect:** the same toast as in a browser — the copy works. Seeing the
+"Copying a file … needs the app" toast *inside the app* is the bug this release
+fixed: the os-level request the desktop half used to send was blocked by the
+page's own security policy, so the copy must travel as base64 inside a normal IPC
+call on both platforms.
+
+---
+
+## 21. File viewing on a phone, the PDF editor, and copied text (0.2.32)
+
+What changed: every document view reflows on a phone, editing a PDF does what the
+button says, and copied text is just the text.
+
+**Do:** on a phone, open a message with a **.docx** attachment.
+**Expect:** the page fills the screen, text wraps to the device width (a Word page
+is 794px wide — it must not be cropped on the right or need horizontal panning),
+scrolling is smooth, and the *Loading document…* placeholder disappears once the
+document renders. Repeat for **.pdf**, **.xlsx**, **.csv**, **.zip** and **.pptx**:
+no view may be cropped, and none may sit on a placeholder forever.
+
+**Do:** on the same phone, rotate and open the doc again.
+**Expect:** the view re-fits the new width.
+
+**Do:** open a PDF → tap **Duplicate page** → then edit, draw on, delete or
+reorder the copy.
+**Expect:** the copy is a real page you can edit **on its own** (changing the
+copy alone; the original keeps its rotation/annotations). *Error rendering page:
+Cannot read properties of undefined (reading 'node')* — or a tool silently
+editing the *original* instead of the page you are looking at — is the bug this
+release fixed. Tools that used to do nothing (draw-on-page, white-out, add text,
+crop, merge) must change exactly the page you are viewing.
+
+**Do:** right-click a message → **Copy Text** → paste into an editor.
+**Expect:** the message text only. The time and the *(edited)* marker are not
+included — they sit inside the same element in the DOM but are display-only.
+
+**Do:** copy text from a message you have *edited* and one with a hover timestamp.
+**Expect:** neither leaves a `14:32` or an `(edited)` at the end of the paste.
+
+**Do:** send yourself a `.tar` and a `.tar.gz` (any `tar` tool makes one) and tap
+**Preview** on each.
+**Expect:** the file list (names + sizes), not *Failed to render document*. A
+plain `.gz` of one file lists that one file, and tapping it previews it if it is
+text or an image. `.zip` behaves as before.
+
+**Do:** send a legacy Word 97-2003 `.doc` (the kind Word saves as *Word 97-2003
+Document*), then an RTF file saved as `.doc`.
+**Expect:** the OLE2 one shows a card saying it is a Word 97-2003 file and to
+re-save it as `.docx` (never *Failed to render document*, never a blank view);
+the RTF one shows its text with a one-line note. **Save a copy** works for both.
+
+**Do:** send an `.rar` and a `.7z`.
+**Expect:** no Preview button at all — they are downloads. (`.rar`/`.7z` need
+codecs the app does not ship, so it does not pretend to open them.)
+
+**Do (PDF):** open a PDF → **Crop Page** → remove 1 inch from every edge.
+**Expect:** the page really is smaller by an inch on each side after the render —
+before this release the crop box was built from the wrong numbers, so nothing
+visibly happened. Margins larger than the page are refused with a message that
+names the page size.
+
+**Do (Android or a touchscreen):** PDF → **Draw** → drag with your **finger**
+(not a mouse) → **Apply**.
+**Expect:** the strokes follow your finger and land on the page. Before, the
+overlay only listened for mouse events, so touching it drew nothing. Also check
+that the stroke lands on the page you started drawing on if you switch pages
+before pressing Apply.

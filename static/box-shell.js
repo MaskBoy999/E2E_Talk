@@ -146,44 +146,44 @@
      * file was written, `false` when this is not a shell or the write failed
      * (the caller then falls back to a plain download).
      */
+    // The largest file worth handing to the shell as one base64 string: the
+    // shell's own ceiling (box-shell's `MAX_SAVE_BYTES`, the Kotlin half's
+    // `MAX_SAVE_FILE_BYTES`), checked here *before* the payload is built, because
+    // a gigabyte would become a 1.3 GB string (plus its copy) only to be refused.
+    // Keep the numbers in step with the shell.
+    var BOX_SHELL_MAX_SAVE_BYTES = 100 * 1024 * 1024;
+
     window.boxSaveFile = function (blob, filename) {
         var t = bridge();
         if (!t || !blob) return Promise.resolve(false);
         var name = filename || 'download';
         var mime = blob.type || 'application/octet-stream';
-        if (isAndroidBox()) {
-            // Android has no request-body IPC: the bytes travel base64 and the
-            // Kotlin half writes them into the public Downloads collection.
-            return blob.arrayBuffer().then(function (buf) {
-                return t.core.invoke('plugin:box-shell|saveFile', {
-                    name: name,
-                    mime: mime,
-                    data: arrayBufferToBase64(buf),
-                });
-            }).then(function (res) {
-                var savedName = res && res.name ? res.name : name;
-                if (window.showToast) window.showToast('Saved "' + savedName + '" to Downloads');
-                return true;
-            }).catch(function (e) {
-                console.warn('[box-shell] saveFile failed:', e);
-                return false;
-            });
+        if (blob.size > BOX_SHELL_MAX_SAVE_BYTES) {
+            if (window.showToast) {
+                window.showToast('"' + name + '" is over ' + (BOX_SHELL_MAX_SAVE_BYTES / (1024 * 1024)) +
+                    ' MB — too large to save through the app; using the browser download');
+            }
+            return Promise.resolve(false);
         }
-        // Desktop sends one raw body — [u32 LE name length][name][bytes] — so a
-        // large attachment is not base64'd and re-parsed on the way to disk.
+        // One payload shape on both platforms: the bytes as base64 inside a JSON
+        // argument. The raw request body the desktop half used to take never
+        // arrives — a server-supplied CSP blocks Tauri's custom-protocol IPC, and
+        // the fallback interface that replaces it cannot carry a body at all (see
+        // the note in `static/chat.js`) — while the Kotlin half has always taken
+        // exactly this shape.
         return blob.arrayBuffer().then(function (buf) {
-            var nameBytes = new TextEncoder().encode(name);
-            var head = new Uint8Array(4);
-            new DataView(head.buffer).setUint32(0, nameBytes.length, true);
-            var data = new Uint8Array(buf);
-            var body = new Uint8Array(4 + nameBytes.length + data.length);
-            body.set(head, 0);
-            body.set(nameBytes, 4);
-            body.set(data, 4 + nameBytes.length);
-            return t.core.invoke('plugin:box-shell|saveFile', body);
-        }).then(function (path) {
-            var where = path ? String(path) : 'your Downloads folder';
-            if (window.showToast) window.showToast('Saved to ' + where);
+            return t.core.invoke('plugin:box-shell|saveFile', {
+                name: name,
+                mime: mime,
+                data: arrayBufferToBase64(buf),
+            });
+        }).then(function (res) {
+            // Android resolves with the entry it created (`{name}`), desktop with
+            // the absolute path it wrote.
+            var where = (res && res.name)
+                ? ('"' + res.name + '" to Downloads')
+                : (res ? String(res) : 'your Downloads folder');
+            if (window.showToast) window.showToast('Saved ' + where);
             return true;
         }).catch(function (e) {
             console.warn('[box-shell] saveFile failed:', e);

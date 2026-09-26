@@ -1923,3 +1923,60 @@ clipboard so a sticker still pastes as a picture. The bytes land in
 `<app cache>/clipboard/` — the app's own cache dir, one file at a time (a new copy
 deletes the old, and startup clears the folder), under a sanitised name, with **no
 read path**, so no page can use the clipboard to get at what the host copied.
+
+### 13.17 The transport that was never there — v0.2.32
+
+§13.16 shipped a clipboard command that worked and a caller that could not reach
+it. Inside the app, *Copy file* still said "needs the app", and the reason was
+below the API: the page is served with a **server-supplied** content-security
+policy (`connect-src 'self' ws: wss:`), which makes the engine refuse Tauri's
+custom-protocol IPC endpoint (`http://ipc.localhost`); Tauri notices, falls back
+to its `postMessage` interface, and that interface serialises everything as JSON
+and **cannot carry a request body**, which is precisely what the desktop half's
+raw-body file commands required. The lesson is the one this plan keeps
+re-learning: **the app must assume only what survives a hostile page's own
+rules** — here, a plain JSON IPC call. Both file commands (`copyFileToClipboard`,
+`saveFile`) now take their bytes as base64 in a JSON argument on *every*
+platform, matching the shape Android always used, and the page checks the size
+cap before it builds the string (25 MB copy / 100 MB save, mirroring the shell).
+
+**The same release fixed three adjacent, user-visible defects.** The PDF editor
+indexed pages by *array slot* in one place and by *page number* in another, so a
+tool acted on the wrong page and the renderer received `undefined` —
+`Error rendering page: Cannot read properties of undefined (reading 'node')` on
+duplicate. Slots and page numbers are now converted explicitly at every boundary.
+Document views reflow below 700px (a DOCX page carried its fixed 794px Word
+geometry and was cropped; the *Loading document…* placeholder was never cleared,
+giving a permanent spinner), and *Copy Text* strips the timestamp and *(edited)*
+marker that live inside the message's own text element. Region snip, which never
+worked, was deleted rather than left as a button that lies — consistent with §5's
+rule that a capability that cannot be honoured is removed from the UI.
+
+**The same rule, applied to the views themselves.** Four more tools and views
+claimed a capability they did not have, and each is resolved in the direction its
+nature allows:
+
+| claim | reality | resolution |
+|---|---|---|
+| PDF **crop** | `setCropBox(x, y, width, height)` was called with the box's *edge* arithmetic (`width - right`), so every crop hung off the page and nothing moved | fixed — real margins, checked against the page's own size instead of US-Letter |
+| PDF **draw** | listened for `mousedown`/`move`/`up` only, so a phone or a stylus could not draw at all | fixed — pointer events (mouse, finger, pen) and the page captured when the overlay opens |
+| **`.tar`/`.gz`/`.tgz`** | listed as previewable, but `JSZip` is a *zip* reader and refuses both | fixed — a tar reader (the format's own header checksum) plus the engine's native `DecompressionStream` for gzip |
+| **`.rar`/`.7z`**, Word 97-2003 **`.doc`/`.ppt`** | a real `.doc` reached a renderer that reads OOXML and threw; `.rar`/`.7z` matched a mime check on `"compressed"` | `.rar`/`.7z` are no longer claimed (downloads, not a Preview button that fails); a real OLE2 file gets a card naming the format and the way out, and a `.doc` that is really RTF shows its extracted text |
+
+Two verification notes worth keeping. The tar sniffer had a real bug that only a
+test fixture could find: a one-file tar (header + padding + the two zero blocks
+that end an archive) was being listed as a single gzipped file, because the
+sniffer required the *next* block to be another header. And the crop assertion
+was checked against the pre-fix code to prove it fails (540pt instead of 468pt),
+so the test cannot pass for the wrong reason.
+
+**Desktop verification, in the app rather than a browser.** `desktop-smoke.spec.ts`
+attaches to the real box window over CDP and drives the changed views — a real
+DOCX through `docx-preview`, a `.tar`, a legacy `.doc`, an RTF `.doc`, and the
+PDF editor's duplicate + crop — with a phone-sized viewport emulated, asserting
+the app window reports **no console errors or uncaught exceptions** during any of
+it and that the process is still alive afterwards. `clipboard-file-desktop.spec.ts`
+closes §13.16's open gap: the copy is made from the app's own
+`copyFileToOsClipboard` in the real window and verified with PowerShell's
+`Get-Clipboard -Format FileDropList`, byte for byte, in the app's own clipboard
+folder.

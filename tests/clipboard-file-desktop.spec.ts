@@ -3,26 +3,29 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 
 /**
- * *Copy file* end to end, in the real box window (0.2.30).
+ * *Copy file* end to end, in the real box window.
  *
  * `tests/clipboard-file.spec.ts` proves the page *routes* a non-image file to
  * `plugin:box-shell|copyFileToClipboard` and that the payload it builds is the
- * file's exact bytes — with a stubbed shell. That leaves the one link a browser
- * test cannot reach: whether a **raw-body** invoke from a *remote* origin is
- * actually accepted by the shell and lands on the operating system's clipboard.
- * Three separate things can break there, and each is invisible until a user
- * right-clicks an attachment:
+ * file's exact bytes — with a stubbed shell. That leaves the links a browser
+ * test cannot reach:
  *
  *   1. the ACL (the app window's page is a remote origin; a command missing from
  *      the capability is refused before any native code runs),
- *   2. the raw IPC body (desktop sends `[u32 LE name length][name][bytes]`, not
- *      JSON),
+ *   2. the IPC **transport** — the page is served by a server-supplied CSP, and
+ *      this app's own server sends `connect-src 'self' ws: wss:`, so the engine
+ *      blocks Tauri's custom-protocol IPC (`http://ipc.localhost`) and Tauri
+ *      silently falls back to an interface that serialises JSON and cannot carry
+ *      a request body. The raw-body payload desktop used to send therefore never
+ *      arrived, and the shell answered "expected the raw request body". This is
+ *      the failure the box test exists for,
  *   3. the native write itself.
  *
- * So this spec talks to the real window over CDP and then verifies the result
- * with **PowerShell's `Get-Clipboard -Format FileDropList`** — the same reader an
- * Explorer-style paste uses — and compares the file's bytes on disk with the
- * bytes that were sent.
+ * So this spec calls the page's own `copyFileToOsClipboard` in the real window
+ * over CDP, then verifies the result with **PowerShell's
+ * `Get-Clipboard -Format FileDropList`** — the same reader an Explorer-style
+ * paste uses — and compares the file's bytes on disk with the bytes that were
+ * sent.
  *
  * Run it (the box must be started with the variable set, on the server origin):
  *
@@ -58,8 +61,37 @@ function clipboardFiles(): string[] {
     return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 }
 
+/** The app window, attached over the box's debug port. */
+async function boxPage() {
+    const browser = await chromium.connectOverCDP(CDP);
+    const pages = browser.contexts().flatMap((c) => c.pages());
+    const page = pages.find((p) => p.url().startsWith('http')) || pages[0];
+    await page.waitForLoadState('domcontentloaded');
+    return { browser, page };
+}
+
+/**
+ * The real thing, from the page's own entry point: build a blob with exactly
+ * these bytes and ask the page to put it on the clipboard.
+ */
+function copyInBox(page: any, name: string, payload: number[]) {
+    return page.evaluate(
+        async ({ name, payload }: { name: string; payload: number[] }) => {
+            const W = window as any;
+            if (!W.__TAURI__?.core?.invoke) return { ok: false, why: 'no Tauri bridge in this window' };
+            if (typeof W.copyFileToOsClipboard !== 'function') {
+                return { ok: false, why: 'the page has no copyFileToOsClipboard to call' };
+            }
+            const blob = new Blob([new Uint8Array(payload)], { type: 'application/x-msdownload' });
+            const res = await W.copyFileToOsClipboard(blob, name, 'application/x-msdownload');
+            return { ok: !!res.ok, why: res.reason || '' };
+        },
+        { name, payload },
+    );
+}
+
 test.describe('copy a file to the clipboard (needs a running box with E2E_BOX_DEBUG_PORT)', () => {
-    test('a raw-body invoke from the app window reaches the OS clipboard', async () => {
+    test('a base64-JSON copy from the app window reaches the OS clipboard', async () => {
         test.skip(!DEBUG_PORT, 'Set E2E_BOX_DEBUG_PORT and start the box first — see this file\'s header.');
         expect(await cdpUp(), `no DevTools endpoint on ${CDP}`).toBeTruthy();
 
@@ -68,50 +100,30 @@ test.describe('copy a file to the clipboard (needs a running box with E2E_BOX_DE
         const payload = [0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0xff, 0x2a, 0x11, 0x22];
         const name = 'e2e-clipboard-check.exe';
 
-        const browser = await chromium.connectOverCDP(CDP);
+        const { browser, page } = await boxPage();
         try {
-            const pages = browser.contexts().flatMap((c) => c.pages());
-            const page = pages.find((p) => p.url().startsWith('http')) || pages[0];
-            await page.waitForLoadState('domcontentloaded');
             test.skip(
                 !page.url().startsWith('https://'),
                 `the box window is on ${page.url()} — this test needs the app served from the box's server`,
             );
 
-            const result = await page.evaluate(
-                async ({ payload, name }: { payload: number[]; name: string }) => {
-                    const W = window as any;
-                    if (!W.__TAURI__?.core?.invoke) return { ok: false, why: 'no Tauri bridge in this window' };
-                    // Exactly what `copyFileToOsClipboard` builds on desktop.
-                    const nameBytes = new TextEncoder().encode(name);
-                    const head = new Uint8Array(4);
-                    new DataView(head.buffer).setUint32(0, nameBytes.length, true);
-                    const data = new Uint8Array(payload);
-                    const body = new Uint8Array(4 + nameBytes.length + data.length);
-                    body.set(head, 0);
-                    body.set(nameBytes, 4);
-                    body.set(data, 4 + nameBytes.length);
-                    try {
-                        await W.__TAURI__.core.invoke('plugin:box-shell|copyFileToClipboard', body);
-                        return { ok: true, why: '' };
-                    } catch (e) {
-                        return { ok: false, why: String(e) };
-                    }
-                },
-                { payload, name },
-            );
-
+            const result = await copyInBox(page, name, payload);
             expect(
                 result.ok,
                 `the shell refused the copy: ${result.why}\n` +
-                    '(a refusal here means the ACL or the command is missing for the app window\'s origin)',
+                    '(a refusal here means the transport, the ACL, or the command is missing for the app window\'s origin)',
             ).toBe(true);
 
             const files = clipboardFiles();
             expect(files.length, 'the clipboard holds no file after a successful copy').toBeGreaterThan(0);
             const copied = files[0];
             expect(copied.toLowerCase()).toContain(name);
-            expect(copied.toLowerCase()).toContain('cache');
+            // The file lives in the *app's own* clipboard folder. On Windows the
+            // cache dir is `%LOCALAPPDATA%\<app identifier>` (so there is no
+            // folder literally named "cache"), then `\clipboard` — what has to
+            // hold is that it is inside the app's directory, not a shared temp
+            // folder anything on the machine can enumerate (asserted below).
+            expect(copied.toLowerCase()).toContain('clipboard');
             // The paste has to hand over the file the sender sent, byte for byte.
             expect(Array.from(fs.readFileSync(copied))).toEqual(payload);
 
@@ -128,33 +140,16 @@ test.describe('copy a file to the clipboard (needs a running box with E2E_BOX_DE
         test.skip(!DEBUG_PORT, 'Set E2E_BOX_DEBUG_PORT and start the box first — see this file\'s header.');
         expect(await cdpUp(), `no DevTools endpoint on ${CDP}`).toBeTruthy();
 
-        const browser = await chromium.connectOverCDP(CDP);
+        const { browser, page } = await boxPage();
         try {
-            const pages = browser.contexts().flatMap((c) => c.pages());
-            const page = pages.find((p) => p.url().startsWith('http')) || pages[0];
-            await page.waitForLoadState('domcontentloaded');
             test.skip(!page.url().startsWith('https://'), 'the box window is not on the app server');
 
-            const copy = (name: string, bytes: number[]) =>
-                page.evaluate(
-                    async ({ name, bytes }: { name: string; bytes: number[] }) => {
-                        const W = window as any;
-                        const nameBytes = new TextEncoder().encode(name);
-                        const head = new Uint8Array(4);
-                        new DataView(head.buffer).setUint32(0, nameBytes.length, true);
-                        const data = new Uint8Array(bytes);
-                        const body = new Uint8Array(4 + nameBytes.length + data.length);
-                        body.set(head, 0);
-                        body.set(nameBytes, 4);
-                        body.set(data, 4 + nameBytes.length);
-                        await W.__TAURI__.core.invoke('plugin:box-shell|copyFileToClipboard', body);
-                    },
-                    { name, bytes },
-                );
-
-            await copy('first-copy.bin', [1, 1, 1]);
+            const first = await copyInBox(page, 'first-copy.bin', [1, 1, 1]);
+            expect(first.ok, `the first copy failed: ${first.why}`).toBe(true);
             const firstDir = clipboardFiles()[0].replace(/[^\\/]+$/, '');
-            await copy('second-copy.bin', [2, 2, 2]);
+
+            const second = await copyInBox(page, 'second-copy.bin', [2, 2, 2]);
+            expect(second.ok, `the second copy failed: ${second.why}`).toBe(true);
 
             const after = clipboardFiles();
             expect(after).toHaveLength(1);

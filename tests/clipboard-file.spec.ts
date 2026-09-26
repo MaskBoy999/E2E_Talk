@@ -79,16 +79,69 @@ test.describe('copy any file type to the clipboard (0.2.30)', () => {
         expect(seen.calls).toHaveLength(1);
         expect(seen.calls[0].cmd).toBe('plugin:box-shell|copyFileToClipboard');
 
-        // Desktop shape: one raw body, `[u32 LE name length][name][bytes]`.
-        const body: Uint8Array = seen.calls[0].args;
-        expect(body).toBeInstanceOf(Uint8Array);
-        const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-        const nameLen = view.getUint32(0, true);
-        const name = new TextDecoder().decode(body.slice(4, 4 + nameLen));
-        expect(name).toBe('Equilotl.exe');
+        // One payload shape, both platforms: base64 inside a JSON argument.
+        //
+        // Desktop used to send a single raw request body (`[u32 LE name
+        // length][name][bytes]`), which is smaller and never a string — and
+        // which turned out to be unreachable in the real app: the page is served
+        // by a server-supplied CSP, the app's own server sends
+        // `connect-src 'self' ws: wss:`, the engine therefore blocks Tauri's
+        // custom-protocol IPC (`http://ipc.localhost`), and the `postMessage`
+        // interface Tauri silently falls back to serialises JSON and cannot
+        // carry a body at all. The shell answered "expected the raw request
+        // body" and every in-app file copy told the user it "needs the app".
+        const args = seen.calls[0].args as any;
+        expect(typeof args).toBe('object');
+        expect(args.name).toBe('Equilotl.exe');
+        expect(args.mime).toBe('application/x-msdownload');
+        expect(typeof args.data).toBe('string');
+        const decoded = Uint8Array.from(atob(args.data), (c) => c.charCodeAt(0));
         // The bytes must be the decrypted file itself: an .exe pasted after a
         // re-encode is not the file the sender sent.
-        expect(Array.from(body.slice(4 + nameLen))).toEqual(seen.payload);
+        expect(Array.from(decoded)).toEqual(seen.payload);
+    });
+
+    test('a file too large to copy is refused by the page, before any payload is built', async ({ page }) => {
+        await register(page, unique('clipbig'));
+
+        const result = await page.evaluate(async () => {
+            const W = window as any;
+            const calls: string[] = [];
+            W.__TAURI__ = { core: { invoke: async (cmd: string) => { calls.push(cmd); return null; } } };
+            const toasts: string[] = [];
+            W.showToast = (m: string) => toasts.push(m);
+            const big = new Blob([new Uint8Array(W.CLIPBOARD_SHELL_MAX_BYTES + 1)]);
+            const ok = await W.copyBlobToClipboard(big, 'File "huge.iso"', 'huge.iso', 'application/octet-stream');
+            return { ok, calls, toasts, limit: W.CLIPBOARD_SHELL_MAX_BYTES };
+        });
+
+        // The cap is checked *before* the base64 string is assembled: building
+        // 1.3x of a gigabyte only to be refused is the crash, not the fix.
+        expect(result.limit).toBe(25 * 1024 * 1024);
+        expect(result.calls).toEqual([]);
+        expect(result.ok).toBe(false);
+        expect(result.toasts[0]).toContain('huge.iso');
+    });
+
+    test('when the shell refuses, its own words reach the user instead of a guess', async ({ page }) => {
+        await register(page, unique('cliprefuse'));
+
+        const result = await page.evaluate(async () => {
+            const W = window as any;
+            W.__TAURI__ = {
+                core: { invoke: async () => { throw new Error('copyFileToClipboard: another app holds the clipboard'); } },
+            };
+            const toasts: string[] = [];
+            W.showToast = (m: string) => toasts.push(m);
+            const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'application/pdf' });
+            const ok = await W.copyBlobToClipboard(blob, 'File "notes.pdf"', 'notes.pdf', 'application/pdf');
+            return { ok, toasts };
+        });
+
+        expect(result.ok).toBe(false);
+        expect(result.toasts).toHaveLength(1);
+        expect(result.toasts[0]).toContain('notes.pdf');
+        expect(result.toasts[0]).toContain('another app holds the clipboard');
     });
 
     test('with no shell behind it, the page says so and names the file', async ({ page }) => {
@@ -162,11 +215,30 @@ test.describe('copy any file type to the clipboard (0.2.30)', () => {
         expect(buildRs).toContain('"copyFileToClipboard"');
         expect(acl).toContain('allow-copyFileToClipboard');
 
-        // Desktop: a Rust command that reads the raw body and writes the file.
+        // Desktop: one Rust command that takes either payload shape and writes
+        // the file. The base64/JSON shape is the one the page sends (see the
+        // CSP note in the first test); the raw one is kept for an older page.
         expect(pluginRs).toContain('fn copyFileToClipboard');
+        expect(pluginRs).toContain('fn file_payload');
         expect(pluginRs).toContain('tauri::ipc::InvokeBody::Raw');
+        expect(pluginRs).toContain('decode_base64');
         expect(clipboardRs).toContain('CF_HDROP');
         expect(clipboardRs).toContain('text/uri-list');
+
+        // The page builds the payload both shells accept — and no longer builds
+        // the raw body anywhere (that is what silently broke in-app copying).
+        const chatJs = read('static/chat.js');
+        const shellJs = read('static/box-shell.js');
+        expect(chatJs).toContain('E2ECrypto.arrayBufferToBase64');
+        expect(shellJs).toContain('arrayBufferToBase64');
+        expect(chatJs).not.toContain('setUint32(0, nameBytes.length, true)');
+        expect(shellJs).not.toContain('setUint32(0, nameBytes.length, true)');
+
+        // The page's caps mirror the shell's own, on both sides of the wire.
+        expect(chatJs).toContain('CLIPBOARD_SHELL_MAX_BYTES = 25 * 1024 * 1024');
+        expect(shellJs).toContain('BOX_SHELL_MAX_SAVE_BYTES = 100 * 1024 * 1024');
+        expect(pluginRs).toContain('MAX_CLIPBOARD_BYTES: usize = 25 * 1024 * 1024');
+        expect(pluginRs).toContain('MAX_SAVE_BYTES: usize = 100 * 1024 * 1024');
 
         // Android: the same command name, in Kotlin, against the FileProvider the
         // generated manifest already declares — and the entry is cleared before
