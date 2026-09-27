@@ -12107,6 +12107,15 @@ body.e2e-pip-active .e2e-pip-wrap * {
 .captions-badge {
     color: var(--accent);
 }
+.captions-live {
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+.captions-live:empty {
+    display: none;
+}
 .captions-line {
     font-size: 14px;
     line-height: 1.4;

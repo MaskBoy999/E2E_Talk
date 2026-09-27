@@ -3889,15 +3889,22 @@
         if (!S.remoteStreams[uid] || !S.remoteStreams[uid].audio) return;
         try {
             var stream = S.remoteStreams[uid].audio;
-            // Captions listen to this same decrypted stream (their own detached
-            // AudioContext tap; it never touches the playback path).
-            if (window.__captions && window.__captions.attach) window.__captions.attach(uid, stream);
             var els = S.remoteAudioEls[uid];
             if (!els) {
+                // removeRemoteAudioEls() also drops this member's caption tap
+                // (captions.detach) — that is the teardown half. It MUST run
+                // before the attach below, never after: attaching first and
+                // then resetting the elements detached the just-registered
+                // speaker, so in a real call captions had nobody attached and
+                // produced nothing at all (the synthetic feed in
+                // tests/captions-local.spec.ts never exercised this order).
                 removeRemoteAudioEls(uid);
                 S.remoteAudioEls[uid] = [];
                 els = S.remoteAudioEls[uid];
             }
+            // Captions listen to this same decrypted stream (their own detached
+            // AudioContext tap; it never touches the playback path).
+            if (window.__captions && window.__captions.attach) window.__captions.attach(uid, stream);
             // Refresh srcObject IN PLACE only when the track actually changed
             // (renegotiation re-fires ontrack with the same track) — setting a
             // new srcObject restarts element playback and causes a volume dip.
@@ -10524,7 +10531,12 @@
         Object.keys(S.remoteScreenAudioEls).forEach(function (uid) {
             applyRemoteScreenVolume(uid);
         });
-        if (_hearSelfAudioEl) _hearSelfAudioEl.volume = v / 100;
+        // (There is no separate hear-self <audio> element any more — the test
+        // path is a node in this same graph, so masterGain already covers it.
+        // The old `_hearSelfAudioEl.volume` line referenced a variable that no
+        // longer exists, which threw a ReferenceError out of setSpeakerVolume:
+        // the setting was saved but the caller's applySettingsToUI() never ran,
+        // so "reset speaker volume" left the slider showing the old value.)
         if (typeof updateSettingsLabels === 'function') updateSettingsLabels();
     }
 

@@ -30,7 +30,80 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Exactly ONE actor creates the release object for a tag.
+  #
+  # v0.2.33 published TWO release objects for the same tag: one carried all ten
+  # assets, the other was empty, and /releases/latest resolved to the EMPTY one —
+  # so the public download page advertised a release with no files at all.
+  # Three creators were racing for that tag: tauri-action on each of the two
+  # matrix legs (its tagName/releaseBody keys are what make it create a release)
+  # and the `gh release create` fallback inside "Publish release assets".
+  # GitHub's tag_name uniqueness check is not atomic, so two simultaneous POSTs
+  # both succeed and two release objects exist for one tag.
+  #
+  # Creating it here, once, BEFORE any build leg may start, removes the race by
+  # construction. Every other step only ever uploads with --clobber, which is
+  # idempotent and therefore safe to re-run.
+  # ---------------------------------------------------------------------------
+  create-release:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          # Re-running a tag must FINISH the existing release, never make a
+          # second one. Notes are written on the create path only: this token
+          # can create a release and upload assets to it, but `update-a-release`
+          # (a PATCH, i.e. `gh release edit`) comes back "Resource not
+          # accessible by integration" — the wall softprops died on across
+          # v0.2.22 and v0.2.24.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists — leaving its notes alone"
+            exit 0
+          fi
+          notes=$(cat <<'NOTES'
+          Native desktop app for E2E Chat — no browser required.
+
+          **Install:** download the file for your platform below and run it.
+          - Windows: `.msi` or `.exe` (NSIS)
+          - Linux: `.AppImage` or `.deb`
+          - Arch Linux: `.pkg.tar.zst` — download it and run `sudo pacman -U <file>`
+          - Android: `.apk` (attached by the Android workflow)
+
+          Verify your download against `SHA256SUMS-<platform>.txt`.
+
+          **Linux / Arch: window opens but stays grey or blank?** That is
+          WebKitGTK's accelerated renderer, not a missing dependency — every
+          shared library the binary needs is verified on a real Arch userland
+          before this release is published. The app already ships with the
+          safe renderer path enabled by default on Linux; if you still see a
+          blank window, force it explicitly:
+
+          ```
+          WEBKIT_DISABLE_DMABUF_RENDERER=1 e2e-chat-app
+          WEBKIT_DISABLE_COMPOSITING_MODE=1 e2e-chat-app   # last resort
+          ```
+
+          `E2E_CHAT_WEBKIT_DMABUF=1` opts back into the fast path.
+
+          On first launch, enter your server's Tailscale address
+          (e.g. `https://100.x.x.x:3443`) and click **Test connection**.
+
+          To update later, download the new installer from this page again.
+          NOTES
+          )
+          gh release create "$tag" --title "E2E Chat $tag" --notes "$notes"
+          gh release view "$tag" --json url --jq '"created: " + .url'
+
   build:
+    # The release object must exist before either leg uploads to it.
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -122,51 +195,17 @@ jobs:
           $json | ConvertTo-Json -Depth 8 | Set-Content -Path $conf -Encoding utf8
           Write-Host "Signing with thumbprint $($cert.Thumbprint)"
 
-      # Tag push → build AND publish a downloadable release.
-      - name: Build and publish release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'E2E Chat ${{ github.ref_name }}'
-          releaseBody: |
-            Native desktop app for E2E Chat — no browser required.
-
-            **Install:** download the file for your platform below and run it.
-            - Windows: `.msi` or `.exe` (NSIS)
-            - Linux: `.AppImage` or `.deb`
-            - Arch Linux: `.pkg.tar.zst` — download it and run `sudo pacman -U <file>`
-            - Android: `.apk` (attached by the Android workflow)
-
-            Verify your download against `SHA256SUMS-<platform>.txt`.
-
-            **Linux / Arch: window opens but stays grey or blank?** That is
-            WebKitGTK's accelerated renderer, not a missing dependency — every
-            shared library the binary needs is verified on a real Arch userland
-            before this release is published. The app already ships with the
-            safe renderer path enabled by default on Linux; if you still see a
-            blank window, force it explicitly:
-
-            ```
-            WEBKIT_DISABLE_DMABUF_RENDERER=1 e2e-chat-app
-            WEBKIT_DISABLE_COMPOSITING_MODE=1 e2e-chat-app   # last resort
-            ```
-
-            `E2E_CHAT_WEBKIT_DMABUF=1` opts back into the fast path.
-
-            On first launch, enter your server's Tailscale address
-            (e.g. `https://100.x.x.x:3443`) and click **Test connection**.
-
-            To update later, download the new installer from this page again.
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
-
-      # Manual run → build only; the installers are uploaded as artifacts.
-      - name: Build installers (manual run)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      # Build only — publishing happens explicitly in "Publish release assets"
+      # below.
+      #
+      # This step used to carry tagName/releaseName/releaseBody, and those keys
+      # are precisely what make tauri-action create the release itself. On the
+      # v0.2.33 tag BOTH matrix legs did that at once and GitHub created two
+      # release objects for the one tag, so /releases/latest pointed at the
+      # empty one and the download page showed no files. The release object is
+      # created once by the create-release job now; this step only ever builds.
+      # It is also used for manual (non-tag) runs, which stay artifact-only.
+      - name: Build installers
         uses: tauri-apps/tauri-action@v0
         with:
           args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
@@ -179,11 +218,15 @@ jobs:
       - name: Verify installers were produced
         shell: bash
         run: |
-          found=$(find src-tauri/target -type f \
-            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' \) | wc -l)
+          # Only the *bundle* directory holds published installers. Globbing all
+          # of target/ also matched cargo's build-script intermediates, so the
+          # count could never prove a bundle was missing; the .rpm was not
+          # matched at all.
+          found=$(find src-tauri/target/release/bundle -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) | wc -l)
           echo "Found $found installer file(s):"
-          find src-tauri/target -type f \
-            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' \) -print
+          find src-tauri/target/release/bundle -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -print
           if [ "$found" -eq 0 ]; then
             echo "::error::No installers were bundled — the build did not produce a release artifact."
             exit 1
@@ -223,35 +266,16 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          notes=$(cat <<'NOTES'
-          Native desktop app for E2E Chat — no browser required.
-
-          **Install:** download the file for your platform below and run it.
-          - Windows: `.msi` or `.exe` (NSIS)
-          - Linux: `.AppImage` or `.deb`
-          - Arch Linux: `.pkg.tar.zst` — download it and run `sudo pacman -U <file>`
-          - Android: `.apk` (attached by the Android workflow)
-
-          Verify your download against `SHA256SUMS-<platform>.txt`.
-
-          On first launch, enter your server's Tailscale address
-          (e.g. `https://100.x.x.x:3443`) and click **Test connection**.
-
-          To update later, download the new installer from this page again.
-          NOTES
-          )
-          # Notes are set on the CREATE path only, and an existing release is
-          # never PATCHed. This token can create a release and upload assets
-          # to it, but `update-a-release` comes back "Resource not accessible
-          # by integration" — the wall softprops died on across v0.2.22 and
-          # v0.2.24, and what a `create || edit` pair reduced to as well (the
-          # create always fails on an existing release, so the edit always
-          # ran). In practice tauri-action has already created the release
-          # with these notes from its `releaseBody` before this step starts,
-          # so the create path is the fallback, not the norm.
-          gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --title "E2E Chat $tag" --notes "$notes" \
-            || echo "note: could not create $tag (assuming it exists); uploading anyway"
+          # Wait for the release created by the create-release job this build
+          # `needs` (a couple of seconds of API lag at most). It is deliberately
+          # NEVER created here: a create call from this step is one of the
+          # racing creators that produced two release objects for v0.2.33.
+          for _ in $(seq 1 30); do
+            gh release view "$tag" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          # Loud when it genuinely never appeared — no silent orphan upload.
+          gh release view "$tag" >/dev/null
 
           # Exactly the bundles this leg produced. On Windows the AppImage/deb
           # globs simply match nothing (nullglob drops them); the legs never
@@ -387,8 +411,13 @@ jobs:
           while IFS= read -r -d '' f; do
             h=$(sha256sum "$f" | cut -d' ' -f1)
             echo "$h  $(basename "$f")" >> "$out"
-          done < <(find src-tauri/target -type f \
-            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' \) -print0)
+          # Only the published *bundles* count. Searching all of target/ also
+          # matched cargo's build-script intermediates (51 build-script-build
+          # .exe files polluted SHA256SUMS-windows-x64.txt), and the .rpm was
+          # missing entirely, so a downloaded .rpm could not be verified against
+          # the list the release notes advertise.
+          done < <(find src-tauri/target/release/bundle -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -print0)
           # The Arch package lives outside target/ (and only exists on the
           # Linux leg of a tag run) — append it when present.
           if [ -d dist ]; then

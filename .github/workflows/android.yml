@@ -369,16 +369,22 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          # The desktop workflow owns the release notes. Both workflows start
-          # at the tag push, so this one may get here first — create the
-          # release in that case and let the desktop leg fill the notes in.
-          # An existing release is left alone: this token can create releases
-          # and upload assets but `update-a-release` (a PATCH) is refused with
-          # "Resource not accessible by integration", so editing one would fail
-          # here and take the APK down with it.
-          gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --title "E2E Chat $tag" --generate-notes \
-            || echo "note: could not create $tag (assuming it exists); uploading anyway"
+          # The desktop workflow's create-release job owns the release object:
+          # it is the ONLY step anywhere that calls `gh release create`, because
+          # two creators racing on one tag is what published a second, empty
+          # release object for v0.2.33 (and /releases/latest then pointed at it).
+          # This step therefore never creates — it waits for the object to show
+          # up and fails loudly if it never does. Building this APK takes many
+          # minutes, so the wait has always been satisfied immediately in
+          # practice; it exists so a slow runner cannot race the creator.
+          for _ in $(seq 1 30); do
+            gh release view "$tag" >/dev/null 2>&1 && break
+            sleep 5
+          done
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag does not exist — the desktop workflow's create-release job did not run or failed. Re-run this workflow once it has, rather than creating a second release object here."
+            exit 1
+          fi
           # Listed explicitly, not left to gh to glob: an unmatched pattern is
           # an error there, while the APK and its checksum are both produced by
           # this job and must both reach the release.

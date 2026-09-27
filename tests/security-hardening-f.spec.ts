@@ -308,14 +308,22 @@ test.describe('F-series hardening (main server)', () => {
         const attempts = [
             '/../../etc/passwd',
             '/../server/.env',
+            // Windows treats '\' as a separator; a split('/')-only check let
+            // this single segment resolve into the live server/.env.
+            '/..\\server\\.env',
+            '/..\\..\\server\\.env',
             '/..%2f..%2fetc%2fpasswd',
+            // Percent-encoded form of the same backslash escape.
+            '/%2e%2e%5cserver%5c.env',
             '/static/../server/.env',
             '/api/../../../etc/passwd',
         ];
         for (const p of attempts) {
             const r = await rawPathGet(3443, p);
             expect(r.status, `traversal attempt ${p} must not succeed`).toBe(404);
-            expect(r.data.toLowerCase()).not.toContain('jwt_secret');
+            const body = r.data.toLowerCase();
+            expect(body, `attempt ${p} leaked a secret`).not.toContain('jwt_secret');
+            expect(body, `attempt ${p} leaked a secret`).not.toContain('hmac_key');
         }
     });
 

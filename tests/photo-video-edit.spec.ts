@@ -1274,7 +1274,10 @@ test.describe('Photo & Video Edit System', () => {
             const cutEnd = await page.evaluate(() => (window as any).videoEditState.cutEnd);
             expect(cutEnd).toBeLessThan(0.6);
             await page.click('#video-cut-play');
-            await expect(page.locator('#video-cut-play')).toHaveText('⏸ Stop Preview');
+            // The label is now an SVG icon (icon('stop')) plus text, not the
+            // '⏸' emoji — whitespace-normalised text is the stable assertion.
+            await expect(page.locator('#video-cut-play')).toHaveText('Stop Preview');
+            await expect(page.locator('#video-cut-play svg')).toHaveCount(1);
             // Wait past the cut length: without looping, playback would exceed the
             // cut end (0.6s). Staying inside proves the loop + the range clamp.
             await page.waitForTimeout(900);
@@ -1289,7 +1292,8 @@ test.describe('Photo & Video Edit System', () => {
             expect(during.t).toBeGreaterThanOrEqual(0);
             expect(during.t).toBeLessThan(during.endT + 0.1);
             await page.click('#video-cut-play');
-            await expect(page.locator('#video-cut-play')).toHaveText('▶ Preview');
+            await expect(page.locator('#video-cut-play')).toHaveText('Preview');
+            await expect(page.locator('#video-cut-play svg')).toHaveCount(1);
             const stopped = await page.evaluate(() => ({
                 playing: (window as any)._videoPreviewPlaying,
                 paused: (document.getElementById('video-edit-source') as HTMLVideoElement).paused,
@@ -1936,10 +1940,13 @@ test.describe('Photo & Video Edit System', () => {
             await uploadTestAudio(page, wavBuffer(burstSamples()));
             await openAudioEdit(page);
             await page.click('#audio-cut-play');
-            await expect(page.locator('#audio-cut-play')).toHaveText('⏸ Stop Preview');
+            // Same as the video button: SVG icon + text, no '⏸' glyph.
+            await expect(page.locator('#audio-cut-play')).toHaveText('Stop Preview');
+            await expect(page.locator('#audio-cut-play svg')).toHaveCount(1);
             expect(await page.evaluate(() => (window as any)._audioPreviewPlaying)).toBe(true);
             await page.click('#audio-cut-play');
-            await expect(page.locator('#audio-cut-play')).toHaveText('▶ Preview');
+            await expect(page.locator('#audio-cut-play')).toHaveText('Preview');
+            await expect(page.locator('#audio-cut-play svg')).toHaveCount(1);
             expect(await page.evaluate(() => (window as any)._audioPreviewPlaying)).toBe(false);
         });
 

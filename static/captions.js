@@ -102,9 +102,11 @@
             if (m.type === 'ready') {
                 _modelState = 'ready';
                 renderStatus();
-                // Anything that arrived while the model was loading was dropped
-                // on purpose (the first windows of a call are not worth a queue
-                // of stale audio).
+                // Transcribe the newest window each speaker produced while the
+                // model was still loading. Dropping them (the old behaviour)
+                // threw away the first words of the call for no reason: one
+                // held window per speaker costs a few hundred KB.
+                flushPendingWindows();
                 return;
             }
             if (m.type === 'result') {
@@ -151,7 +153,15 @@
         if (!s) return false;
         if (s.inflight) return false;               // still decoding the last one
         if (_modelState === 'cold') worker();
-        if (_modelState !== 'ready') return false;  // nothing to recognise yet
+        if (_modelState !== 'ready') {
+            // The model is still loading: keep only the newest window for this
+            // speaker and hand it over the moment the worker reports ready (see
+            // flushPendingWindows), so enabling captions mid-sentence does not
+            // throw the sentence away.
+            s.pending = { samples: new Float32Array(samples), sampleRate: sampleRate || 16000 };
+            updatePanelStatus();
+            return false;
+        }
         var buf = new Float32Array(samples);
         var id = _nextId++;
         s.inflight = true;
@@ -162,6 +172,20 @@
             audio: buf, sampleRate: sampleRate || 16000, language: language(),
         }, [buf.buffer]);
         return true;
+    }
+
+    /**
+     * Hand the one window each speaker held while the model was loading to the
+     * worker. Called from the worker's `ready` message; a no-op otherwise.
+     */
+    function flushPendingWindows() {
+        Object.keys(_speakers).forEach(function (uid) {
+            var s = _speakers[uid];
+            if (!s || !s.pending) return;
+            var p = s.pending;
+            s.pending = null;
+            if (rms(p.samples) >= MIN_SPEECH_RMS) transcribe(uid, p.samples, p.sampleRate);
+        });
     }
 
     // ─── per-participant taps ────────────────────────────────────────────
@@ -190,7 +214,7 @@
         if (existing) detach(uid);
         if (!_running) return;   // remembered; attach() runs again when captions start
 
-        var speaker = { uid: uid, name: name || displayName(uid), stream: stream, windows: 0, inflight: false, buf: [], ctx: null, node: null, src: null, sink: null };
+        var speaker = { uid: uid, name: name || displayName(uid), stream: stream, windows: 0, inflight: false, pending: null, buf: [], ctx: null, node: null, src: null, sink: null };
         _speakers[uid] = speaker;
 
         try {
@@ -202,6 +226,11 @@
             var ctx;
             try { ctx = new Ctx({ sampleRate: 16000 }); } catch (_) { ctx = new Ctx(); }
             speaker.ctx = ctx;
+            // A context created outside a user gesture starts suspended, and a
+            // suspended context fires no onaudioprocess at all — captions would
+            // sit silent forever with no error to show for it. Resume
+            // explicitly; the promise is deliberately ignored.
+            try { if (ctx.state === 'suspended' && ctx.resume) Promise.resolve(ctx.resume()).catch(function () {}); } catch (_) {}
             speaker.src = ctx.createMediaStreamSource(stream);
             // ScriptProcessorNode: deprecated, but it exists in every webview we
             // ship (AudioWorklet needs a separate module file and the same
@@ -293,6 +322,7 @@
         el.className = 'captions-panel';
         el.innerHTML = '<div class="captions-head"><span class="captions-title">Captions — on this device</span>' +
             '<span class="captions-badge" id="captions-mode"></span></div>' +
+            '<div class="captions-live" id="captions-live"></div>' +
             '<div class="captions-lines" id="captions-lines"></div>';
         document.body.appendChild(el);
         return el;
@@ -312,6 +342,36 @@
         el.scrollTop = el.scrollHeight;
         var mode = document.getElementById('captions-mode');
         if (mode) mode.textContent = language().toUpperCase() + ' · local';
+        updatePanelStatus();
+    }
+
+    /**
+     * The one line inside the panel that says what the engine is doing. Without
+     * it, turning captions on produced an empty overlay that was identical to
+     * captions being broken — the model loading, waiting for call audio, and a
+     * failure all looked the same (nothing).
+     */
+    function updatePanelStatus() {
+        var el = document.getElementById('captions-live');
+        if (!el) return;
+        if (!_running) { el.textContent = ''; return; }
+        if (_modelState === 'loading') {
+            el.textContent = 'Loading the on-device speech model' + (_modelProgress ? ' (' + _modelProgress + '%)' : '') + '…';
+            return;
+        }
+        if (_modelState === 'failed') {
+            el.textContent = 'Speech model could not start: ' + (_modelError || 'unknown error');
+            return;
+        }
+        var n = Object.keys(_speakers).length;
+        var decoded = 0;
+        Object.keys(_speakers).forEach(function (uid) { decoded += _speakers[uid].windows; });
+        if (!n) {
+            el.textContent = 'Listening — no call audio yet. Captions appear when someone speaks.';
+            return;
+        }
+        el.textContent = 'Listening to ' + n + ' participant' + (n === 1 ? '' : 's') +
+            (decoded ? ' · ' + decoded + ' window' + (decoded === 1 ? '' : 's') + ' decoded' : ' · waiting for speech');
     }
 
     function pushLine(who, text, isFinal) {
@@ -341,6 +401,7 @@
         if (line) line.textContent = statusText();
         var panelEl = document.getElementById('captions-panel');
         if (panelEl) panelEl.classList.toggle('captions-open', _running || _lines.length > 0);
+        updatePanelStatus();
     }
 
     function renderStatus() { refreshUi(); }

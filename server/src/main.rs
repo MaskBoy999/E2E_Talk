@@ -261,34 +261,101 @@ async fn http_to_https_redirect(
     response
 }
 
+/// Percent-decode a URL path. Returns `None` for a malformed escape or a byte
+/// sequence that is not valid UTF-8 — neither can be a legitimate static path.
+fn percent_decode_path(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Vetted path *relative to* `static/`. `None` (→ 404) for anything that could
+/// escape the static root:
+///   * a `.`/`..` component in **either** separator form — Windows treats `\`
+///     as a path separator, so a single `/..\server\.env` segment used to slip
+///     past a `split('/')`-only check and resolve into the live `server/.env`
+///     (leaking `JWT_SECRET` / `HMAC_KEY`);
+///   * a NUL byte, a drive/stream `:`, or a malformed percent-escape.
+///
+/// Separators are normalised *after* full percent-decoding, so `\`, `%5c` and
+/// `%2e%2e` are all judged by the same rule.
+fn static_subpath(raw_path: &str) -> Option<String> {
+    let decoded = percent_decode_path(raw_path)?;
+    if decoded.contains('\0') {
+        return None;
+    }
+    let normalized = decoded.replace('\\', "/");
+    // A colon is a Windows drive ("C:") or NTFS alternate data stream; no
+    // static asset this app ships has one.
+    if normalized.contains(':') {
+        return None;
+    }
+    if normalized.split('/').any(|seg| seg == "." || seg == "..") {
+        return None;
+    }
+    Some(normalized.trim_start_matches('/').to_string())
+}
+
+/// A real 404 (status, not just a body) for a missing or rejected static path.
+fn static_not_found() -> axum::response::Response {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("text/plain"));
+    (StatusCode::NOT_FOUND, headers, b"404 Not Found".to_vec()).into_response()
+}
+
 async fn serve_static(
     uri: axum::http::Uri,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
     // F9 — hard-block parent-directory traversal BEFORE touching the filesystem.
-    // Percent-decode first ("%2e%2e" must not bypass the check), then reject any
-    // path whose segments contain ".." or ".". This closes the real leak where
-    // "/../server/.env" resolved through ../static back into the server dir and
-    // served the live JWT_SECRET / HMAC_KEY.
-    let raw_path = uri.path();
-    let decoded_probe = raw_path.replace("%2e", ".").replace("%2E", ".");
-    let has_traversal = decoded_probe.split('/').any(|seg| seg == ".." || seg == ".");
-    if has_traversal {
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", HeaderValue::from_static("text/plain"));
-        return (
-            StatusCode::NOT_FOUND,
-            headers,
-            b"404 Not Found".to_vec(),
-        )
-            .into_response();
-    }
-    let path = format!("../static{}", raw_path);
-    let path = if std::path::Path::new(&path).is_dir() {
-        format!("{}index.html", path)
-    } else {
-        path
+    // The vetted relative path comes first; then the resolved (canonical) path
+    // must still live inside ../static. The old check split on '/' only, which
+    // Windows does not honour: "/..\server\.env" arrived as one segment, cleared
+    // the check, and served the live server/.env (JWT_SECRET / HMAC_KEY).
+    let rel = match static_subpath(uri.path()) {
+        Some(p) => p,
+        None => return static_not_found(),
     };
+    let static_root = match tokio::fs::canonicalize("../static").await {
+        Ok(p) => p,
+        Err(_) => return static_not_found(),
+    };
+    // `join` only appends the already-vetted relative path; canonicalizing the
+    // result and re-checking containment is the belt-and-braces guard against
+    // anything the component check could miss (symlinks, drive prefixes).
+    let joined = if rel.is_empty() {
+        static_root.clone()
+    } else {
+        static_root.join(&rel)
+    };
+    let canonical = match tokio::fs::canonicalize(&joined).await {
+        Ok(p) => p,
+        Err(_) => return static_not_found(),
+    };
+    if !canonical.starts_with(&static_root) {
+        return static_not_found();
+    }
+    let path = if canonical.is_dir() {
+        canonical.join("index.html")
+    } else {
+        canonical
+    };
+    let path = path.to_string_lossy().into_owned();
 
     // If the database is freshly initialized (no admin password, no users),
     // redirect the visitor to the admin setup page so the host can configure
@@ -372,18 +439,7 @@ async fn serve_static(
 
             (headers, contents).into_response()
         }
-        Err(_) => {
-            // F9 — a missing (or path-traversed) file must return a REAL 404
-            // status, not 200 with a "404 Not Found" body.
-            let mut headers = HeaderMap::new();
-            headers.insert("content-type", HeaderValue::from_static("text/plain"));
-            (
-                StatusCode::NOT_FOUND,
-                headers,
-                b"404 Not Found".to_vec(),
-            )
-                .into_response()
-        }
+        Err(_) => static_not_found(),
     }
 }
 
@@ -893,6 +949,48 @@ async fn main() {
             let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
             axum::serve(listener, app).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod static_path_tests {
+    use super::{percent_decode_path, static_subpath};
+
+    #[test]
+    fn rejects_traversal_in_every_separator_and_encoding() {
+        for bad in [
+            "/../server/.env",
+            "/..\\server\\.env",       // Windows separator — the live leak
+            "/..\\..\\server\\.env",
+            "/%2e%2e/server/.env",
+            "/%2E%2E%5cserver%5c.env", // encoded "..\\server\\.env"
+            "/static/../server/.env",
+            "/./index.html",
+            "/a/../../b",
+            "/server/.env%00",
+            "/C:/windows/system32/config/sam",
+            "/index.html%",
+            "/index.html%2",
+        ] {
+            assert!(static_subpath(bad).is_none(), "must reject {bad}");
+        }
+    }
+
+    #[test]
+    fn keeps_ordinary_asset_paths_unchanged() {
+        assert_eq!(static_subpath("/").as_deref(), Some(""));
+        assert_eq!(static_subpath("/index.html").as_deref(), Some("index.html"));
+        assert_eq!(static_subpath("/chat.js").as_deref(), Some("chat.js"));
+        assert_eq!(
+            static_subpath("/vendor/asr/whisper-tiny/onnx/encoder.onnx").as_deref(),
+            Some("vendor/asr/whisper-tiny/onnx/encoder.onnx")
+        );
+        // Double-encoded "%2e%2e" decodes to a literal '%2e' filename byte —
+        // it is not traversal and must survive the check.
+        assert_eq!(static_subpath("/a%252e%252e/b").as_deref(), Some("a%2e%2e/b"));
+        // A hyphenated name that merely contains dots is not a dot segment.
+        assert_eq!(static_subpath("/foo..bar.txt").as_deref(), Some("foo..bar.txt"));
+        assert_eq!(percent_decode_path("/a%20b").as_deref(), Some("/a b"));
     }
 }
 

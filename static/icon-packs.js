@@ -156,19 +156,152 @@
         return { icons: icons };
     }
 
-    /** One image file as a pack entry (PNG/WebP/GIF/JPEG become <image>). */
-    function iconFromImageFile(file, cb) {
+    // ── picture icons: moveable 1:1 crop ─────────────────────────────────
+    //
+    // A picture used as an icon is expressed as an SVG <image> over the ORIGINAL
+    // bytes, with the symbol's viewBox set to the chosen square of the picture.
+    // That is deliberate: rasterising the crop through a canvas would flatten an
+    // animated GIF to its first frame, so the crop is geometry (viewBox), not
+    // pixels, and the icon keeps whatever the file does — animation included.
+    // Nothing is resampled to a fixed size either; the square IS the icon's
+    // coordinate space, so the picture is never squashed to fit.
+
+    /** Turn a picture + a square crop (natural pixels) into a pack entry. */
+    function imageEntry(href, natW, natH, x, y, size) {
+        x = Math.max(0, Math.min(Math.round(x), Math.max(0, natW - 1)));
+        y = Math.max(0, Math.min(Math.round(y), Math.max(0, natH - 1)));
+        size = Math.max(1, Math.min(Math.round(size), natW - x, natH - y));
+        return {
+            inner: '<image href="' + href + '" x="0" y="0" width="' + natW + '" height="' + natH + '" ' +
+                'preserveAspectRatio="none"/>',
+            viewBox: x + ' ' + y + ' ' + size + ' ' + size,
+        };
+    }
+
+    /** Read a picture and open the crop step; cb receives an entry or null. */
+    function openIconImageCrop(file, name, cb) {
         var reader = new FileReader();
+        reader.onerror = function () { cb(null); };
         reader.onload = function () {
             var href = reader.result;
-            cb({
-                inner: '<image href="' + href + '" x="0" y="0" width="24" height="24" ' +
-                    'preserveAspectRatio="xMidYMid meet"/>',
-                viewBox: '0 0 24 24',
-            });
+            var probe = new Image();
+            probe.onerror = function () { cb(null); };
+            probe.onload = function () {
+                if (!probe.naturalWidth || !probe.naturalHeight) { cb(null); return; }
+                buildCrop(href, probe.naturalWidth, probe.naturalHeight, name, cb);
+            };
+            probe.src = href;
         };
-        reader.onerror = function () { cb(null); };
         reader.readAsDataURL(file);
+    }
+
+    /** The crop step itself: drag the square, drag its corner to resize. */
+    function buildCrop(href, natW, natH, name, cb) {
+        // Fit the picture into the dialog, allowing a modest upscale so a small
+        // image is still comfortable to crop precisely.
+        var maxW = Math.min(520, Math.max(200, window.innerWidth * 0.8));
+        var maxH = Math.min(520, Math.max(200, window.innerHeight * 0.6));
+        var scale = Math.min(maxW / natW, maxH / natH, 4);
+        var dispW = Math.max(1, Math.round(natW * scale));
+        var dispH = Math.max(1, Math.round(natH * scale));
+
+        var root = el('div', 'position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:99999;' +
+            'display:flex;align-items:center;justify-content:center;padding:18px;box-sizing:border-box');
+        var panel = el('div', 'background:#12121f;border:1px solid #2a2a4a;border-radius:12px;padding:18px;' +
+            'max-width:min(620px,96vw);max-height:96vh;overflow:auto;box-sizing:border-box;text-align:center');
+        panel.appendChild(el('h4', 'margin:0 0 6px;color:var(--text-primary,#e6e6f0);font-size:15px',
+            'Crop this icon to a square'));
+        panel.appendChild(el('p', 'margin:0 0 12px;font-size:12px;line-height:1.45;color:var(--text-muted,#8a8aa0)',
+            'Drag the square to choose the part to keep, and drag its corner to resize. The icon keeps exactly this ' +
+            'square and the picture is never squashed or re-encoded — so an animated GIF stays animated.'));
+
+        var frame = el('div', 'position:relative;display:inline-block;overflow:hidden;border-radius:8px;background:#111;line-height:0;' +
+            'touch-action:none');
+        frame.style.width = dispW + 'px';
+        frame.style.height = dispH + 'px';
+        var imgEl = document.createElement('img');
+        imgEl.src = href;
+        imgEl.draggable = false;
+        imgEl.style.cssText = 'display:block;width:' + dispW + 'px;height:' + dispH + 'px;user-select:none;pointer-events:none';
+        frame.appendChild(imgEl);
+
+        var crop = el('div', 'position:absolute;box-sizing:border-box;border:2px solid #4fc3f7;' +
+            'box-shadow:0 0 0 9999px rgba(0,0,0,0.5);cursor:move;touch-action:none');
+        var handle = el('div', 'position:absolute;right:-7px;bottom:-7px;width:14px;height:14px;background:#4fc3f7;' +
+            'border:1px solid #fff;border-radius:3px;cursor:nwse-resize;touch-action:none');
+        crop.setAttribute('data-icon-crop-box', '');
+        crop.appendChild(handle);
+        frame.appendChild(crop);
+        panel.appendChild(frame);
+
+        var size = Math.max(16, Math.min(dispW, dispH));
+        var left = Math.round((dispW - size) / 2);
+        var top = Math.round((dispH - size) / 2);
+        function place() {
+            crop.style.left = left + 'px';
+            crop.style.top = top + 'px';
+            crop.style.width = size + 'px';
+            crop.style.height = size + 'px';
+        }
+        place();
+
+        var mode = null, sx = 0, sy = 0, sl = 0, st = 0, ss = 0;
+        function down(which) {
+            return function (ev) {
+                mode = which;
+                sx = ev.clientX; sy = ev.clientY;
+                sl = left; st = top; ss = size;
+                ev.preventDefault();
+                ev.stopPropagation();
+            };
+        }
+        function move(ev) {
+            if (!mode) return;
+            var dx = ev.clientX - sx;
+            var dy = ev.clientY - sy;
+            if (mode === 'move') {
+                left = Math.max(0, Math.min(dispW - size, Math.round(sl + dx)));
+                top = Math.max(0, Math.min(dispH - size, Math.round(st + dy)));
+            } else {
+                // One drag axis drives both edges so the box stays square.
+                var maxSize = Math.min(dispW - left, dispH - top);
+                size = Math.max(16, Math.min(maxSize, Math.round(ss + Math.max(dx, dy))));
+            }
+            place();
+            ev.preventDefault();
+        }
+        function up() { mode = null; }
+        crop.addEventListener('pointerdown', down('move'));
+        handle.addEventListener('pointerdown', down('resize'));
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+        window.addEventListener('pointercancel', up);
+
+        var actions = el('div', 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px');
+        var cancel = el('button', BTN + 'border:1px solid #444;background:transparent;color:#bbb', 'Cancel');
+        var apply = el('button', BTN + 'border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff', 'Use this square');
+        root.setAttribute('data-icon-crop', '');
+        cancel.setAttribute('data-icon-crop-cancel', '');
+        apply.setAttribute('data-icon-crop-apply', '');
+        actions.appendChild(cancel);
+        actions.appendChild(apply);
+        panel.appendChild(actions);
+        root.appendChild(panel);
+        document.body.appendChild(root);
+
+        function close() {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+            window.removeEventListener('pointercancel', up);
+            if (root.parentNode) root.parentNode.removeChild(root);
+        }
+        apply.addEventListener('click', function () {
+            // Display pixels -> natural pixels (the inverse of the fit scale).
+            var s = natW / dispW;
+            close();
+            cb(imageEntry(href, natW, natH, left * s, top * s, size * s));
+        });
+        cancel.addEventListener('click', function () { close(); cb(null); });
     }
 
     // ── applying ─────────────────────────────────────────────────────────
@@ -419,6 +552,11 @@
         var status = el('div', 'font-size:12px;color:var(--text-muted);margin:0 0 10px;min-height:16px');
         container.appendChild(status);
 
+        var hint = el('div', 'font-size:11px;color:var(--text-muted);margin:0 0 10px;line-height:1.45',
+            'Click an icon and pick a picture (PNG, JPEG, WebP or an animated GIF) and you are asked to crop it to a ' +
+            'square first; an animated GIF keeps animating. Or pick an .svg to replace just that icon.');
+        container.appendChild(hint);
+
         var customCount = Object.keys(_draft).length;
         status.textContent = 'Slot ' + editing + ' draft: ' + customCount + ' of ' + names.length +
             ' icons customised' + (active === editing ? ' (live)' : ' (not active yet)') +
@@ -495,7 +633,9 @@
             if (!file || !name) return;
             var isSvg = /svg/i.test(file.type) || /\.svg$/i.test(file.name);
             if (!isSvg) {
-                iconFromImageFile(file, function (entry) {
+                // A picture gets the moveable 1:1 crop before it becomes an icon
+                // (an SVG is already a shape and needs none).
+                openIconImageCrop(file, name, function (entry) {
                     if (!entry) { status.textContent = 'Could not read that image.'; return; }
                     _draft[name] = entry;
                     stashDraft();

@@ -17,12 +17,13 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=30">
+    <link rel="stylesheet" href="style.css?v=31">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
 <symbol id="icon-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></symbol>
+<symbol id="icon-dm" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></symbol>
 <symbol id="icon-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
 <symbol id="icon-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></symbol>
 <symbol id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></symbol>
@@ -161,7 +162,10 @@
         <!-- Server Strip (far left) -->
         <div class="server-strip" id="server-strip">
             <div class="dm-strip-btn" id="dm-strip-btn" title="Direct Messages">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+                <!-- Sprite symbol, not a hard-coded <svg>: this is the button
+                     that opens the DM conversations, and a raw inline icon is
+                     the one thing the Icons tab cannot see or replace. -->
+                <svg class="ui-icon" width="24" height="24" aria-hidden="true"><use href="#icon-dm"/></svg>
                 <span class="badge" id="dm-strip-badge" style="display:none"></span>
                 <span class="dm-strip-waiting" id="dm-strip-waiting" style="display:none" title="Call waiting"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg></span>
                 <span class="dm-strip-for-us" id="dm-strip-for-us" style="display:none" title="Someone is waiting for you to join their call"><svg class="ui-icon" width="14" height="14"><use href="#icon-phone"/></svg></span>
@@ -2559,15 +2563,15 @@
 <script src="ui-dialog.js?v=1"></script>
 <script src="keyvault.js?v=2"></script>
 <script src="secure-storage.js?v=5"></script>
-    <script src="voice.js?v=34"></script>
+    <script src="voice.js?v=35"></script>
     <script src="soundboard-pairing.js?v=12"></script>
     <script src="thread_categories_shortcuts.js?v=11"></script>
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=5"></script>
     <script src="chat.js?v=72"></script>
-<script src="captions.js?v=2"></script>
+<script src="captions.js?v=3"></script>
 <!-- F15: custom UI icon packs (app-only settings tab) -->
-<script src="icon-packs.js?v=1"></script>
+<script src="icon-packs.js?v=2"></script>
     <!-- Android shell: immersive system bars, Back closing the top layer, the
          real-vibrator haptic bridge and notification clearing. Inert in a
          browser and on desktop (see the file's header). -->

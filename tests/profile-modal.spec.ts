@@ -395,30 +395,28 @@ test.describe('Profile Modal Features', () => {
         await page.click('#profile-edit-btn');
         await page.waitForTimeout(500);
 
-        // Check glow options container exists (rendered as #border-glow-options)
-        const glowContainer = page.locator('#border-glow-options');
-        await expect(glowContainer).toBeVisible();
+        // The glow control is now a colour picker — a native swatch, a hex
+        // text field, and a live preview swatch. The old preset-button list
+        // (#border-glow-options / .glow-option-btn) no longer exists.
+        const glow = page.locator('#profile-edit-glow-color');
+        const glowHex = page.locator('#profile-edit-glow-color-hex');
+        const glowPreview = page.locator('#profile-edit-glow-preview');
+        await expect(glow).toBeVisible();
+        await expect(glowHex).toBeVisible();
+        await expect(glowPreview).toBeVisible();
 
-        // Check there are glow buttons (generated from the default color)
-        const glowBtns = page.locator('#border-glow-options .glow-option-btn');
-        const btnCount = await glowBtns.count();
-        expect(btnCount).toBeGreaterThan(0);
+        // Picking a colour on the swatch updates the preview immediately.
+        await glow.evaluate((el: HTMLInputElement) => {
+            el.value = '#ff00ff';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await expect(glowPreview).toHaveCSS('background-color', 'rgb(255, 0, 255)');
 
-        // Click the first glow button and verify it becomes selected
-        await glowBtns.first().click();
-        await page.waitForTimeout(300);
-        const isActive = await glowBtns.first().evaluate(el => el.classList.contains('selected'));
-        expect(isActive).toBeTruthy();
-
-        // Click a different glow button - the first should no longer be selected
-        if (btnCount > 1) {
-            await glowBtns.nth(1).click();
-            await page.waitForTimeout(300);
-            const firstStillActive = await glowBtns.first().evaluate(el => el.classList.contains('selected'));
-            expect(firstStillActive).toBeFalsy();
-            const secondActive = await glowBtns.nth(1).evaluate(el => el.classList.contains('selected'));
-            expect(secondActive).toBeTruthy();
-        }
+        // Typing a hex value also drives the swatch + preview.
+        await glowHex.fill('#00ff00');
+        await glowHex.dispatchEvent('input');
+        await expect(glow).toHaveValue('#00ff00');
+        await expect(glowPreview).toHaveCSS('background-color', 'rgb(0, 255, 0)');
 
         // Cancel and close
         await page.click('#profile-edit-cancel-btn');

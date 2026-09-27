@@ -1,5 +1,85 @@
 # PROGRESS
 
+## Captions that caption in a real call, a replaceable DM icon, a crop that is geometry, and one release object (0.2.34)
+
+**Captions attached nobody in a real call, so they did nothing at all.** The
+engine was never the problem: `tests/captions-local.spec.ts` fed it speech and it
+transcribed, and a hand-called `__captions.attach()` transcribed too. The bug was
+in the caller. `playRemoteAudio()` attached the participant's decrypted stream to
+captions and then, on that same first pass, called `removeRemoteAudioEls(uid)` to
+build the playback elements — and that helper *is* the teardown half: it detaches
+that member's caption tap. So the attach was undone before it could run, and in
+every real call `__captions.speakers()` was empty and no line was ever produced.
+The teardown now runs before the attach, never after. `tests/captions-call.spec.ts`
+drives a real DM call whose fake microphone plays a speech recording, and fails
+unless the caller shows up in the speaker list *and* a labelled line comes out the
+other end — the ordering the synthetic-feed test could not see.
+
+**"On" and "broken" rendered identically, so the panel now says which it is.**
+The overlay showed a title and nothing else until somebody spoke: loading the
+model, waiting for call audio, and a hard failure were all the same empty box.
+It carries a live status line now (`Loading the on-device speech model (42%)…`,
+`Listening — no call audio yet. Captions appear when someone speaks.`, the failure
+text, or the participant and window counts). Two smaller causes of that "nothing
+at all" first impression went with it: the one window a speaker produced while
+the model was still loading is held and transcribed the moment the worker reports
+ready instead of being dropped, and a tap whose `AudioContext` came up
+`suspended` (created outside a user gesture) is resumed — a suspended context
+fires no `onaudioprocess` at all.
+
+**The Direct Messages button was the one icon the Icons tab could not see.**
+Every other control in the strip reaches its glyph through `<use href="#icon-…">`,
+so a pack can override it; the DM button — the button that loads the DM
+conversations — carried a hard-coded inline `<svg>`, so it was neither in
+`IconPacks.iconNames()` nor in the tab's grid. It is the sprite symbol `icon-dm`
+now, and the test asserts both the reference and that the tab lists it.
+
+**A picture used as an icon is cropped to a moveable 1:1 square first — and an
+animated GIF keeps animating.** Picking a picture used to stretch it straight
+into a fixed 24×24 `<image>` with `preserveAspectRatio="xMidYMid meet"`, which
+letterboxed anything that was not already square. There is a real crop step now:
+drag the square to choose the region, drag its corner to resize (it stays square).
+It is deliberately *geometry, not pixels* — the entry keeps the original bytes in
+an `<image>` at natural size and the symbol's `viewBox` is the chosen square —
+because rasterising through a canvas would flatten an animated GIF to its first
+frame and resampling would squash the picture to a fixed resolution.
+`tests/icon-packs-crop-gif.spec.ts` uploads an off-square PNG, drags the box,
+asserts the resulting `viewBox` is square and that nothing was re-encoded, then
+repeats with a looping two-frame GIF and asserts the DM button's own icon changes
+over time.
+
+**"Reset speaker volume" restored the setting and moved nothing.**
+`setSpeakerVolume` ended with `if (_hearSelfAudioEl) …` — a variable that exists
+nowhere any more (the hear-self test is a node in this same audio graph). It threw
+a `ReferenceError` *after* `saveSettings()`, so the value was persisted but the
+caller's `applySettingsToUI()` never ran and the slider, plus the popup's copy of
+it, stayed on the old number. The dead line is gone and
+`tests/dm-call-volume.spec.ts` pins the reset.
+
+**v0.2.33 published two release objects for one tag, and the empty one was
+"latest".** Three creators raced for that tag: tauri-action on *each* of the two
+matrix legs (its `tagName`/`releaseBody` keys are what make it create a release)
+and the `gh release create` fallback inside the publish step. GitHub's `tag_name`
+uniqueness check is not atomic, so two simultaneous POSTs both succeed — one
+object holds all ten assets, the other holds none, and `/releases/latest`
+resolved to the empty one, so the download page advertised a release with no
+files. The desktop workflow now creates the release exactly once, in a
+`create-release` job that `build` needs; tauri-action only ever builds; and the
+Android workflow waits for the object and fails loudly rather than making a
+second one. `tests/release-publishing.spec.ts` fails if a second creator is ever
+reintroduced.
+
+**Path traversal, judged by one rule in one place.** The static handler's check
+split the request path on `/`, which Windows does not honour: `/..\server\.env`
+arrived as a single segment, cleared the check, and served the live
+`server/.env` — `JWT_SECRET` and `HMAC_KEY` included. Percent-decoding now happens
+first (`%5c` and `%2e%2e` are judged by the same rule as `\` and `..`), a NUL, a
+drive/stream colon or a malformed escape is rejected, the result is joined to the
+canonical `static/` root and re-checked for containment, and a miss is a real 404.
+`static_path_tests` in `main.rs` covers every separator and encoding, and
+`tests/security-hardening-f.spec.ts` now asserts the Windows form leaks neither
+`jwt_secret` nor `hmac_key`.
+
 ## A cancel that cancels, deletes that leave nothing, icon packs, on-device captions, an Arch window that paints (0.2.33)
 
 **Cancel on the upload dialog was a lie.** It flipped a flag the chunk loop

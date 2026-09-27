@@ -183,54 +183,57 @@ async function loadChatAndSelectChannel(page: any) {
 test.describe('Profile Picture Upload & Rendering', () => {
 
     test('upload profile picture via UI crop modal and verify footer avatar', async ({ page }) => {
+        // Registration (client-side Argon2id) + upload + save routinely passes
+        // 45s on this machine; the crop/save flow needs the headroom.
+        test.setTimeout(180000);
         const ts = Date.now();
         const username = 'featpic_' + ts;
         await registerUser(page, username);
         const pngBytes = makeMinimalPng(100, 100);
 
-        // Open settings modal
+        // The PFP flow now lives inside the profile *edit* modal: Settings →
+        // Profile → Edit, then a hidden file input feeds the crop container.
         await page.click('#settings-btn');
-        await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
+        await page.waitForSelector('#settings-modal[style*="flex"]', { timeout: 10000 }).catch(() => {});
+        await page.click('#settings-open-profile-btn', { timeout: 10000 });
+        await page.waitForSelector('#profile-modal[style*="flex"]', { timeout: 10000 });
+        await page.waitForSelector('#profile-edit-btn', { state: 'visible', timeout: 15000 });
+        await page.click('#profile-edit-btn');
+        await page.waitForSelector('#profile-edit-modal[style*="flex"]', { timeout: 10000 });
 
-        // Set file directly on hidden input
-        await page.locator('#profile-pic-input').setInputFiles({
+        // Set the file on the (new) hidden input — this opens the crop UI.
+        await page.setInputFiles('#profile-avatar-file-input', {
             name: 'profile.png',
             mimeType: 'image/png',
             buffer: pngBytes,
         });
-        await page.waitForTimeout(500);
+        await page.waitForSelector('#profile-pfp-crop-container', { state: 'visible', timeout: 10000 });
+        await expect(page.locator('#profile-pfp-crop-box')).toBeVisible({ timeout: 5000 });
 
-        // Wait for crop modal to appear
-        await page.waitForSelector('#profile-crop-modal', { state: 'visible', timeout: 10000 });
-        await expect(page.locator('#profile-crop-image')).toBeVisible({ timeout: 5000 });
-        await expect(page.locator('#profile-crop-box')).toBeVisible({ timeout: 5000 });
+        // Apply the crop, then save the profile (PFP is uploaded on save).
+        await page.click('#profile-pfp-crop-confirm');
+        await page.waitForSelector('#profile-pfp-crop-container', { state: 'hidden', timeout: 20000 });
+        await page.click('#profile-edit-save-btn');
+        await expect(page.locator('#profile-edit-status')).toContainText('Profile saved!', { timeout: 20000 });
+        // Belt-and-braces: the picture really reached the server.
+        const uid = await page.evaluate(() => JSON.parse(localStorage.getItem('user') || '{}').id);
+        const token = await page.evaluate(() => localStorage.getItem('token'));
+        const prof = await (await page.request.get(`${BASE}/api/profile/${uid}`, {
+            headers: { Authorization: 'Bearer ' + token },
+        })).json();
+        expect(prof.profile_picture_file_id, 'PFP must be stored server-side').toBeTruthy();
 
-        // Click "Crop & Set Picture"
-        await page.click('#confirm-profile-crop');
-
-        // Wait for progress to appear then disappear
-        await page.waitForSelector('#profile-crop-progress', { state: 'visible', timeout: 10000 });
-        await page.waitForFunction(() => {
-            const p = document.getElementById('profile-crop-progress');
-            return !p || p.style.display === 'none';
-        }, { timeout: 60000 });
-
-        // Wait for modal to close
-        await page.waitForFunction(() => {
-            const m = document.getElementById('profile-crop-modal');
-            return !m || m.style.display === 'none';
-        }, { timeout: 10000 });
-        await page.waitForTimeout(1000);
-
-        await page.click('#close-settings');
-        await page.waitForTimeout(2000);
-
-        // Wait for the footer avatar to have an img element (profile pic loaded)
+        // Reload so the footer avatar is painted from the saved profile. (The
+        // edit modal stays open after save, so clicking through covered close
+        // buttons only stalls on actionability; a reload is both cleaner and a
+        // stronger assertion — the picture must survive a fresh boot.)
+        await page.reload({ waitUntil: 'load' });
+        await page.waitForSelector('#footer-user-avatar', { timeout: 15000 });
         const footerHasImg = await page.waitForFunction(() => {
             const avatar = document.getElementById('footer-user-avatar');
             if (!avatar) return false;
             return !!avatar.querySelector('img');
-        }, { timeout: 15000 }).then(() => true).catch(() => false);
+        }, { timeout: 20000 }).then(() => true).catch(() => false);
         console.log('Footer has img element:', footerHasImg);
 
         const footerImgs = await page.locator('#footer-user-avatar img').count();
@@ -239,6 +242,8 @@ test.describe('Profile Picture Upload & Rendering', () => {
     });
 
     test('profile picture renders in DM list and messages for other user', async ({ page, context }) => {
+        // Two registrations + DM/WS round-trips exceed the 45s default.
+        test.setTimeout(120000);
         const ts = Date.now();
         const user1 = 'picdm1_' + ts;
         const user2 = 'picdm2_' + ts;
@@ -274,7 +279,10 @@ test.describe('Profile Picture Upload & Rendering', () => {
         // Check display name
         const dmNames = await page2.locator('.dm-item .dm-name').allTextContents();
         console.log('DM names:', JSON.stringify(dmNames));
-        expect(dmNames.some(n => n.includes(displayName1))).toBeTruthy();
+        // Display names are encrypted-only now (migration 036), so a peer may
+        // show the username until the encrypted profile is fetched. Accept
+        // either — this test is about the PFP, which is checked below.
+        expect(dmNames.some(n => n.includes(displayName1) || n.includes(user1))).toBeTruthy();
 
         // User1 sends DM
         await page.goto(`${BASE}/index.html`);
@@ -380,47 +388,58 @@ test.describe('Profile Picture Upload & Rendering', () => {
 // ============================================================
 // USERNAME COLOR PICKER
 // ============================================================
-test.describe('Username Color Picker', () => {test('username color picker saves and persists color via API', async ({ page }) => {
-    const ts = Date.now();
-    const username = 'color_' + ts;
-    await registerUser(page, username);
+test.describe('Username Color Picker', () => {
 
-    // Save color #ff0000 via API directly
-    const colorToken = await page.evaluate(() => localStorage.getItem('token'));
-    const saveRes = await page.request.patch(BASE + '/api/profile', {
-        headers: { Authorization: 'Bearer ' + colorToken, 'Content-Type': 'application/json' },
-        data: { username_color: '#ff0000' },
+    test('username color picker saves and persists via the encrypted profile', async ({ page }) => {
+        // Registration (client-side Argon2id) + save + reload needs headroom.
+        test.setTimeout(120000);
+        const ts = Date.now();
+        const username = 'color_' + ts;
+        await registerUser(page, username);
+
+        // Set a username colour through the edit UI (migration 036 removed the
+        // plaintext column: the colour now travels only inside
+        // encrypted_profile_data, so a raw API PATCH of `username_color` is
+        // ignored by design).
+        await page.click('#footer-user-avatar');
+        await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
+        await page.waitForFunction(() => {
+            const el = document.getElementById('profile-modal-display-name');
+            return el && el.textContent && el.textContent !== 'Loading...';
+        }, { timeout: 15000 });
+        await page.click('#profile-edit-btn');
+        await page.waitForSelector('#profile-edit-modal[style*="flex"]', { timeout: 10000 });
+
+        await page.fill('#profile-edit-color-hex', '#ff0000');
+        await page.locator('#profile-edit-color-hex').dispatchEvent('input');
+        await page.waitForTimeout(200);
+        await page.click('#profile-edit-save-btn');
+        await expect(page.locator('#profile-edit-status')).toContainText('Profile saved!', { timeout: 20000 });
+
+        // The server got the colour only as ciphertext; the plaintext column is gone.
+        const uid = await page.evaluate(() => JSON.parse(localStorage.getItem('user') || '{}').id);
+        const token = await page.evaluate(() => localStorage.getItem('token'));
+        const profile = await (await page.request.get(`${BASE}/api/profile/${uid}`, {
+            headers: { Authorization: 'Bearer ' + token },
+        })).json();
+        console.log('Profile response:', JSON.stringify(profile));
+        expect(profile.encrypted_profile_data, 'profile data must be encrypted').toBeTruthy();
+        expect(profile.username_color, 'the plaintext colour column must be gone').toBeUndefined();
+
+        // After a reload the saved colour is applied to the display name.
+        await page.reload({ waitUntil: 'load' });
+        await page.click('#footer-user-avatar');
+        await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
+        await page.waitForFunction(() => {
+            const el = document.getElementById('profile-modal-display-name');
+            return el && el.textContent && el.textContent !== 'Loading...';
+        }, { timeout: 15000 });
+        const dnColor = await page.locator('#profile-modal-display-name').evaluate(el => getComputedStyle(el).color);
+        console.log('Display name color:', dnColor);
+        expect(dnColor).toBe('rgb(255, 0, 0)');
+
+        await page.click('#profile-modal-close');
     });
-    expect(saveRes.ok()).toBeTruthy();
-    await page.waitForTimeout(500);
-
-    // Verify via API
-    const user = await page.evaluate(() => JSON.parse(localStorage.getItem('user') || '{}'));
-    const apiToken = await page.evaluate(() => localStorage.getItem('token'));
-    const profileRes = await page.request.get(`${BASE}/api/profile/${user.id}`, {
-        headers: { Authorization: `Bearer ${apiToken}` },
-    });
-    expect(profileRes.ok()).toBeTruthy();
-    const profile = await profileRes.json();
-    console.log('Profile response:', JSON.stringify(profile));
-    expect(profile.username_color).toBe('#ff0000');
-
-    // Open profile modal to verify color is shown in display name
-    await page.click('#footer-user-avatar');
-    await page.waitForSelector('#profile-modal', { state: 'visible', timeout: 5000 });
-    await page.waitForFunction(function() {
-        var el = document.getElementById('profile-modal-display-name');
-        return el && el.textContent && el.textContent !== 'Loading...';
-    }, { timeout: 10000 });
-
-    // Display name should have the red color style
-    const dnColor = await page.locator('#profile-modal-display-name').getAttribute('style');
-    console.log('Display name color:', dnColor);
-    expect(dnColor).toBeTruthy();
-    expect(dnColor).toContain('ff0000');
-
-    await page.click('#profile-modal-close');
-});
 });
 
 // ============================================================
@@ -486,64 +505,62 @@ test.describe('Username Color in Messages', () => {
 // ============================================================
 // MENTION AUTOCOMPLETE
 // ============================================================
-test.describe('Mention Autocomplete by Display Name', () => {
+test.describe('Mention Autocomplete', () => {
 
-    test('mention autocomplete shows user when typing part of display name', async ({ page, context }) => {
+    test('mention autocomplete offers a server member and inserts the mention', async ({ page, context }) => {
+        // Two registrations + server setup + encrypted-profile exchange need
+        // far more than the 45s default on this machine.
+        test.setTimeout(240000);
         const ts = Date.now();
         const user1 = 'mc_u1_' + ts;
         const user2 = 'mc_u2_' + ts;
-        const displayName2 = 'MentionCandidate_' + ts;
 
         const body1 = await registerUser(page, user1);
         const ctx2 = await context.browser()!.newContext();
         const page2 = await ctx2.newPage();
         const body2 = await registerUser(page2, user2);
 
-        // Set display name for user2
-        await page2.request.patch(`${BASE}/api/profile`, {
-            headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
-            data: { display_name: displayName2 },
-        });
-
         // Create server and user2 joins
-        const { serverId, channelId, inviteCode } = await createServerAndKey(page, body1.token, body1.user.id, 'Mention Test ' + ts);
+        const { serverId, inviteCode } = await createServerAndKey(page, body1.token, body1.user.id, 'Mention Test ' + ts);
         await joinServerAndGetKey(page, page2, serverId, inviteCode, body2.user.id);
 
         // User1 loads chat
         const input = await loadChatAndSelectChannel(page);
 
-        // Wait for member list to be populated
+        // Wait for the member list to populate. It is a top-level `let` in
+        // chat.js, so it is reachable through global eval — NOT as a window
+        // property (which is undefined and made this wait a silent no-op).
         await page.waitForFunction(() => {
-            const ml = (window as any).currentServerMemberList;
+            const ml = (0, eval)('typeof currentServerMemberList !== "undefined" ? currentServerMemberList : null');
             return ml && ml.length > 1;
-        }, { timeout: 15000 }).then(() => {
-            console.log('Member list populated');
-        }).catch(() => {
+        }, { timeout: 20000 }).catch(() => {
             console.log('Member list not populated - continuing');
         });
 
-        // Type @ + part of display name
-        await input.fill('@Mention');
-        await page.waitForTimeout(2000);
+        // Display names live in encrypted_profile_data and only decrypt once
+        // the peer's profile has been fetched — which may not have happened
+        // for a plain server member, so the matcher falls back to the username,
+        // the one identifier every member has in plaintext. Type the peer's
+        // username prefix and the dropdown must offer them.
+        const prefix = user2.slice(0, 8);
+        await input.evaluate((el: HTMLTextAreaElement, p: string) => {
+            el.value = '@' + p;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        }, prefix);
+        await page.waitForTimeout(1500);
 
         const dropdown = page.locator('.mention-dropdown');
-        const ddVisible = await dropdown.isVisible().catch(() => false);
-        console.log('Dropdown visible:', ddVisible);
+        await expect(dropdown).toBeVisible({ timeout: 5000 });
+        const items = await dropdown.locator('.mention-item-name').allTextContents();
+        console.log('Dropdown items:', JSON.stringify(items));
+        expect(items.some(n => n.includes(user2))).toBeTruthy();
 
-        if (ddVisible) {
-            const items = await dropdown.locator('.mention-item-name').allTextContents();
-            console.log('Dropdown items:', JSON.stringify(items));
-            expect(items.some(n => n.includes(displayName2))).toBeTruthy();
-
-            const mentionItem = dropdown.locator('.mention-item', { hasText: displayName2 });
-            if (await mentionItem.isVisible().catch(() => false)) {
-                await mentionItem.click();
-                await page.waitForTimeout(500);
-                const val = await input.inputValue();
-                console.log('Input after select:', val);
-                expect(val).toContain(user2);
-            }
-        }
+        // Selecting the entry inserts that member's mention token.
+        await dropdown.locator('.mention-item').first().click();
+        await page.waitForTimeout(300);
+        const val = await input.inputValue();
+        console.log('Input after select:', val);
+        expect(val).toContain(user2);
 
         await page2.close();
         await ctx2.close();

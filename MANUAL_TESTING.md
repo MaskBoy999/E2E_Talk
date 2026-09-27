@@ -665,3 +665,93 @@ is respected too).
 one long unbroken string, or with a very long mime type.
 **Expect:** the card stays inside the message column and the chat does **not**
 gain a horizontal scrollbar; the name and the size/mime line wrap.
+
+---
+
+## 23. Captions that actually caption, a swappable DM icon, a real icon crop (0.2.34)
+
+What changed: in a real call captions attached nobody, so they produced nothing
+at all; the DM-conversation button could not be re-iconed from the Icons tab; a
+picture used as an icon got stretched into a fixed 24x24 box instead of being
+cropped; "Reset speaker volume" saved the setting but left the slider alone; and
+v0.2.33 published two release objects for one tag, the empty one being what
+`/releases/latest` pointed at.
+
+### Captions — the one to test first
+
+You need **two accounts in a call** (two browser profiles, or a browser + the
+desktop box) and speech to transcribe. Captions transcribe the *other*
+participants' audio; your own voice only if you turn that on separately.
+
+**Do:** with both accounts signed in, start a **DM call** (or join a voice
+channel) and accept it. Then on **one** side open Settings → the voice/audio
+section → turn **captions** on.
+**Expect:** the captions panel appears straight away and its status line is not
+blank — `Loading the on-device speech model (…)…` the very first time (the model
+ships with the app and is served by *your own server*; nothing is fetched from
+the internet), then `Listening — no call audio yet. Captions appear when someone
+speaks.`, then `Listening to 1 participant · waiting for speech`.
+
+**Do:** speak a full sentence on the *other* account — normal volume, your
+ordinary microphone.
+**Expect:** within a few seconds a line appears, labelled with **who spoke**
+(their display name), showing what they said. Before this release this was the
+broken case: the panel stayed empty no matter how long anybody talked, because
+the call attached the audio to the engine and immediately detached it again.
+
+**Do:** turn captions on *while* someone is already mid-sentence.
+**Expect:** the sentence is not thrown away — the window captured while the model
+finishes loading is transcribed as soon as it is ready (it used to be dropped).
+
+**Do:** leave the call, come back, and have a third person join mid-call.
+**Expect:** every participant still gets captioned, including the one who joined
+last. Turn on **Also caption my own voice** to include yourself.
+
+**Do:** turn captions off.
+**Expect:** the panel closes at once and the lines are gone from the page and from
+memory (`window.__captions.lines()` is empty).
+
+**Try to break it:** reload mid-call with captions on; switch tabs away and back;
+mute and unmute the speaker. Captions must resume on their own — nobody should
+have to toggle the setting off and on to make lines appear. Then watch the
+network tab: no audio, no text and no third-party request may leave the machine
+(the model files all come from your server), and DevTools' Application →
+Local/Session Storage must not contain a single transcribed word.
+
+### The other four
+
+**Do (desktop or Android box):** Settings → **Icons**. Look at the grid.
+**Expect:** the **Direct Messages** button (the round chat bubble at the top of
+the far-left strip) is now in the list — it is the button that opens your DM
+conversations, and it used to be the one control whose glyph was hard-coded, so
+no pack could change it.
+
+**Do:** in that tab, click any icon and pick a **PNG/JPEG/WebP that is not
+square**.
+**Expect:** a crop dialog appears with your picture and a draggable square. Drag
+the square around, drag its bottom-right corner to resize it (it stays square),
+then press **Use this square**.
+**Expect:** the preview shows exactly that square, not the whole picture letter-
+boxed and not squashed into a 24x24 box.
+
+**Do:** do the same with an **animated GIF** (e.g. a small looping spinner).
+**Expect:** the dialog shows it moving, and after **Use this square** and
+**Save**, the actual app icon animates in place — the file is kept as-is (the
+crop is the icon's coordinate square, not a re-encoded PNG), so animation
+survives.
+**Try to break it:** crop a very wide GIF from one edge; crop a 12x12 image (it
+is allowed to upscale modestly so you can still aim); cancel the dialog — the
+previous icon must be untouched.
+
+**Do:** Settings → the voice/audio section, drag the speaker volume slider to
+something other than 100, then click the **↺** reset beside it.
+**Expect:** the slider jumps back to 100 and the number label follows. Before
+this release the stored value went to 100 while the slider stayed where you left
+it, because the reset threw an error halfway through.
+
+**Do (release page):** open the repository's **Releases** and the v0.2.34 entry.
+**Expect:** exactly **one** release for the tag, with all the assets — `.msi`,
+`.exe` (NSIS), `.AppImage`, `.deb`, `.rpm`, the Arch `.pkg.tar.zst`, the Android
+`.apk` and the `SHA256SUMS-*.txt` files. The v0.2.33 tag had two release objects
+for the one tag and the *empty* one was what "latest" resolved to, so the page
+listed no downloads at all.
