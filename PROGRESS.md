@@ -69,6 +69,17 @@ Android workflow waits for the object and fails loudly rather than making a
 second one. `tests/release-publishing.spec.ts` fails if a second creator is ever
 reintroduced.
 
+**Cut twice for one reason: the release creator had no checkout.** The first
+v0.2.34 run died in the brand-new `create-release` job — its only step. `gh`
+resolves the repository from the git remote, and that job, unlike every other
+`gh` call in these workflows (they all live in the build legs), had checked
+nothing out, so it was not inside a repository at all and both `gh release view`
+and `gh release create` failed. Nothing had been published, so moving the tag
+onto the fixed commit was safe — no release object existed and the build legs
+were skipped — and that is what was done, rather than shipping a `v0.2.35` with
+a stray, empty `v0.2.34` behind it. The job checks out now, and the regression
+test asserts it.
+
 **Path traversal, judged by one rule in one place.** The static handler's check
 split the request path on `/`, which Windows does not honour: `/..\server\.env`
 arrived as a single segment, cleared the check, and served the live
