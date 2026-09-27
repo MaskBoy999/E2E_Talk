@@ -1383,6 +1383,7 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/089_everyone_drop_invite.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/090_key_blob_rev.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/091_push_devices.sql"));
+        let _ = conn.execute_batch(include_str!("../migrations/092_user_icon_slots.sql"));
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -2478,47 +2479,25 @@ impl Database {
     }
 
     pub fn leave_server(&self, server_id: &str, user_id: &str) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let is_owner = Self::is_server_owner_c(&conn, user_id, server_id)?;
+        // The owner check needs the lock, but the deletion below takes it again,
+        // so it runs in its own scope (see delete_server_inner).
+        let is_owner = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            Self::is_server_owner_c(&conn, user_id, server_id)?
+        };
 
         if is_owner {
-            // Owner leaving: delete the entire server and everything in it.
-            // messages/dm-ish rows cascade their reactions/votes/acks/pins/
-            // search tokens via message_id FKs; voice_sessions cascade their
-            // participants via channel_id. Tables with NO FK to servers need
-            // explicit cleanup: conversation_profile_data (keyed by server id),
-            // pending_events (server_id is a plain column) and voice_sanctions.
-            conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![server_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute(
-                "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
-                params![server_id],
-            )
-            .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM server_members WHERE server_id = ?1", params![server_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM server_bans WHERE server_id = ?1", params![server_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM voice_sanctions WHERE server_id = ?1", params![server_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute(
-                "DELETE FROM pending_events WHERE server_id = ?1",
-                params![server_id],
-            )
-            .map_err(|e| e.to_string())?;
-            // Per-server profile snapshots must be removed BEFORE channels are
-            // deleted (the channel-scoped rows match by channel id).
-            conn.execute(
-                "DELETE FROM conversation_profile_data WHERE conversation_type = 'channel' AND (conversation_id = ?1 OR conversation_id IN (SELECT id FROM channels WHERE server_id = ?1))",
-                params![server_id],
-            )
-            .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM channels WHERE server_id = ?1", params![server_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])
-                .map_err(|e| e.to_string())?;
+            // Owner leaving: delete the entire server and everything in it —
+            // one shared path with the admin delete and account deletion, so a
+            // server can never be half-deleted again. Messages cascade their
+            // reactions/votes/acks/pins/search tokens via message_id FKs; the
+            // tables with NO FK to servers (files on disk, voice state,
+            // per-conversation profiles, pending events) are handled there.
+            self.delete_server_inner(server_id)?;
             return Ok(true); // true = server was deleted
         }
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         // Non-owner leaving: delete their messages in the server, then remove
         // membership. Message rows cascade their OWN reactions/votes/acks/pins
@@ -2649,16 +2628,11 @@ impl Database {
         Ok(bans)
     }
 
-    /// Delete a channel. Permission (MANAGE_CHANNELS) is enforced by the caller.
+    /// Delete a channel and everything inside it (messages, their attachments,
+    /// per-channel profiles, voice sessions). Permission (MANAGE_CHANNELS) is
+    /// enforced by the caller.
     pub fn delete_channel_by_owner(&self, channel_id: &str, _user_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM messages WHERE channel_id = ?1", params![channel_id])
-            .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM role_overwrites WHERE target_type = 'channel' AND target_id = ?1", params![channel_id])
-            .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM channels WHERE id = ?1", params![channel_id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.delete_channel_inner(channel_id)
     }
 
     // --- Channels ---
@@ -4322,17 +4296,15 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
-        // Also delete any DM channel between these two users (including any
-        // DM-call waiting row — the call can't linger after unfriending).
+        // Also delete any DM channel between these two users — the whole
+        // conversation: messages, members, the channel row, the call-waiting
+        // row, every per-conversation profile row, and (below, once the lock is
+        // released) the attachments those messages carried. NOTE the files here
+        // can belong to EITHER user, which is why unfriending must shred them
+        // explicitly instead of relying on one uploader's cleanup.
+        let mut dm_refs: Vec<String> = Vec::new();
         if let Ok(Some(dm_id)) = Self::find_dm_channel_c(&conn, user_id, other_user_id) {
-            conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![dm_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![dm_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![dm_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM dm_call_waiting WHERE dm_channel_id = ?1", params![dm_id])
-                .map_err(|e| e.to_string())?;
+            dm_refs = Self::delete_dm_channel_rows_c(&conn, &dm_id)?;
         }
 
         // Also delete any pending friend requests between them
@@ -4342,6 +4314,8 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
+        drop(conn);
+        self.shred_file_refs(&dm_refs);
         Ok(())
     }
 
@@ -4756,35 +4730,31 @@ impl Database {
     }
 
     fn delete_message_inner(&self, message_id: &str, requiring_sender: Option<&str>) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let existing: (String, Option<String>) = conn
-            .query_row(
-                "SELECT sender_id, file_id FROM messages WHERE id = ?1",
-                params![message_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .map_err(|_| "Message not found".to_string())?;
-        if let Some(sender_id) = requiring_sender {
-            if existing.0 != sender_id {
-                return Err("Not authorized to delete this message".to_string());
-            }
-        }
-        // Save the file_id_hash before deleting the message row
-        let file_id_hash = existing.1.clone();
-        conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])
-            .map_err(|e| e.to_string())?;
-        // Clean up associated file if present — resolve hash to actual file_id from files table
-        if let Some(hash) = file_id_hash {
-            if let Ok(fid) = self.get_file_id_by_hash_from_files(&hash) {
-                if let Ok(info) = self.delete_file_record(&fid) {
-                    let dir = format!("{}/{}", self.upload_dir, fid);
-                    for i in 0..info.chunk_count {
-                        let chunk_path = format!("{}/{}.enc", dir, i);
-                        let _ = std::fs::remove_file(&chunk_path);
-                    }
-                    let _ = std::fs::remove_dir(&dir);
+        // Scope the lock: the file cleanup below re-takes it (through
+        // get_file_id_by_hash_from_files / delete_file_record), and holding the
+        // guard across those calls deadlocked the whole server — every other DB
+        // operation, from every connection, blocked behind this mutex forever.
+        let file_id_ref = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let existing: (String, Option<String>) = conn
+                .query_row(
+                    "SELECT sender_id, file_id FROM messages WHERE id = ?1",
+                    params![message_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|_| "Message not found".to_string())?;
+            if let Some(sender_id) = requiring_sender {
+                if existing.0 != sender_id {
+                    return Err("Not authorized to delete this message".to_string());
                 }
             }
+            conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])
+                .map_err(|e| e.to_string())?;
+            existing.1
+        };
+        // Clean up the attached file (record + on-disk chunks) if there was one.
+        if let Some(file_ref) = file_id_ref {
+            self.shred_file_ref(&file_ref);
         }
         Ok(())
     }
@@ -4848,33 +4818,26 @@ impl Database {
     }
 
     pub fn delete_dm_message(&self, message_id: &str, sender_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let existing: (String, Option<String>) = conn
-            .query_row(
-                "SELECT sender_id, file_id FROM dm_messages WHERE id = ?1",
-                params![message_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .map_err(|_| "Message not found".to_string())?;
-        if existing.0 != sender_id {
-            return Err("Not authorized to delete this message".to_string());
-        }
-        // Save the file_id_hash before deleting the message row
-        let file_id_hash = existing.1.clone();
-        conn.execute("DELETE FROM dm_messages WHERE id = ?1", params![message_id])
-            .map_err(|e| e.to_string())?;
-        // Clean up associated file if present — resolve hash to actual file_id from files table
-        if let Some(hash) = file_id_hash {
-            if let Ok(fid) = self.get_file_id_by_hash_from_files(&hash) {
-                if let Ok(info) = self.delete_file_record(&fid) {
-                    let dir = format!("{}/{}", self.upload_dir, fid);
-                    for i in 0..info.chunk_count {
-                        let chunk_path = format!("{}/{}.enc", dir, i);
-                        let _ = std::fs::remove_file(&chunk_path);
-                    }
-                    let _ = std::fs::remove_dir(&dir);
-                }
+        // Same lock discipline as delete_message_inner: the guard is dropped
+        // before the attached file is shredded, or this deadlocks.
+        let file_id_ref = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let existing: (String, Option<String>) = conn
+                .query_row(
+                    "SELECT sender_id, file_id FROM dm_messages WHERE id = ?1",
+                    params![message_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|_| "Message not found".to_string())?;
+            if existing.0 != sender_id {
+                return Err("Not authorized to delete this message".to_string());
             }
+            conn.execute("DELETE FROM dm_messages WHERE id = ?1", params![message_id])
+                .map_err(|e| e.to_string())?;
+            existing.1
+        };
+        if let Some(file_ref) = file_id_ref {
+            self.shred_file_ref(&file_ref);
         }
         Ok(())
     }
@@ -4882,16 +4845,244 @@ impl Database {
     /// Delete a file record + its chunks on disk from a stored file_id_hash.
     /// Shared by normal message deletion and disappearing-message shredding.
     fn shred_file_by_hash(&self, file_id_hash: &str) {
-        if let Ok(fid) = self.get_file_id_by_hash_from_files(file_id_hash) {
-            if let Ok(info) = self.delete_file_record(&fid) {
-                let dir = format!("{}/{}", self.upload_dir, fid);
-                for i in 0..info.chunk_count {
-                    let chunk_path = format!("{}/{}.enc", dir, i);
-                    let _ = std::fs::remove_file(&chunk_path);
-                }
-                let _ = std::fs::remove_dir(&dir);
+        self.shred_file_ref(file_id_hash);
+    }
+
+    /// Delete ONE file — looked up by file id or by its blind hash — and drop
+    /// its whole on-disk chunk directory.
+    ///
+    /// MUST be called with the connection lock RELEASED: it takes the lock
+    /// itself through `delete_file_record`, and calling a second locking method
+    /// while holding `self.conn` deadlocks the server (std::sync::Mutex is not
+    /// reentrant, and the whole database is one mutex). That is exactly what
+    /// used to happen when an attachment's message was deleted.
+    fn shred_file_ref(&self, file_ref: &str) {
+        if file_ref.is_empty() { return; }
+        if let Ok(fid) = self.get_file_id_by_hash_from_files(file_ref) {
+            if let Ok(_info) = self.delete_file_record(&fid) {
+                // remove_dir_all, never remove_dir: a cancelled or crashed
+                // upload can leave chunk files the row never counted, and
+                // remove_dir then fails on the non-empty directory and the
+                // ciphertext leaks on disk forever.
+                let _ = std::fs::remove_dir_all(format!("{}/{}", self.upload_dir, fid));
             }
         }
+    }
+
+    /// Shred a batch of file references (ids or blind hashes), each once.
+    /// Every recursive delete funnels through here so an attachment can never
+    /// outlive the message, channel, server or account that owned it.
+    fn shred_file_refs(&self, refs: &[String]) {
+        let mut seen = std::collections::HashSet::new();
+        for r in refs {
+            if !seen.insert(r.as_str()) { continue; }
+            self.shred_file_ref(r);
+        }
+    }
+
+    /// Every file reference owned by ONE channel: the attachments of its
+    /// messages plus the per-conversation profile pictures/banners stored by
+    /// any member for it. Must run BEFORE the rows are deleted. `conn` is
+    /// already locked by the caller (the `_c` convention in this file).
+    fn file_refs_for_channel_c(conn: &Connection, channel_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT file_id FROM messages WHERE channel_id = ?1 AND file_id IS NOT NULL",
+        ) {
+            if let Ok(rows) = stmt.query_map(params![channel_id], |row| row.get::<_, String>(0)) {
+                for r in rows.flatten() { out.push(r); }
+            }
+        }
+        Self::push_profile_file_refs_c(conn, "channel", channel_id, &mut out);
+        out
+    }
+
+    /// Same, for one DM conversation.
+    fn file_refs_for_dm_c(conn: &Connection, dm_channel_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT file_id FROM dm_messages WHERE dm_channel_id = ?1 AND file_id IS NOT NULL",
+        ) {
+            if let Ok(rows) = stmt.query_map(params![dm_channel_id], |row| row.get::<_, String>(0)) {
+                for r in rows.flatten() { out.push(r); }
+            }
+        }
+        Self::push_profile_file_refs_c(conn, "dm", dm_channel_id, &mut out);
+        out
+    }
+
+    /// Same, for a whole server: every message attachment in every channel, the
+    /// per-conversation profiles held for the server and its channels (by any
+    /// member — the conversation is about to stop existing), and the server's
+    /// own picture.
+    fn file_refs_for_server_c(conn: &Connection, server_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT m.file_id FROM messages m
+             WHERE m.file_id IS NOT NULL
+               AND m.channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+        ) {
+            if let Ok(rows) = stmt.query_map(params![server_id], |row| row.get::<_, String>(0)) {
+                for r in rows.flatten() { out.push(r); }
+            }
+        }
+        Self::push_profile_file_refs_c(conn, "server", server_id, &mut out);
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT cpd.profile_picture_file_id, cpd.profile_banner_file_id
+               FROM conversation_profile_data cpd
+              WHERE cpd.conversation_type = 'channel'
+                AND cpd.conversation_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+        ) {
+            if let Ok(rows) = stmt.query_map(params![server_id], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+            }) {
+                for (pic, banner) in rows.flatten() {
+                    if let Some(p) = pic { out.push(p); }
+                    if let Some(b) = banner { out.push(b); }
+                }
+            }
+        }
+        if let Ok(pic) = conn.query_row(
+            "SELECT server_picture_file_id FROM servers WHERE id = ?1",
+            params![server_id],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            if let Some(p) = pic { out.push(p); }
+        }
+        out
+    }
+
+    /// Append the profile picture/banner file references held for one
+    /// conversation (any member's row).
+    fn push_profile_file_refs_c(conn: &Connection, conv_type: &str, conv_id: &str, out: &mut Vec<String>) {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT profile_picture_file_id, profile_banner_file_id FROM conversation_profile_data
+              WHERE conversation_type = ?1 AND conversation_id = ?2",
+        ) {
+            if let Ok(rows) = stmt.query_map(params![conv_type, conv_id], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+            }) {
+                for (pic, banner) in rows.flatten() {
+                    if let Some(p) = pic { out.push(p); }
+                    if let Some(b) = banner { out.push(b); }
+                }
+            }
+        }
+    }
+
+    /// Delete one DM conversation completely: messages (their reactions, votes,
+    /// acks, pins and search tokens cascade on message_id), members, the channel
+    /// row itself, the call-waiting row and every per-conversation profile row.
+    /// Returns the file references the caller must shred. Caller holds the lock.
+    fn delete_dm_channel_rows_c(conn: &Connection, dm_channel_id: &str) -> Result<Vec<String>, String> {
+        let refs = Self::file_refs_for_dm_c(conn, dm_channel_id);
+        conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![dm_channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![dm_channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![dm_channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dm_call_waiting WHERE dm_channel_id = ?1", params![dm_channel_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM conversation_profile_data WHERE conversation_type = 'dm' AND conversation_id = ?1",
+            params![dm_channel_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(refs)
+    }
+
+    /// Delete every row that makes up one server, in an FK-safe order, and
+    /// return the file references to shred. Caller holds the lock.
+    ///
+    /// Tables with no FK to `servers` need explicit cleanup — this is the list
+    /// that used to be missing from the admin path: voice_sessions.channel_id and
+    /// voice_sanctions and pending_events carry the server id as a plain column
+    /// (so voice_participants never cascaded either), and
+    /// conversation_profile_data is keyed by conversation id.
+    fn delete_server_rows_c(conn: &Connection, server_id: &str) -> Result<Vec<String>, String> {
+        let refs = Self::file_refs_for_server_c(conn, server_id);
+        let m = |e: rusqlite::Error| e.to_string();
+        conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM server_members WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM server_bans WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM voice_sanctions WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM pending_events WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM soundboard_mutes WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM soundboard_user_disabled WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute(
+            "DELETE FROM conversation_profile_data WHERE conversation_type = 'server' AND conversation_id = ?1",
+            params![server_id],
+        ).map_err(m)?;
+        conn.execute(
+            "DELETE FROM conversation_profile_data WHERE conversation_type = 'channel'
+               AND conversation_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+            params![server_id],
+        ).map_err(m)?;
+        conn.execute(
+            "DELETE FROM voice_participants WHERE voice_session_id IN (
+                 SELECT id FROM voice_sessions WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1))",
+            params![server_id],
+        ).map_err(m)?;
+        conn.execute(
+            "DELETE FROM voice_sessions WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+            params![server_id],
+        ).map_err(m)?;
+        // role_overwrites.target_id is a plain column (channel or category id).
+        conn.execute(
+            "DELETE FROM role_overwrites WHERE target_id IN (
+                 SELECT id FROM channels WHERE server_id = ?1
+                 UNION SELECT id FROM channel_categories WHERE server_id = ?1)",
+            params![server_id],
+        ).map_err(m)?;
+        conn.execute(
+            "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+            params![server_id],
+        ).map_err(m)?;
+        conn.execute("DELETE FROM channels WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM channel_categories WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM server_roles WHERE server_id = ?1", params![server_id]).map_err(m)?;
+        conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id]).map_err(m)?;
+        Ok(refs)
+    }
+
+    /// Delete a whole server (owner leaving, admin delete, account deletion).
+    /// Must be called WITHOUT the lock held.
+    fn delete_server_inner(&self, server_id: &str) -> Result<(), String> {
+        let refs = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            Self::delete_server_rows_c(&conn, server_id)?
+        };
+        self.shred_file_refs(&refs);
+        Ok(())
+    }
+
+    /// Delete a channel and everything that ever lived inside it. Must be
+    /// called WITHOUT the lock held.
+    fn delete_channel_inner(&self, channel_id: &str) -> Result<(), String> {
+        let refs = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let m = |e: rusqlite::Error| e.to_string();
+            let refs = Self::file_refs_for_channel_c(&conn, channel_id);
+            conn.execute(
+                "DELETE FROM conversation_profile_data WHERE conversation_type = 'channel' AND conversation_id = ?1",
+                params![channel_id],
+            ).map_err(m)?;
+            conn.execute(
+                "DELETE FROM voice_participants WHERE voice_session_id IN (SELECT id FROM voice_sessions WHERE channel_id = ?1)",
+                params![channel_id],
+            ).map_err(m)?;
+            conn.execute("DELETE FROM voice_sessions WHERE channel_id = ?1", params![channel_id]).map_err(m)?;
+            conn.execute(
+                "DELETE FROM role_overwrites WHERE target_type = 'channel' AND target_id = ?1",
+                params![channel_id],
+            ).map_err(m)?;
+            conn.execute("DELETE FROM messages WHERE channel_id = ?1", params![channel_id]).map_err(m)?;
+            conn.execute("DELETE FROM channels WHERE id = ?1", params![channel_id]).map_err(m)?;
+            refs
+        };
+        self.shred_file_refs(&refs);
+        Ok(())
     }
 
     // --- Disappearing messages (server-enforced TTL + shredding) ---
@@ -6817,48 +7008,41 @@ impl Database {
         }))
     }
 
+    /// Admin delete of one server: identical to an owner leaving — the same
+    /// shared path, so the admin route can no longer leave half the data behind.
     pub fn delete_server_admin(&self, server_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![server_id])
-            .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
-            params![server_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM channels WHERE server_id = ?1", params![server_id])
-            .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM server_members WHERE server_id = ?1",
-            params![server_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.delete_server_inner(server_id)
     }
 
+    /// Admin delete of one channel: same shared path as the owner delete.
     pub fn delete_channel_admin(&self, channel_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM messages WHERE channel_id = ?1",
-            params![channel_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM role_overwrites WHERE target_type = 'channel' AND target_id = ?1",
-            params![channel_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM channels WHERE id = ?1", params![channel_id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.delete_channel_inner(channel_id)
     }
 
     /// Deletes every trace of the user and returns the list of their file ids
     /// so the caller can remove the on-disk chunk dirs (uploads/{file_id}).
+    ///
+    /// Three passes, in this order: drop every row (delete_user_rows), delete
+    /// the user's own chunk directories (their `files` rows are already gone,
+    /// so nothing else could resolve them), then shred the files the deleted
+    /// conversations referenced — including files uploaded by OTHER users, which
+    /// no uploader-scoped cleanup would ever have collected (a DM partner's
+    /// pictures, another member's attachment in a server this user owned).
     pub fn delete_user(&self, user_id: &str) -> Result<Vec<String>, String> {
+        let (user_file_ids, file_refs) = self.delete_user_rows(user_id)?;
+        for fid in &user_file_ids {
+            let _ = std::fs::remove_dir_all(format!("{}/{}", self.upload_dir, fid));
+        }
+        self.shred_file_refs(&file_refs);
+        Ok(user_file_ids)
+    }
+
+    /// Every row-level deletion of an account (no disk work, no second lock).
+    /// Returns (the user's own file ids, every other file reference that must
+    /// be shredded).
+    fn delete_user_rows(&self, user_id: &str) -> Result<(Vec<String>, Vec<String>), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut file_refs: Vec<String> = Vec::new();
 
         // 0. Collect the user's file ids BEFORE deleting the rows so the caller
         //    can clean up the on-disk chunks (uploads/{file_id}/).
@@ -6891,21 +7075,9 @@ impl Database {
             rows
         };
         for sid in &owned_server_ids {
-            conn.execute("DELETE FROM server_keys WHERE server_id = ?1", params![sid])
-                .map_err(|e| e.to_string())?;
-            conn.execute(
-                "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
-                params![sid],
-            )
-            .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM server_members WHERE server_id = ?1", params![sid])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM channels WHERE server_id = ?1", params![sid])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM server_bans WHERE server_id = ?1", params![sid])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM servers WHERE id = ?1", params![sid])
-                .map_err(|e| e.to_string())?;
+            // Same shared server deletion the owner-leave and admin paths use,
+            // so an account deletion removes exactly as much as leaving does.
+            file_refs.extend(Self::delete_server_rows_c(&conn, sid)?);
         }
 
         // 3. Clean up remaining memberships and keys in other servers
@@ -6915,7 +7087,11 @@ impl Database {
             .map_err(|e| e.to_string())?;
         // Legacy delete removed
 
-        // 4a. Clean up DM channels where user is a member (removes dm_messages, dm_keys, dm_members via CASCADE)
+        // 4a. Delete every DM conversation the user was part of — messages,
+        //     members, keys, pins, call-waiting and per-conversation profiles —
+        //     and collect the attachments of BOTH sides for shredding (the other
+        //     user's files would otherwise stay on disk with no conversation left
+        //     to reach them).
         let dm_channel_ids: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT dm_channel_id FROM dm_members WHERE user_id = ?1")
@@ -6928,12 +7104,7 @@ impl Database {
             rows
         };
         for dm_id in &dm_channel_ids {
-            conn.execute("DELETE FROM dm_messages WHERE dm_channel_id = ?1", params![dm_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM dm_members WHERE dm_channel_id = ?1", params![dm_id])
-                .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM dm_channels WHERE id = ?1", params![dm_id])
-                .map_err(|e| e.to_string())?;
+            file_refs.extend(Self::delete_dm_channel_rows_c(&conn, dm_id)?);
         }
 
         // 4b. Clean up DM + friend data. dm_messages/dm_members cascade on user delete,
@@ -7004,6 +7175,16 @@ impl Database {
         conn.execute("DELETE FROM shared_profile_data_keys WHERE owner_user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
 
+        // 4h2. Custom CSS + custom icon slots (migration 067 / 092).
+        conn.execute("DELETE FROM user_css_slots WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_css_prefs WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_icon_slots WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_icon_prefs WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+
         // 4i. Notifications, pending events, pins, sounds.
         conn.execute("DELETE FROM pending_notifications WHERE user_id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
@@ -7033,7 +7214,7 @@ impl Database {
         // 5. Delete the user
         conn.execute("DELETE FROM users WHERE id = ?1", params![user_id])
             .map_err(|e| e.to_string())?;
-        Ok(user_file_ids)
+        Ok((user_file_ids, file_refs))
     }
 
     // --- Files (Phase 5) ---
@@ -7065,6 +7246,52 @@ impl Database {
         // Returns the deleted file info so caller can clean up chunks
         let info = self.get_file_info(file_id)?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])
+            .map_err(|e| e.to_string())?;
+        Ok(info)
+    }
+
+    /// Is this file already referenced by a channel or DM message? `file_ref`
+    /// may be the file id or its blind hash (both are how messages store it).
+    pub fn is_file_referenced(&self, file_ref: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM messages WHERE file_id = ?1)
+                      + (SELECT COUNT(*) FROM dm_messages WHERE file_id = ?1)",
+                params![file_ref],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    /// Abort a cancelled upload: drop the file record the caller owns, but only
+    /// while nothing references it yet. Returns the record so the caller can
+    /// delete the chunk directory on disk.
+    ///
+    /// A file that a message already points at is NOT cancellable — that is a
+    /// sent attachment, and removing it is the message's job (or the channel's,
+    /// server's or account's recursive delete). This is what makes the client's
+    /// Cancel button real instead of cosmetic: whatever chunks reached the
+    /// server before the user gave up are thrown away here.
+    pub fn cancel_file_upload(&self, file_id: &str, uploader_id: &str) -> Result<FileRecord, String> {
+        let info = self.get_file_info(file_id)?;
+        if info.uploader_id != uploader_id {
+            return Err("Not your file".to_string());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let referenced: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM messages WHERE file_id = ?1 OR file_id = ?2)
+                      + (SELECT COUNT(*) FROM dm_messages WHERE file_id = ?1 OR file_id = ?2)",
+                params![file_id, sha256_hex(file_id)],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if referenced > 0 {
+            return Err("File is attached to a message".to_string());
+        }
         conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])
             .map_err(|e| e.to_string())?;
         Ok(info)
@@ -8069,6 +8296,61 @@ impl Database {
         Ok(())
     }
 
+    // ── F15: custom UI icons (2 encrypted slots, same shape as the CSS slots) ──
+
+    pub fn get_icon_slots(&self, user_id: &str) -> Result<(String, String, String, String, i64), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let (s1, s1n) = conn
+            .query_row(
+                "SELECT encrypted_icons, nonce FROM user_icon_slots WHERE user_id = ?1 AND slot = 1",
+                rusqlite::params![user_id],
+                |row| Ok((row.get::<_, String>(0).unwrap_or_default(), row.get::<_, String>(1).unwrap_or_default())),
+            )
+            .unwrap_or_default();
+        let (s2, s2n) = conn
+            .query_row(
+                "SELECT encrypted_icons, nonce FROM user_icon_slots WHERE user_id = ?1 AND slot = 2",
+                rusqlite::params![user_id],
+                |row| Ok((row.get::<_, String>(0).unwrap_or_default(), row.get::<_, String>(1).unwrap_or_default())),
+            )
+            .unwrap_or_default();
+        let active = conn
+            .query_row(
+                "SELECT active_slot FROM user_icon_prefs WHERE user_id = ?1",
+                rusqlite::params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        Ok((s1, s1n, s2, s2n, active))
+    }
+
+    pub fn save_icon_slot(&self, user_id: &str, slot: i64, encrypted_icons: &str, nonce: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_icon_slots (user_id, slot, encrypted_icons, nonce) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, slot, encrypted_icons, nonce],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_icon_slot(&self, user_id: &str, slot: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM user_icon_slots WHERE user_id = ?1 AND slot = ?2",
+            rusqlite::params![user_id, slot],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_icon_active_slot(&self, user_id: &str, active: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_icon_prefs (user_id, active_slot) VALUES (?1, ?2)",
+            rusqlite::params![user_id, active],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // --- F3-15: Encrypted File Vault ---
 
     /// Return the on-disk path for a vault file, creating dirs as needed.
@@ -9018,4 +9300,395 @@ impl Database {
         Ok(members)
     }
 
+}
+
+// ── Recursive-deletion contract ──────────────────────────────────────────
+// Every "delete X" must take EVERYTHING that lived inside X — rows in tables
+// that have no foreign key back to X, and the encrypted attachments on disk,
+// which nothing else would ever collect. These tests drive the real Database
+// against a real SQLite file: they are the check the release notes point at
+// when they say a deleted server leaves nothing behind.
+#[cfg(test)]
+mod recursive_delete_tests {
+    use super::*;
+
+    /// A throwaway database with its own upload directory.
+    struct Fx {
+        db: Database,
+        root: String,
+    }
+
+    impl Fx {
+        fn new(tag: &str) -> Fx {
+            let root = std::env::temp_dir()
+                .join(format!("e2e-db-{}-{}", tag, Uuid::new_v4()))
+                .to_string_lossy()
+                .to_string();
+            std::fs::create_dir_all(&root).unwrap();
+            let db = Database::new(&format!("{}/test.db", root), &format!("{}/uploads", root)).unwrap();
+            Fx { db, root }
+        }
+
+        fn exec<P: rusqlite::Params>(&self, sql: &str, p: P) {
+            self.db.conn.lock().unwrap().execute(sql, p).unwrap();
+        }
+
+        fn count<P: rusqlite::Params>(&self, sql: &str, p: P) -> i64 {
+            self.db.conn.lock().unwrap().query_row(sql, p, |r| r.get(0)).unwrap()
+        }
+
+        fn user(&self, id: &str) {
+            self.exec(
+                "INSERT INTO users (id, username, password_hash) VALUES (?1, ?2, 'x')",
+                params![id, format!("user-{}", id)],
+            );
+        }
+
+        /// A file row plus real chunk files on disk — exactly what an upload
+        /// leaves behind. Returns the file id (what messages store).
+        fn file(&self, uploader: &str, chunks: usize) -> String {
+            let id = sha256_hex(&Uuid::new_v4().to_string());
+            self.exec(
+                "INSERT INTO files (id, uploader_id, original_size, file_id_hash, chunk_count, upload_complete)\r
+                 VALUES (?1, ?2, 4096, ?3, ?4, 1)",
+                params![id, uploader, sha256_hex(&id), chunks as i32],
+            );
+            let dir = format!("{}/uploads/{}", self.root, id);
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..chunks {
+                std::fs::write(format!("{}/{}.enc", dir, i), b"ciphertext").unwrap();
+            }
+            id
+        }
+
+        fn file_dir(&self, id: &str) -> String {
+            format!("{}/uploads/{}", self.root, id)
+        }
+
+        fn channel_msg(&self, id: &str, channel_id: &str, sender: &str, file_ref: Option<&str>) {
+            self.exec(
+                "INSERT INTO messages (id, channel_id, sender_id, encrypted_content, nonce, file_id)\r
+                 VALUES (?1, ?2, ?3, x'00', x'00', ?4)",
+                params![id, channel_id, sender, file_ref],
+            );
+        }
+
+        fn dm_msg(&self, id: &str, dm_id: &str, sender: &str, file_ref: Option<&str>) {
+            self.exec(
+                "INSERT INTO dm_messages (id, dm_channel_id, sender_id, encrypted_content, nonce, file_id)\r
+                 VALUES (?1, ?2, ?3, x'00', x'00', ?4)",
+                params![id, dm_id, sender, file_ref],
+            );
+        }
+
+        fn voice_call(&self, channel_id: &str, user_id: &str) {
+            self.exec(
+                "INSERT INTO voice_sessions (id, channel_id) VALUES (?1, ?2)",
+                params![format!("vs-{}", channel_id), channel_id],
+            );
+            self.exec(
+                "INSERT INTO voice_participants (voice_session_id, user_id) VALUES (?1, ?2)",
+                params![format!("vs-{}", channel_id), user_id],
+            );
+        }
+
+        /// One message inside `channel_id` with everything a member can attach
+        /// to it: a file, a reaction, a poll vote-free ack, a pin and a search
+        /// token. Returns (message_id, file_id).
+        fn populated_message(&self, channel_id: &str, sender: &str, reactor: &str) -> (String, String) {
+            let file = self.file(sender, 2);
+            let msg = format!("msg-{}", Uuid::new_v4());
+            self.channel_msg(&msg, channel_id, sender, Some(&file));
+            self.db.add_reaction(&msg, reactor, "thumbsup", "enc", "nonce").unwrap();
+            self.db.record_message_ack(&msg, reactor, "read", "token").unwrap();
+            self.db.pin_message(channel_id, &msg, sender).unwrap();
+            self.db.index_message_tokens(&msg, &["hello".to_string()]).unwrap();
+            (msg, file)
+        }
+    }
+
+    /// Assert a file record and its whole chunk directory are gone.
+    fn assert_shredded(fx: &Fx, file_id: &str) {
+        assert_eq!(
+            fx.count("SELECT COUNT(*) FROM files WHERE id = ?1", params![file_id]),
+            0,
+            "file row must be deleted"
+        );
+        assert!(
+            !std::path::Path::new(&fx.file_dir(file_id)).exists(),
+            "chunk directory {} must be removed",
+            fx.file_dir(file_id)
+        );
+    }
+
+    /// Owner leaves => the server, its channels, messages, voice state, roles,
+    /// categories, per-conversation profiles and every attachment are gone.
+    #[test]
+    fn leaving_as_owner_deletes_everything_in_the_server() {
+        let fx = Fx::new("server");
+        fx.user("owner");
+        fx.user("member");
+        let srv = fx.db.create_server("owner", "invite-hash", "salt", None, None, None, None, None, None).unwrap();
+        let channels = fx.db.list_server_channels(&srv.id).unwrap();
+        let text = channels.iter().find(|c| c.channel_type == "text").unwrap().id.clone();
+
+        let (_msg, msg_file) = fx.populated_message(&text, "member", "owner");
+        fx.voice_call(&text, "member");
+        // A per-channel profile by another member, with its own picture file.
+        let pfp = fx.file("member", 1);
+        fx.db.upsert_conversation_profile("member", "channel", &text, "enc", "nonce", Some(&pfp), None).unwrap();
+        // And the server's own picture.
+        let srv_pic = fx.file("owner", 1);
+        fx.exec(
+            "UPDATE servers SET server_picture_file_id = ?1 WHERE id = ?2",
+            params![srv_pic, srv.id],
+        );
+        // A custom role + an overwrite that targets a channel id (no FK to the
+        // channel, so only the deletion path can clean it up).
+        let role = fx.db.create_role(&srv.id, None, 1, 5, None, None).unwrap();
+        fx.exec(
+            "INSERT INTO role_overwrites (role_id, target_type, target_id, allow, deny) VALUES (?1, 'channel', ?2, 1, 0)",
+            params![role.id, text],
+        );
+
+        assert!(fx.db.leave_server(&srv.id, "owner").unwrap(), "owner leave deletes the server");
+
+        for (table, id) in [
+            ("servers", srv.id.as_str()),
+            ("channels", text.as_str()),
+            ("server_members", srv.id.as_str()),
+            ("server_keys", srv.id.as_str()),
+            ("server_roles", srv.id.as_str()),
+            ("channel_categories", srv.id.as_str()),
+            ("conversation_profile_data", text.as_str()),
+            ("voice_sessions", text.as_str()),
+        ] {
+            let col = match table {
+                "servers" => "id",
+                "channels" => "id",
+                "server_members" => "server_id",
+                "server_keys" => "server_id",
+                "server_roles" => "server_id",
+                "channel_categories" => "server_id",
+                "conversation_profile_data" => "conversation_id",
+                _ => "channel_id",
+            };
+            let sql = format!("SELECT COUNT(*) FROM {} WHERE {} = ?1", table, col);
+            assert_eq!(fx.count(&sql, params![id]), 0, "{} must be empty after the server is deleted", table);
+        }
+        assert_eq!(
+            fx.count(
+                "SELECT COUNT(*) FROM role_overwrites WHERE target_type = 'channel' AND target_id = ?1",
+                params![text],
+            ),
+            0,
+            "role overwrites must go with the channel"
+        );
+        assert_eq!(
+            fx.count(
+                "SELECT COUNT(*) FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?1)",
+                params![srv.id],
+            ),
+            0,
+            "messages must be gone"
+        );
+        assert_eq!(
+            fx.count("SELECT COUNT(*) FROM voice_participants WHERE user_id = 'member'", []),
+            0,
+            "voice participants must be gone"
+        );
+        assert_shredded(&fx, &msg_file);
+        assert_shredded(&fx, &pfp);
+        assert_shredded(&fx, &srv_pic);
+    }
+
+    /// Deleting one channel takes its messages, pins, reactions, acks, search
+    /// tokens, voice sessions and attachments — and leaves the server alone.
+    #[test]
+    fn deleting_a_channel_deletes_everything_in_it() {
+        let fx = Fx::new("channel");
+        fx.user("owner");
+        fx.user("member");
+        let srv = fx.db.create_server("owner", "invite-hash", "salt", None, None, None, None, None, None).unwrap();
+        let channels = fx.db.list_server_channels(&srv.id).unwrap();
+        let text = channels.iter().find(|c| c.channel_type == "text").unwrap().id.clone();
+        let voice = channels.iter().find(|c| c.channel_type == "voice").unwrap().id.clone();
+
+        let (msg, file) = fx.populated_message(&text, "member", "owner");
+        let (keep_msg, keep_file) = fx.populated_message(&voice, "member", "owner");
+        fx.voice_call(&text, "member");
+
+        fx.db.delete_channel_by_owner(&text, "owner").unwrap();
+
+        assert_eq!(fx.count("SELECT COUNT(*) FROM channels WHERE id = ?1", params![text]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM messages WHERE id = ?1", params![msg]), 0);
+        for (table, col) in [
+            ("message_reactions", "message_id"),
+            ("message_acks", "message_id"),
+            ("message_pins", "message_id"),
+            ("message_search_tokens", "message_id"),
+        ] {
+            let sql = format!("SELECT COUNT(*) FROM {} WHERE {} = ?1", table, col);
+            assert_eq!(fx.count(&sql, params![msg]), 0, "{} rows must cascade", table);
+        }
+        assert_eq!(fx.count("SELECT COUNT(*) FROM voice_sessions WHERE channel_id = ?1", params![text]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM voice_participants WHERE voice_session_id = ?1", params![format!("vs-{}", text)]), 0);
+        assert_shredded(&fx, &file);
+        // The other channel and its attachment are untouched.
+        assert_eq!(fx.count("SELECT COUNT(*) FROM messages WHERE id = ?1", params![keep_msg]), 1);
+        assert!(std::path::Path::new(&fx.file_dir(&keep_file)).exists());
+    }
+
+    /// Deleting a message that carries an attachment used to deadlock the whole
+    /// database (the guard was held while a locking helper ran); it must now
+    /// return and shred the file. If this regresses, the test hangs.
+    #[test]
+    fn deleting_an_attachment_message_shreds_it() {
+        let fx = Fx::new("message");
+        fx.user("owner");
+        let srv = fx.db.create_server("owner", "invite-hash", "salt", None, None, None, None, None, None).unwrap();
+        let text = fx.db.list_server_channels(&srv.id).unwrap()
+            .into_iter().find(|c| c.channel_type == "text").unwrap().id;
+        let (msg, file) = fx.populated_message(&text, "owner", "owner");
+
+        fx.db.delete_message(&msg, "owner").unwrap();
+        assert_shredded(&fx, &file);
+    }
+
+    /// Deleting a DM message with an attachment takes the same path.
+    #[test]
+    fn deleting_an_attachment_dm_message_shreds_it() {
+        let fx = Fx::new("dm-message");
+        fx.user("a");
+        fx.user("b");
+        let dm = fx.db.create_dm_channel("a", "b").unwrap();
+        let file = fx.file("a", 1);
+        fx.dm_msg("dmsg-1", &dm, "a", Some(&file));
+
+        fx.db.delete_dm_message("dmsg-1", "a").unwrap();
+        assert_shredded(&fx, &file);
+    }
+
+    /// Unfriending deletes the conversation AND the attachments of both sides
+    /// (the partner's files are not this user's uploads, so only shredding them
+    /// here keeps them from leaking).
+    #[test]
+    fn unfriending_shreds_the_conversation_files() {
+        let fx = Fx::new("unfriend");
+        fx.user("a");
+        fx.user("b");
+        let dm = fx.db.create_dm_channel("a", "b").unwrap();
+        fx.exec(
+            "INSERT INTO friendships (user_id_a, user_id_b) VALUES ('a', 'b')",
+            [],
+        );
+        let mine = fx.file("a", 2);
+        let theirs = fx.file("b", 1);
+        fx.dm_msg("d1", &dm, "a", Some(&mine));
+        fx.dm_msg("d2", &dm, "b", Some(&theirs));
+        fx.db.upsert_conversation_profile("b", "dm", &dm, "enc", "nonce", Some(&theirs), None).unwrap();
+
+        fx.db.remove_friend("a", "b").unwrap();
+
+        assert_eq!(fx.count("SELECT COUNT(*) FROM dm_channels WHERE id = ?1", params![dm]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM dm_messages WHERE dm_channel_id = ?1", params![dm]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM dm_members WHERE dm_channel_id = ?1", params![dm]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM conversation_profile_data WHERE conversation_id = ?1", params![dm]), 0);
+        assert_shredded(&fx, &mine);
+        assert_shredded(&fx, &theirs);
+    }
+
+    /// Deleting an account removes the user's servers, their DM conversations
+    /// (both members' rows and files) and their own uploads.
+    #[test]
+    fn deleting_an_account_leaves_nothing_reachable() {
+        let fx = Fx::new("account");
+        fx.user("gone");
+        fx.user("partner");
+        let srv = fx.db.create_server("gone", "invite-hash", "salt", None, None, None, None, None, None).unwrap();
+        let text = fx.db.list_server_channels(&srv.id).unwrap()
+            .into_iter().find(|c| c.channel_type == "text").unwrap().id;
+        let (_m, server_file) = fx.populated_message(&text, "partner", "partner");
+        fx.exec(
+            "INSERT INTO server_members (user_id, server_id) VALUES ('partner', ?1)",
+            params![srv.id],
+        );
+
+        let dm = fx.db.create_dm_channel("gone", "partner").unwrap();
+        let partner_file = fx.file("partner", 2);
+        fx.dm_msg("d1", &dm, "partner", Some(&partner_file));
+        let mine = fx.file("gone", 1);
+        fx.channel_msg("m1", &text, "gone", Some(&mine));
+        // Per-account settings blobs (CSS + icon slots) are not conversation
+        // data, so nothing else would collect them.
+        fx.db.save_css_slot("gone", 1, "css", "n").unwrap();
+        fx.db.set_css_active_slot("gone", 1).unwrap();
+        fx.db.save_icon_slot("gone", 1, "icons", "n").unwrap();
+        fx.db.set_icon_active_slot("gone", 1).unwrap();
+
+        fx.db.delete_user("gone").unwrap();
+
+        assert_eq!(fx.count("SELECT COUNT(*) FROM users WHERE id = 'gone'", []), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM servers WHERE id = ?1", params![srv.id]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM channels WHERE id = ?1", params![text]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM dm_channels WHERE id = ?1", params![dm]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM dm_messages WHERE dm_channel_id = ?1", params![dm]), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM server_members WHERE user_id = 'gone'", []), 0);
+        assert_eq!(fx.count("SELECT COUNT(*) FROM files WHERE uploader_id = 'gone'", []), 0);
+        assert_shredded(&fx, &server_file);
+        assert_shredded(&fx, &partner_file);
+        assert_shredded(&fx, &mine);
+        for table in ["user_css_slots", "user_css_prefs", "user_icon_slots", "user_icon_prefs"] {
+            let sql = format!("SELECT COUNT(*) FROM {} WHERE user_id = 'gone'", table);
+            assert_eq!(fx.count(&sql, []), 0, "{} rows must go with the account", table);
+        }
+        // The partner is untouched as a user.
+        assert_eq!(fx.count("SELECT COUNT(*) FROM users WHERE id = 'partner'", []), 1);
+    }
+
+    /// Cancelling an upload throws away the record and every chunk written so
+    /// far, but never a file a message already points at.
+    #[test]
+    fn cancelling_an_upload_removes_the_partial_upload() {
+        let fx = Fx::new("cancel");
+        fx.user("a");
+        let partial = fx.file("a", 3);
+        // A file row that never reported chunks (a cancel mid-first-chunk).
+        let empty = sha256_hex(&Uuid::new_v4().to_string());
+        fx.exec(
+            "INSERT INTO files (id, uploader_id, original_size, file_id_hash, chunk_count, upload_complete) VALUES (?1, 'a', 4096, ?2, 0, 0)",
+            params![empty, sha256_hex(&empty)],
+        );
+        std::fs::create_dir_all(fx.file_dir(&empty)).unwrap();
+        std::fs::write(format!("{}/0.enc", fx.file_dir(&empty)), b"partial").unwrap();
+
+        for id in [&partial, &empty] {
+            fx.db.cancel_file_upload(id, "a").unwrap();
+            let dir = fx.file_dir(id);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(fx.count("SELECT COUNT(*) FROM files WHERE id = ?1", params![id]), 0);
+        }
+        // Only the real canceller owns it.
+        let foreign = fx.file("a", 1);
+        assert!(fx.db.cancel_file_upload(&foreign, "b").is_err());
+        assert_eq!(fx.count("SELECT COUNT(*) FROM files WHERE id = ?1", params![foreign]), 1);
+    }
+
+    /// A file a message already references is not cancellable: removing it is
+    /// the message's job, and the endpoint must refuse instead of orphaning it.
+    #[test]
+    fn cancelling_refuses_a_referenced_file() {
+        let fx = Fx::new("cancel-referenced");
+        fx.user("a");
+        let srv = fx.db.create_server("a", "invite-hash", "salt", None, None, None, None, None, None).unwrap();
+        let text = fx.db.list_server_channels(&srv.id).unwrap()
+            .into_iter().find(|c| c.channel_type == "text").unwrap().id;
+        let (msg, file) = fx.populated_message(&text, "a", "a");
+
+        assert!(fx.db.cancel_file_upload(&file, "a").is_err(), "a sent attachment must not be cancellable");
+        assert_eq!(fx.count("SELECT COUNT(*) FROM files WHERE id = ?1", params![file]), 1);
+        // Deleting the message releases it.
+        fx.db.delete_message(&msg, "a").unwrap();
+        assert_shredded(&fx, &file);
+    }
 }

@@ -17,7 +17,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=29">
+    <link rel="stylesheet" href="style.css?v=30">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -597,6 +597,7 @@
                 <button class="settings-tab" data-tab="shortcut-settings">Shortcuts</button>
                 <button class="settings-tab" data-tab="custom-css-settings">CSS</button>
                 <!-- Box app only; shown by chat.js when running in the native shell. -->
+                <button class="settings-tab" data-tab="icon-packs-settings" id="icon-settings-tab" style="display:none">Icons</button>
                 <button class="settings-tab" data-tab="connection-settings" id="connection-settings-tab" style="display:none">Connection</button>
             </div>
 
@@ -1112,6 +1113,14 @@
 
             <!-- Voice Settings -->
 
+            <!-- Custom icons (box app only; chat.js reveals the tab in the native shell) -->
+            <div class="settings-panel" id="icon-packs-settings" style="display:none">
+                <div class="settings-group">
+                    <h3 style="color:var(--text-primary);margin:0 0 12px">Custom icons</h3>
+                    <div id="icon-settings-container"></div>
+                </div>
+            </div>
+
             <div class="settings-panel" id="custom-css-settings" style="display:none">
                 <div class="settings-group">
                     <h3 style="color:var(--text-primary);margin:0 0 12px">Custom CSS</h3>
@@ -1183,15 +1192,19 @@
                     <label class="settings-toggle" style="margin-top:8px">
                         <input type="checkbox" id="captions-toggle">
                         <span class="toggle-slider"></span>
-                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">On-device captions</span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Local captions of everyone in the call</span>
                     </label>
+                    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+                        <span style="font-size:13px;color:var(--text-primary)">Spoken language</span>
+                        <select id="captions-language" class="settings-field" style="max-width:200px"></select>
+                    </div>
                     <label class="settings-toggle" style="margin-top:10px">
-                        <input type="checkbox" id="captions-publish-toggle" disabled>
+                        <input type="checkbox" id="captions-self-toggle" disabled>
                         <span class="toggle-slider"></span>
-                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Publish my captions to the call</span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Also caption my own voice</span>
                     </label>
                     <p class="settings-hint" id="captions-status"></p>
-                    <p class="settings-hint">Transcription runs on an offline recogniser on this device — audio is never sent to an online speech service. It hears this device's <b>microphone</b> (what you say), not the other people on the call. Captions are shown to you only unless you turn publishing on, they are never written to disk, and they never appear in notifications or logs.</p>
+                    <p class="settings-hint">Captions are transcribed <b>on this device</b> by a speech model bundled in the app — no speech service, no network, nothing decrypted ever leaves the machine. Each participant is transcribed from the audio this device already decrypts to play it, so every line says who said it; captions are never sent to the other people in the call, never written to disk, and never put in notifications or logs.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Hear Yourself (Test Mic)</h4>
@@ -2546,13 +2559,15 @@
 <script src="ui-dialog.js?v=1"></script>
 <script src="keyvault.js?v=2"></script>
 <script src="secure-storage.js?v=5"></script>
-    <script src="voice.js?v=33"></script>
+    <script src="voice.js?v=34"></script>
     <script src="soundboard-pairing.js?v=12"></script>
     <script src="thread_categories_shortcuts.js?v=11"></script>
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=5"></script>
-    <script src="chat.js?v=71"></script>
-<script src="captions.js?v=1"></script>
+    <script src="chat.js?v=72"></script>
+<script src="captions.js?v=2"></script>
+<!-- F15: custom UI icon packs (app-only settings tab) -->
+<script src="icon-packs.js?v=1"></script>
     <!-- Android shell: immersive system bars, Back closing the top layer, the
          real-vibrator haptic bridge and notification clearing. Inert in a
          browser and on desktop (see the file's header). -->

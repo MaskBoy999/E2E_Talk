@@ -1043,36 +1043,22 @@
     function getWs() {
         try { return typeof ws !== 'undefined' ? ws : null; } catch (_) { return null; }
     }
-    // 1.7: publish one caption line to the call. There is deliberately NO new
-    // message type and no new server path: this reuses the existing
-    // `voice_signal` envelope, which send() encrypts with the call's signal key
-    // (the same E2EE protection SDP and ICE already get), and it addresses each
-    // peer individually exactly like an offer does, because "signal" is a
-    // peer-to-peer message by construction.
-    //
-    // Returns false when not in a call — the caller must not treat that as
-    // success, and nothing is buffered: captions are in-the-moment only.
-    window.__voiceSendCaption = function (text, isFinal) {
+    // 1.7 (2026-09 rewrite): there is no caption PUBLISH path any more. Captions
+    // are transcribed locally from each participant's decrypted audio
+    // (captions.js), so no transcript is ever sent to another device and the
+    // `voice_signal` envelope carries only SDP/ICE.
+
+    /**
+     * Hand every remote audio stream the call currently has to the caption
+     * engine. captions.js calls this when captions start mid-call; the streams
+     * themselves are already decrypted here, and captions never transmit.\n     */
+    window.__voiceForEachRemoteAudio = function (cb) {
         try {
-            var peers = Object.keys(S.peers || {});
-            if (!peers.length || !text) return false;
-            var payload = {
-                type: 'caption',
-                text: String(text).slice(0, 240),
-                final: !!isFinal,
-            };
-            for (var i = 0; i < peers.length; i++) {
-                send({
-                    type: 'voice_signal',
-                    room_type: S.roomType,
-                    channel_id: S.channelId || '',
-                    dm_channel_id: S.dmChannelId || '',
-                    to_user_id: peers[i],
-                    signal: payload,
-                });
-            }
-            return true;
-        } catch (_) { return false; }
+            Object.keys(S.remoteStreams || {}).forEach(function (uid) {
+                var s = S.remoteStreams[uid];
+                if (s && s.audio) cb(uid, s.audio);
+            });
+        } catch (_) {}
     };
 
     function send(obj) {
@@ -3841,6 +3827,7 @@
     }
 
     function removeRemoteAudioEls(uid) {
+        if (window.__captions && window.__captions.detach) window.__captions.detach(uid);
         var els = S.remoteAudioEls[uid];
         if (els) {
             els.forEach(function (el) {
@@ -3902,6 +3889,9 @@
         if (!S.remoteStreams[uid] || !S.remoteStreams[uid].audio) return;
         try {
             var stream = S.remoteStreams[uid].audio;
+            // Captions listen to this same decrypted stream (their own detached
+            // AudioContext tap; it never touches the playback path).
+            if (window.__captions && window.__captions.attach) window.__captions.attach(uid, stream);
             var els = S.remoteAudioEls[uid];
             if (!els) {
                 removeRemoteAudioEls(uid);
@@ -4093,16 +4083,11 @@
     // Signaling handling
     // ------------------------------------------------------------------
     function handleSignal(fromUid, signal) {
-        // 1.7: published captions ride this same signal envelope — encrypted by
-        // encryptSignalPayload() in send(), decrypted above before we are called
-        // — but they are not peer-connection state, so they are handled before
-        // the pc lookup. A device with captions off simply has nothing to show.
-        if (signal.type === 'caption') {
-            if (typeof window.__captionsShowRemote === 'function') {
-                window.__captionsShowRemote(fromUid, signal);
-            }
-            return;
-        }
+        // 1.7 (2026-09 rewrite): captions are local-only, so a `caption` signal is
+        // no longer produced — and one arriving from an older client is ignored
+        // rather than displayed, because a transcript someone else pushes into
+        // this UI is not something this app shows any more.
+        if (signal.type === 'caption') return;
         var pc = S.peers[fromUid];
         if (!pc) {
             // A peer we haven't created yet — create it (covers late-joining

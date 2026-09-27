@@ -597,3 +597,71 @@ names the page size.
 overlay only listened for mouse events, so touching it drew nothing. Also check
 that the stroke lands on the page you started drawing on if you switch pages
 before pressing Apply.
+
+---
+
+## 22. Cancelling an upload, deleted things staying deleted, icon packs, on-device captions, Arch (0.2.33)
+
+What changed: Cancel really cancels, every "delete" takes everything with it,
+you can replace the app's icons, captions are transcribed on your own device,
+and the Arch package no longer opens a grey window.
+
+**Do:** attach a large file (say 40 MB) and press **Cancel** while it is
+uploading.
+**Expect:** the dialog closes at once, the message is **not** sent, and no
+half-uploaded attachment is left behind — the server deletes the file record and
+every chunk written so far. Reload and confirm nothing appears in the channel.
+(If a file was already sent as a message, Cancel cannot touch it: that one
+belongs to the message.)
+
+**Do:** send a message with an attachment, then right-click it → **Delete**, in
+both a channel and a DM.
+**Expect:** the message disappears **immediately** and the app stays responsive.
+Before this release this deadlocked the whole server on an attachment message
+(the thread was waiting on a database lock it already held), so the message
+stayed and *everything else* stopped working until a restart.
+
+**Do:** create a server, put a message with an attachment in each of two
+channels, then delete one channel.
+**Expect:** only that channel's message and attachment go; the server, the other
+channel and its attachment are untouched.
+
+**Do:** as the server owner, leave the server (**Leave Server**), then look at the
+admin panel's server list.
+**Expect:** the server is gone entirely — channels, categories, roles and their
+overwrites, voice sessions and participants, per-channel profiles, the server
+picture and **every attachment in it**. Repeat with the admin panel's own
+**Delete** for a server and for a channel: the result must be identical (the
+three paths now share one implementation).
+
+**Do:** delete a user account that owned a server and had a DM with attachments
+(table the other person sent).
+**Expect:** the server and the DM are gone, the partner's account still works,
+and none of the attachments remain on the server (including the ones the deleted
+user did not upload).
+
+**Do (desktop or Android box):** open Settings.
+**Expect:** there is now an **Icons** tab beside **Connection**. Open it: the
+two slots and the current icon set are shown, and switching to a slot that holds
+a pack changes the app's icons. A plain browser never shows either tab.
+
+**Do:** start a voice channel or DM call, then turn **captions** on in the
+audio settings.
+**Expect:** the first time, the status line says it is loading the offline
+speech model (from the app itself — nothing is downloaded from the internet),
+then lines appear labelled with **who spoke**, for *everyone* on the call, not
+just you. Turn on **Also caption my own voice** to include yourself. Nothing is
+sent to the other participants and nothing is saved. Turning captions off drops
+the lines at once.
+
+**Do (Arch):** install the published `pkg.tar.zst`, launch it, and open a server.
+**Expect:** the window paints the chat UI. Before this release it opened grey —
+WebKitGTK's DMA-BUF renderer fails on many drivers; the app now turns it off
+before creating the window. If you *want* the DMA-BUF path,
+`E2E_CHAT_WEBKIT_DMABUF=1` re-enables it (and `WEBKIT_DISABLE_DMABUF_RENDERER=0`
+is respected too).
+
+**Do (any platform, on a phone or a narrow window):** send a file whose name is
+one long unbroken string, or with a very long mime type.
+**Expect:** the card stays inside the message column and the chat does **not**
+gain a horizontal scrollbar; the name and the size/mime line wrap.

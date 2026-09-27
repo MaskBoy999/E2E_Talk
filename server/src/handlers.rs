@@ -7133,6 +7133,42 @@ pub async fn complete_file_upload(
     }
 }
 
+/// DELETE /api/files/{file_id} — abort a cancelled upload.
+///
+/// The client's Cancel button used to be cosmetic: it flipped a flag the
+/// chunk loop checked, so the in-flight request still finished, the record
+/// still existed, and every already-written chunk stayed on disk with nothing
+/// referencing it. This is the missing half — owner-only, refuses files a
+/// message already points at, and removes the chunks directory wholesale
+/// (which also collects partial chunks the row never counted).
+pub async fn cancel_file_upload(
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    match state.db.cancel_file_upload(&file_id, &user_id) {
+        Ok(_info) => {
+            let dir = format!("{}/{}", state.config.upload_dir, file_id);
+            let _ = std::fs::remove_dir_all(&dir);
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        Err(e) if e == "Not your file" => {
+            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e}))).into_response()
+        }
+        Err(e) if e == "File is attached to a message" => {
+            (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response()
+        }
+        Err(_) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "File not found"}))).into_response()
+        }
+    }
+}
+
 pub async fn download_file(
     Path(file_id): Path<String>,
     headers: HeaderMap,
@@ -9355,6 +9391,101 @@ pub async fn save_css_slot(
     let encrypted_css = body["encrypted_css"].as_str().unwrap_or("").to_string();
     let nonce = body["nonce"].as_str().unwrap_or("").to_string();
     match state.db.save_css_slot(&user_id, slot_num, &encrypted_css, &nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+// ── F15: Custom UI icon slots ─────────────────────────────────────────────
+// Two encrypted icon packs per user, exactly like the CSS slots: the client
+// encrypts a JSON map of icon id -> SVG markup with its identity key and the
+// server only ever stores the ciphertext. Every icon in the app is drawn from
+// the page's sprite, so a slot is a set of overrides for those symbols.
+
+/// Largest accepted ciphertext for one icon slot. A pack is SVG markup for a
+/// handful of 24x24 icons; 512 KiB is generous and keeps one account from
+/// filling the database with a "pack".
+const MAX_ICON_SLOT_B64: usize = 512 * 1024;
+
+/// GET /api/user-icons/slots — both slots + the active choice for the caller.
+pub async fn get_icon_slots(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.get_icon_slots(&user_id) {
+        Ok((s1, s1n, s2, s2n, active)) => (StatusCode::OK, Json(serde_json::json!({
+            "slot1": { "encrypted_icons": s1, "nonce": s1n },
+            "slot2": { "encrypted_icons": s2, "nonce": s2n },
+            "active_slot": active,
+        })))
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// PUT /api/user-icons/slot/:slot — store one encrypted icon pack.
+pub async fn save_icon_slot(
+    Path(slot_num): Path<i64>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if slot_num != 1 && slot_num != 2 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "slot must be 1 or 2"}))).into_response();
+    }
+    let encrypted_icons = body["encrypted_icons"].as_str().unwrap_or("");
+    let nonce = body["nonce"].as_str().unwrap_or("");
+    if encrypted_icons.len() > MAX_ICON_SLOT_B64 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "icon pack too large"}))).into_response();
+    }
+    match state.db.save_icon_slot(&user_id, slot_num, encrypted_icons, nonce) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// DELETE /api/user-icons/slot/:slot — clear an icon slot.
+pub async fn delete_icon_slot(
+    Path(slot_num): Path<i64>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if slot_num != 1 && slot_num != 2 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "slot must be 1 or 2"}))).into_response();
+    }
+    match state.db.delete_icon_slot(&user_id, slot_num) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+/// PUT /api/user-icons/active — which slot the caller is using (0/1/2).
+pub async fn set_icon_active_slot(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let active = body["active_slot"].as_i64().unwrap_or(0);
+    if !(0..=2).contains(&active) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "active_slot must be 0, 1 or 2"}))).into_response();
+    }
+    match state.db.set_icon_active_slot(&user_id, active) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }

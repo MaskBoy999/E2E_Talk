@@ -1216,8 +1216,38 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 // ── App ──────────────────────────────────────────────────────────────────
 
+/// Keep WebKitGTK on its non-DMABUF renderer on Linux.
+///
+/// v0.2.32 shipped, installed cleanly, launched — and painted a grey window on
+/// Arch. Nothing was missing: the packaged binary's shared libraries all resolve
+/// (checked in CI against a real Arch userland) and the .deb/AppImage have the
+/// same problem class. It is WebKitGTK's DMABUF renderer asking the driver for a
+/// buffer format it does not provide, which fails silently — Tauri's own
+/// "Linux Graphics Issues" page lists exactly this symptom and these variables
+/// (tauri-apps/tauri#9394). The accelerated path buys nothing in a chat window
+/// and the failure mode is an app that looks broken, so Linux defaults to it
+/// OFF here, in the binary rather than in a launcher script, so the AppImage,
+/// the .deb, the .rpm and the pacman package all get it identically.
+///
+/// Anyone who wants the fast path back sets `E2E_CHAT_WEBKIT_DMABUF=1` (or sets
+/// `WEBKIT_DISABLE_DMABUF_RENDERER=0` themselves); an explicit value from the
+/// environment always wins over this default.
+#[cfg(target_os = "linux")]
+fn apply_linux_webkit_workarounds() {
+    let opted_in = std::env::var_os("E2E_CHAT_WEBKIT_DMABUF").is_some();
+    let already_set = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some();
+    if !opted_in && !already_set {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must run before the first webview is created — WebKit reads these when it
+    // initialises its rendering backend.
+    #[cfg(target_os = "linux")]
+    apply_linux_webkit_workarounds();
+
     // Desktop: enforce one app instance. It must be the FIRST plugin: plugins'
     // setup hooks run in registration order, and this one claims the OS-wide
     // lock and forwards latecomers to the already-running instance before any

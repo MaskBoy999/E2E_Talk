@@ -1,5 +1,79 @@
 # PROGRESS
 
+## A cancel that cancels, deletes that leave nothing, icon packs, on-device captions, an Arch window that paints (0.2.33)
+
+**Cancel on the upload dialog was a lie.** It flipped a flag the chunk loop
+checked, so the request already in flight still finished, the `files` row still
+existed, and every chunk the server had written stayed on disk with nothing
+referencing it. The flag is now an `AbortController` threaded into the init,
+chunk and complete calls, and whatever reached the server is deleted: a new
+`DELETE /api/files/{id}` handler (owner-only, and it *refuses* a file a message
+already points at, because that one belongs to the message) drops the record and
+removes the whole chunk directory — `remove_dir_all`, so partial chunks the row
+never counted go too. `tests/upload-cancel-overflow.spec.ts` cancels a real 8 MB
+upload mid-transfer and then polls the download endpoint until it 404s.
+
+**Every recursive delete now leaves nothing behind — and they share one path.**
+Owner-leave, admin delete, channel delete, DM delete, unfriend and account
+deletion used to be five different lists of `DELETE`s, each missing something:
+`voice_sessions`/`voice_participants` (no FK to `servers`), `role_overwrites`
+keyed by plain id, `conversation_profile_data`, `soundboard_mutes`, and — worst —
+the encrypted attachments on disk. `delete_server_rows_c`,
+`delete_channel_inner`, `delete_dm_channel_rows_c` and `delete_user_rows` are now
+the single implementations the owner/admin/account paths all call, and each
+returns the file references it found so they can be shredded. Two real bugs fell
+out of this: `delete_message_inner` held the database mutex while calling helpers
+that lock it again (a `std::sync::Mutex` is not reentrant — deleting an
+attachment's message **deadlocked the entire server**), and `remove_dir` on a
+directory a cancelled upload had left extra chunks in failed silently, leaking
+ciphertext forever. Eight tests in `db.rs` drive the real database and assert the
+rows *and* the chunk directories are gone.
+
+**Custom icon packs, app-only.** A new **Icons** settings tab sits next to the
+hidden Connection tab and is revealed by the same gate (`window.__TAURI__.core.invoke`),
+so it exists in the desktop box and the Android box and nowhere else. Two slots,
+encrypted with the identity key on the client (`user_icon_slots` /
+`user_icon_prefs`, migration 092) — the server only ever stores ciphertext — and
+a parsed SVG pack overrides the page's sprite by symbol id.
+
+**Live captions run entirely on the device, for everyone on the call.** The
+model (whisper-tiny, int8, ~44 MB) is vendored into `static/vendor/asr/` and
+served by the user's own server; a module worker loads it with
+`allowRemoteModels = false`, and each participant's *already-decrypted* audio is
+energy-gated into ~5 s windows and transcribed locally, labelled with the
+speaker. Nothing is written down and nothing — no audio, no transcript — leaves
+the device; the old publish path (`__voiceSendCaption`) is gone, so a caption
+event from an older client is ignored. Pinned by
+`tests/captions-local.spec.ts`, which feeds real speech through the real worker
+and fails if any request leaves the origin.
+
+**The Arch build's grey window.** The `pkg.tar.zst` installs and launches but
+painted grey: WebKitGTK's DMA-BUF renderer fails on a number of drivers and
+leaves an empty surface. The box now sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+before any webview exists (opt out with `E2E_CHAT_WEBKIT_DMABUF`, or by setting
+the variable yourself), and the AUR package's dependencies were widened to the
+runtime libraries the published `.deb` actually links against, cross-checked by
+`tools/check-arch-deps.mjs`.
+
+**A long file card no longer drags the message list sideways.** A long file name
+or mime type is a single unbreakable token; the card is capped at
+`min(420px, 85vw)`, so on a phone the mime line widened the card past the column
+and the whole list got a horizontal scrollbar. `.file-name` and `.file-meta` now
+break with `overflow-wrap: anywhere`, pinned by a test that reproduces the
+overflow at 380px when the rule is removed.
+
+**Three bugs found while verifying the above, all fixed.** (1) `showVaultLockScreen`
+referenced an undefined `bioOk` (a leftover from the removed biometric unlock),
+so on the lock screen a `ReferenceError` aborted the entire `DOMContentLoaded`
+boot — nothing after it ran and the app looked half-booted. (2) The Icons panel
+was `id="icon-settings"`, which the page's SVG sprite *already* uses for its gear
+symbol; the tab switch resolves the panel with `getElementById(tab.dataset.tab)`,
+so it found the symbol and the Icons tab never opened. (3) Supplying a
+`progress_callback` to this vendored transformers build makes it read the model
+with a streaming reader that never settles — the model downloaded in full and
+then `pipeline()` hung forever, which is exactly the "stuck on Loading the offline
+speech model…" symptom. The callback is deliberately not passed.
+
 ## In-app file copy, PDF editing, phone-proof document views, honest Copy Text (0.2.32)
 
 **Copying a file finally works inside the app.** The toast "Copying a file to the

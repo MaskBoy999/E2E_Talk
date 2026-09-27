@@ -1,72 +1,289 @@
 /**
- * On-device live captions (1.7, FEATURE_PLAN.md).
+ * Live captions — local, per participant, no network.
  *
- * ===== THE RULE THIS FILE EXISTS TO KEEP =====
+ * ===== WHAT CHANGED AND WHY (read this before touching the file) =====
  *
- * A transcript of a call is a transcript of the call. The plan's exploit review
- * is explicit, and this module is built around it:
+ * This used to work the way speech-to-text usually does: the platform's
+ * recogniser listened to this device's microphone, and the account could opt in
+ * to *publish* its own transcript to everyone else over the call's signal
+ * envelope. Both halves were wrong:
  *
- *   1. The engine must be OFFLINE. Android's SpeechRecognizer defaults to a
- *      NETWORK recogniser, which ships the audio to Google — that would break
- *      E2EE far worse than not having captions at all. So captions are only ever
- *      started through the Android box's on-device recogniser, which is asked to
- *      use EXTRA_PREFER_OFFLINE and is refused outright when the device has no
- *      on-device recogniser installed. Every other platform (desktop box, plain
- *      browser, iOS shell) reports "no offline engine" and captions stay OFF:
- *      there is no code path here that falls back to a remote engine.
+ *   1. Publishing sends text derived from a private call to other people, and
+ *      it only ever described the person who turned it on — everyone else saw
+ *      nothing unless they also had a working recogniser.
+ *   2. The desktop app had no local engine at all, so captions did not exist
+ *      there (the old code refused to fall back to an online service, which was
+ *      the right call and left desktop with nothing).
  *
- *   2. Captions are DISPLAY-ONLY by default. Publishing them to the other
- *      people in the call is a second, separate toggle, off until asked for, and
- *      it goes out over the call's existing E2EE signal envelope
- *      (window.__voiceSendCaption → voice.js), never a new server route.
+ * So captions were rebuilt around what the user actually asked for: turn them
+ * on, and this device transcribes what EVERY participant is saying, from the
+ * audio it already decrypts to play. Concretely:
  *
- *   3. Captions never touch disk, notifications or logs. Lines live in this
- *      module's memory and in the DOM; stopping captions (or leaving the page)
- *      drops them. Nothing here writes to localStorage, and nothing here logs
- *      the text.
+ *   - The engine is a whisper model bundled in the app
+ *     (static/vendor/asr/, see tools/fetch-asr-assets.mjs) and run inside this
+ *     webview by captions-asr-worker.js. `env.allowRemoteModels = false`, no
+ *     CDN, no service: decrypted audio never leaves the device, not even to the
+ *     host machine. Same model on desktop and Android.
+ *   - One transcribing lane per participant. A per-speaker tap
+ *     (attach()) takes the PCM of that person's decrypted stream, gates it on
+ *     energy, and hands ~5 s windows to the worker, so every line is labelled
+ *     with who said it.
+ *   - There is NO publish path any more, and no caption message type: the
+ *     `voice_signal` envelope no longer carries transcripts, so nothing derived
+ *     from a call can be read by anyone but the account that turned captions on.
+ *   - Captions are still never written to disk, never logged, never put in a
+ *     notification: lines live in this module's memory and the DOM, and stopping
+ *     captions (or leaving the page) drops them.
  *
- * What is honest about the coverage: the recogniser hears the MICROPHONE, i.e.
- * what this device's user is saying. Android only lets a system-privileged app
- * (CAPTURE_AUDIO_OUTPUT) capture the remote side of a call, so "captions of
- * everyone else" is not something this implementation claims.
+ * Cost, stated honestly: whisper-tiny on a single wasm thread keeps up with
+ * roughly real time on a desktop CPU and lags a few seconds behind on a phone,
+ * and each participant being transcribed costs one decode. Turns are therefore
+ * transcribed one window at a time per speaker, and a speaker who is talking
+ * while their previous window is still decoding simply skips that window (a
+ * caption that arrives 20 seconds late is worse than a missing one).
  */
-
 (function () {
     'use strict';
 
-    var PLUGIN = 'plugin:box-shell|';
-    var MAX_LINES = 6;
+    var WORKER_URL = 'captions-asr-worker.js?v=1';
+    var CHUNK_SECONDS = 5;        // audio per recognition window
+    var MIN_SPEECH_RMS = 0.006;   // below this the window is silence, not speech
+    var MAX_LINES = 30;
     var MAX_TEXT = 240;
+    var MAX_PENDING = 1;          // windows queued per speaker while one decodes
 
-    var _lines = [];          // { who, text, final, at } — memory only
+    // Whisper is multilingual but needs to be told which language to decode:
+    // transformers.js defaults to English when none is given, so this is a
+    // setting rather than a guess. The list is the languages the model supports
+    // that are plausible for this app's users.
+    var LANGUAGES = [
+        ['en', 'English'], ['ro', 'Romanian'], ['fr', 'French'], ['de', 'German'],
+        ['es', 'Spanish'], ['it', 'Italian'], ['pt', 'Portuguese'], ['nl', 'Dutch'],
+        ['pl', 'Polish'], ['ru', 'Russian'], ['uk', 'Ukrainian'], ['tr', 'Turkish'],
+        ['sv', 'Swedish'], ['da', 'Danish'], ['cs', 'Czech'], ['hu', 'Hungarian'],
+        ['bg', 'Bulgarian'], ['el', 'Greek'], ['fi', 'Finnish'], ['no', 'Norwegian'],
+    ];
+
+    var _lines = [];              // { who, text, final, at } — memory only
     var _running = false;
-    var _status = { available: false, reason: 'unknown', onDevice: false };
-    var _unlisten = null;
+    var _worker = null;
+    var _modelState = 'cold';     // cold | loading | ready | failed
+    var _modelProgress = 0;
+    var _modelError = '';
+    var _speakers = {};           // uid -> Speaker
+    var _selfStream = null;       // optional mic tap
+    var _nextId = 1;
+    var _pending = {};            // request id -> uid
 
-    function bridge() {
-        var t = window.__TAURI__;
-        return (t && t.core && typeof t.core.invoke === 'function') ? t : null;
+    function setting(key, fallback) {
+        try { return localStorage.getItem('captions_' + key) || fallback; } catch (_) { return fallback; }
+    }
+    function saveSetting(key, value) {
+        try { localStorage.setItem('captions_' + key, value); } catch (_) {}
+    }
+    function enabledByDefault() { return setting('enabled', '0') === '1'; }
+    function language() { return setting('language', 'en'); }
+    function includeSelf() { return setting('includeSelf', '0') === '1'; }
+
+    // ─── worker ──────────────────────────────────────────────────────────
+
+    function worker() {
+        if (_worker) return _worker;
+        _worker = new Worker(WORKER_URL, { type: 'module' });
+        _modelState = 'loading';
+        _worker.onmessage = function (ev) {
+            var m = ev && ev.data;
+            if (!m) return;
+            if (m.type === 'progress') {
+                if (typeof m.progress === 'number' && m.progress >= 0) _modelProgress = m.progress;
+                renderStatus();
+                return;
+            }
+            if (m.type === 'ready') {
+                _modelState = 'ready';
+                renderStatus();
+                // Anything that arrived while the model was loading was dropped
+                // on purpose (the first windows of a call are not worth a queue
+                // of stale audio).
+                return;
+            }
+            if (m.type === 'result') {
+                var uid = _pending[m.id];
+                delete _pending[m.id];
+                var s = uid ? _speakers[uid] : null;
+                if (s) s.inflight = false;
+                if (m.text) pushLine((s && s.name) || m.speaker || 'Someone', m.text, true);
+                return;
+            }
+            if (m.type === 'error') {
+                if (m.id && _pending[m.id]) {
+                    var uid2 = _pending[m.id];
+                    delete _pending[m.id];
+                    if (_speakers[uid2]) _speakers[uid2].inflight = false;
+                }
+                if (!m.id) {
+                    _modelState = 'failed';
+                    _modelError = m.message || 'unknown error';
+                    stop();
+                    renderStatus();
+                    if (typeof showToast === 'function') showToast('Captions stopped: ' + _modelError);
+                }
+            }
+        };
+        _worker.onerror = function (e) {
+            _modelState = 'failed';
+            _modelError = (e && e.message) || 'worker failed to start';
+            renderStatus();
+        };
+        _worker.postMessage({ type: 'warm' });
+        return _worker;
     }
 
-    function isAndroidBox() {
-        return !!bridge() && /Android/i.test(navigator.userAgent || '');
+    function rms(samples) {
+        var sum = 0;
+        for (var i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+        return Math.sqrt(sum / (samples.length || 1));
     }
 
-    function invoke(cmd, args) {
-        var b = bridge();
-        if (!b) return Promise.reject(new Error('no bridge'));
-        return b.core.invoke(PLUGIN + cmd, args || {});
+    /** Hand one window of one speaker's audio to the worker. */
+    function transcribe(uid, samples, sampleRate) {
+        var s = _speakers[uid];
+        if (!s) return false;
+        if (s.inflight) return false;               // still decoding the last one
+        if (_modelState === 'cold') worker();
+        if (_modelState !== 'ready') return false;  // nothing to recognise yet
+        var buf = new Float32Array(samples);
+        var id = _nextId++;
+        s.inflight = true;
+        _pending[id] = uid;
+        s.windows++;
+        _worker.postMessage({
+            type: 'transcribe', id: id, speaker: s.name,
+            audio: buf, sampleRate: sampleRate || 16000, language: language(),
+        }, [buf.buffer]);
+        return true;
     }
 
-    function publishEnabled() {
-        try { return localStorage.getItem('captionsPublish') === '1'; } catch (_) { return false; }
+    // ─── per-participant taps ────────────────────────────────────────────
+
+    function displayName(uid) {
+        try {
+            var cache = window.userDisplayNameCache || {};
+            var c = cache[uid];
+            if (c) return c.display_name || c.username || uid;
+        } catch (_) {}
+        try {
+            if (window.myUser && (window.myUser.id === uid) && window.myUser.username) return window.myUser.username;
+        } catch (_) {}
+        return uid ? String(uid).slice(0, 6) : 'Someone';
     }
 
-    function rememberEnabled() {
-        try { return localStorage.getItem('captionsEnabled') === '1'; } catch (_) { return false; }
+    /**
+     * Start transcribing the decrypted audio of one participant.
+     * `stream` is their remote audio MediaStream (voice.js hands it over when the
+     * element sink starts playing it). Idempotent per (uid, stream).
+     */
+    function attach(uid, stream, name) {
+        if (!uid || !stream) return;
+        var existing = _speakers[uid];
+        if (existing && existing.stream === stream) return;
+        if (existing) detach(uid);
+        if (!_running) return;   // remembered; attach() runs again when captions start
+
+        var speaker = { uid: uid, name: name || displayName(uid), stream: stream, windows: 0, inflight: false, buf: [], ctx: null, node: null, src: null, sink: null };
+        _speakers[uid] = speaker;
+
+        try {
+            // A dedicated low-rate context keeps the recognition tap away from
+            // the playback graph (the app's own AudioContext drives the
+            // noise-suppression worklet and master gain; a second consumer of
+            // the same track must not disturb it).
+            var Ctx = window.AudioContext || window.webkitAudioContext;
+            var ctx;
+            try { ctx = new Ctx({ sampleRate: 16000 }); } catch (_) { ctx = new Ctx(); }
+            speaker.ctx = ctx;
+            speaker.src = ctx.createMediaStreamSource(stream);
+            // ScriptProcessorNode: deprecated, but it exists in every webview we
+            // ship (AudioWorklet needs a separate module file and the same
+            // origin/worker permissions, for no benefit here).
+            var node = ctx.createScriptProcessor(4096, 1, 1);
+            speaker.node = node;
+            var sink = ctx.createGain();
+            sink.gain.value = 0;         // never audible: this path only listens
+            speaker.sink = sink;
+            node.onaudioprocess = function (ev) {
+                if (!_running) return;
+                var data = ev.inputBuffer.getChannelData(0);
+                speaker.buf.push(new Float32Array(data));
+                var need = Math.floor(CHUNK_SECONDS * ctx.sampleRate);
+                var have = 0;
+                for (var i = 0; i < speaker.buf.length; i++) have += speaker.buf[i].length;
+                if (have < need) return;
+                var merged = new Float32Array(have);
+                var off = 0;
+                for (var j = 0; j < speaker.buf.length; j++) { merged.set(speaker.buf[j], off); off += speaker.buf[j].length; }
+                speaker.buf = [];
+                if (rms(merged) < MIN_SPEECH_RMS) return;     // silence: never ask the model
+                transcribe(uid, merged, ctx.sampleRate);
+            };
+            speaker.src.connect(node);
+            node.connect(sink);
+            sink.connect(ctx.destination);
+            renderStatus();
+        } catch (e) {
+            // No AudioContext tap (a webview without Web Audio, a stream that is
+            // already gone) — captions just have nothing to hear from this
+            // participant.
+            delete _speakers[uid];
+        }
     }
 
-    // ─── Rendering (display-only) ────────────────────────────────────────
+    function detach(uid) {
+        var s = _speakers[uid];
+        if (!s) return;
+        try { if (s.node) { s.node.onaudioprocess = null; s.node.disconnect(); } } catch (_) {}
+        try { if (s.src) s.src.disconnect(); } catch (_) {}
+        try { if (s.sink) s.sink.disconnect(); } catch (_) {}
+        try { if (s.ctx && s.ctx.close) s.ctx.close(); } catch (_) {}
+        delete _speakers[uid];
+    }
+
+    function detachAll() {
+        Object.keys(_speakers).forEach(detach);
+    }
+
+    /** Attach every remote audio stream the call currently has. */
+    function attachAll() {
+        if (typeof window.__voiceForEachRemoteAudio === 'function') {
+            try { window.__voiceForEachRemoteAudio(function (uid, stream) { attach(uid, stream); }); } catch (_) {}
+        }
+        if (includeSelf()) attachSelf();
+    }
+
+    function attachSelf() {
+        if (_selfStream) return;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+            if (!_running || !includeSelf()) {
+                try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
+                return;
+            }
+            _selfStream = stream;
+            var me = null;
+            try { me = window.myUser && window.myUser.id; } catch (_) {}
+            attach('self', stream, (window.myUser && (window.myUser.display_name || window.myUser.username)) || 'You');
+            void me;
+        }).catch(function () {});
+    }
+
+    function detachSelf() {
+        if (!_selfStream) return;
+        detach('self');
+        try { _selfStream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
+        _selfStream = null;
+    }
+
+    // ─── rendering (display-only) ────────────────────────────────────────
 
     function panel() {
         var el = document.getElementById('captions-panel');
@@ -74,7 +291,7 @@
         el = document.createElement('div');
         el.id = 'captions-panel';
         el.className = 'captions-panel';
-        el.innerHTML = '<div class="captions-head"><span class="captions-title">On-device captions</span>' +
+        el.innerHTML = '<div class="captions-head"><span class="captions-title">Captions — on this device</span>' +
             '<span class="captions-badge" id="captions-mode"></span></div>' +
             '<div class="captions-lines" id="captions-lines"></div>';
         document.body.appendChild(el);
@@ -92,15 +309,14 @@
                 '<span class="captions-text">' + window.escapeHtml(l.text) + '</span></div>';
         }
         el.innerHTML = html;
+        el.scrollTop = el.scrollHeight;
         var mode = document.getElementById('captions-mode');
-        if (mode) mode.textContent = publishEnabled() ? 'published to the call' : 'this device only';
+        if (mode) mode.textContent = language().toUpperCase() + ' · local';
     }
 
     function pushLine(who, text, isFinal) {
         if (!text) return;
         var last = _lines[_lines.length - 1];
-        // The recogniser re-sends a growing hypothesis for the same utterance;
-        // replace it rather than stacking a line per keystroke of speech.
         if (last && last.who === who && !last.final) {
             last.text = String(text).slice(0, MAX_TEXT);
             last.final = !!isFinal;
@@ -108,180 +324,138 @@
             _lines.push({ who: who, text: String(text).slice(0, MAX_TEXT), final: !!isFinal, at: Date.now() });
         }
         while (_lines.length > MAX_LINES) _lines.shift();
-        // The panel must exist for ANY line, including a peer's published
-        // caption: receiving needs no engine on this device (their publish is
-        // their opt-in; hiding it behind our own mic would make publishing
-        // useless to anyone without an offline recogniser).
         panel();
         renderLines();
-        if (_lines.length) {
-            var p = document.getElementById('captions-panel');
-            if (p) p.classList.add('captions-open');
-        }
-    }
-
-    /** Called by voice.js for a caption another member published. */
-    window.__captionsShowRemote = function (fromUid, signal) {
-        if (!signal || !signal.text) return;
-        var name = 'Someone';
-        try {
-            var cache = window.userDisplayNameCache || {};
-            var c = cache[fromUid];
-            name = (c && (c.display_name || c.username)) || (fromUid ? String(fromUid).slice(0, 6) : 'Someone');
-        } catch (_) {}
-        pushLine(name, signal.text, signal.final);
-    };
-
-    // ─── Engine gate ─────────────────────────────────────────────────────
-
-    /**
-     * Ask the box whether an OFFLINE recogniser exists. Everything that is not
-     * the Android box answers "no": there is no desktop engine in this build
-     * (a bundled whisper.cpp module is what the plan calls for and it is not
-     * part of this implementation), and saying so is the only honest answer.
-     */
-    async function engineStatus(force) {
-        if (!force && _status.reason !== 'unknown') return _status;
-        if (!isAndroidBox()) {
-            _status = {
-                available: false,
-                onDevice: false,
-                reason: /Android/i.test(navigator.userAgent || '') ? 'no-offline-recognizer' : 'not-android',
-            };
-            return _status;
-        }
-        try {
-            var r = await invoke('captionsAvailable');
-            _status = {
-                available: !!(r && r.available),
-                onDevice: !!(r && r.onDevice),
-                reason: (r && r.reason) || ((r && r.available) ? '' : 'no-offline-recognizer'),
-            };
-        } catch (_) {
-            _status = { available: false, onDevice: false, reason: 'bridge-error' };
-        }
-        return _status;
-    }
-
-    function reasonText(s) {
-        if (s.available) return 'On-device speech recognition is available. Captions stay on this device unless you publish them.';
-        if (s.reason === 'not-android') return 'On-device captions need the Android app (this build has no offline speech engine for this platform, and captions are never sent to an online one).';
-        if (s.reason === 'bridge-error') return 'The on-device recogniser could not be reached.';
-        return 'This device has no offline speech recogniser installed, so captions cannot run without sending audio off the device — which this app will not do.';
-    }
-
-    async function start() {
-        var st = await engineStatus(true);
-        if (!st.available) return false;   // fail closed: no offline engine, no listening
-        try {
-            await invoke('captionsStart');
-        } catch (_) {
-            return false;
-        }
-        _running = true;
-        var el = panel();
-        el.classList.add('captions-open');
-        renderLines();
-        // Recognised text arrives as plugin events; no polling, no persistence.
-        try {
-            var b = bridge();
-            if (b && b.event && typeof b.event.listen === 'function' && !_unlisten) {
-                _unlisten = await b.event.listen('box:caption', function (ev) {
-                    var p = ev && ev.payload;
-                    if (!p || !p.text) return;
-                    pushLine('You', p.text, p.final);
-                    // Publishing is a SEPARATE opt-in; the default is display-only.
-                    if (p.final && publishEnabled() && typeof window.__voiceSendCaption === 'function') {
-                        window.__voiceSendCaption(p.text, true);
-                    }
-                });
-            }
-        } catch (_) {}
-        refreshUi();
-        return true;
-    }
-
-    async function stop() {
-        _running = false;
-        try {
-            if (isAndroidBox()) await invoke('captionsStop');
-        } catch (_) {}
-        try { if (typeof _unlisten === 'function') _unlisten(); } catch (_) {}
-        _unlisten = null;
-        var el = document.getElementById('captions-panel');
-        if (el) el.classList.remove('captions-open');
-        // Captions are the most sensitive thing this file touches: dropping them
-        // on stop is the point (they are never written down in the first place).
-        _lines = [];
-        renderLines();
-        refreshUi();
-        return true;
+        var p = document.getElementById('captions-panel');
+        if (p) p.classList.add('captions-open');
     }
 
     function refreshUi() {
         var t = document.getElementById('captions-toggle');
-        var p = document.getElementById('captions-publish-toggle');
+        var selfToggle = document.getElementById('captions-self-toggle');
+        var langSel = document.getElementById('captions-language');
         var line = document.getElementById('captions-status');
         if (t) t.checked = _running;
-        if (p) {
-            p.checked = publishEnabled();
-            p.disabled = !_running;
-        }
-        if (line) {
-            var s = _status;
-            line.textContent = _running
-                ? 'Listening on this device — ' + (publishEnabled() ? 'your lines are published to the call.' : 'your lines are shown to you only.')
-                : reasonText(s);
-        }
+        if (selfToggle) { selfToggle.checked = includeSelf(); selfToggle.disabled = !_running; }
+        if (langSel) langSel.value = language();
+        if (line) line.textContent = statusText();
         var panelEl = document.getElementById('captions-panel');
-        // Open while listening OR while there are lines to read (a published
-        // line from a peer shows even when this device's engine is off).
         if (panelEl) panelEl.classList.toggle('captions-open', _running || _lines.length > 0);
     }
 
+    function renderStatus() { refreshUi(); }
+
+    function statusText() {
+        if (_modelState === 'loading') {
+            var pct = _modelProgress ? ' (' + _modelProgress + '%)' : '';
+            return 'Loading the offline speech model' + pct + ' — it ships with the app, nothing is downloaded from the internet.';
+        }
+        if (_modelState === 'failed') return 'The offline speech model could not start: ' + (_modelError || 'unknown error') + '.';
+        if (!_running) {
+            return 'Captions run fully on this device with the speech model bundled in the app. ' +
+                'Nothing — no audio and no text — is sent to anyone, including the other people on the call.';
+        }
+        var n = Object.keys(_speakers).length;
+        var total = 0;
+        Object.keys(_speakers).forEach(function (uid) { total += _speakers[uid].windows; });
+        return 'Transcribing ' + n + ' participant' + (n === 1 ? '' : 's') + ' on this device (' + language().toUpperCase() +
+            '). ' + total + ' window' + (total === 1 ? '' : 's') + ' decoded. Nothing leaves this device.';
+    }
+
+    // ─── start / stop ────────────────────────────────────────────────────
+
+    function start() {
+        if (_running) return true;
+        _running = true;
+        worker();                 // begins loading the model (cached by the webview)
+        attachAll();
+        panel().classList.add('captions-open');
+        renderStatus();
+        renderLines();
+        return true;
+    }
+
+    function stop() {
+        _running = false;
+        detachAll();
+        detachSelf();
+        var el = document.getElementById('captions-panel');
+        if (el) el.classList.remove('captions-open');
+        // Captions are the most sensitive thing this file touches: dropping them
+        // on stop is the point (they were never written down in the first place).
+        _lines = [];
+        renderLines();
+        renderStatus();
+        return true;
+    }
+
     window.__captions = {
-        status: function () { return _status; },
-        probe: function () { return engineStatus(true).then(function (s) { refreshUi(); return s; }); },
         start: start,
         stop: stop,
         isRunning: function () { return _running; },
+        attach: attach,
+        detach: detach,
         lines: function () { return _lines.slice(); },
-        publishEnabled: publishEnabled,
-        refreshUi: refreshUi,
+        language: language,
+        languages: LANGUAGES,
+        setLanguage: function (code) {
+            saveSetting('language', code);
+            refreshUi();
+        },
+        includeSelf: includeSelf,
+        setIncludeSelf: function (on) {
+            saveSetting('includeSelf', on ? '1' : '0');
+            if (on && _running) attachSelf();
+            if (!on) detachSelf();
+            refreshUi();
+        },
+        modelState: function () { return { state: _modelState, progress: _modelProgress, error: _modelError }; },
+        speakers: function () { return Object.keys(_speakers); },
+        // Test hook: push PCM through the exact path a real participant's tap
+        // uses (energy gate -> worker -> labelled line) without needing a live
+        // call. Used by tests/captions-local.spec.ts.
+        _feedForTest: function (uid, name, audio, sampleRate) {
+            var s = _speakers[uid];
+            if (!s) { s = { uid: uid, name: name || uid, stream: null, windows: 0, inflight: false, buf: [] }; _speakers[uid] = s; }
+            s.name = name || s.name;
+            if (rms(audio) < MIN_SPEECH_RMS) return false;
+            return transcribe(uid, audio, sampleRate || 16000);
+        },
+        _setModelReadyForTest: function () { _modelState = 'ready'; },
     };
 
     document.addEventListener('DOMContentLoaded', function () {
         var t = document.getElementById('captions-toggle');
-        var p = document.getElementById('captions-publish-toggle');
+        var selfToggle = document.getElementById('captions-self-toggle');
+        var langSel = document.getElementById('captions-language');
+
+        if (langSel) {
+            langSel.innerHTML = LANGUAGES.map(function (l) {
+                return '<option value="' + l[0] + '">' + l[1] + '</option>';
+            }).join('');
+            langSel.value = language();
+            langSel.addEventListener('change', function () { window.__captions.setLanguage(this.value); });
+        }
         if (t) {
-            t.addEventListener('change', async function () {
-                try { localStorage.setItem('captionsEnabled', this.checked ? '1' : '0'); } catch (_) {}
+            t.addEventListener('change', function () {
                 if (this.checked) {
-                    var ok = await start();
-                    if (!ok) {
-                        this.checked = false;
-                        try { localStorage.setItem('captionsEnabled', '0'); } catch (_) {}
-                        if (typeof showToast === 'function') showToast(reasonText(_status));
-                    }
+                    saveSetting('enabled', '1');
+                    start();
                 } else {
-                    await stop();
+                    saveSetting('enabled', '0');
+                    stop();
                 }
-                refreshUi();
             });
         }
-        if (p) {
-            p.addEventListener('change', function () {
-                try { localStorage.setItem('captionsPublish', this.checked ? '1' : '0'); } catch (_) {}
-                renderLines();
-                refreshUi();
-            });
+        if (selfToggle) {
+            selfToggle.addEventListener('change', function () { window.__captions.setIncludeSelf(this.checked); });
         }
-        // Probe once so the toggle starts with the truth, and honour a previous
-        // "on" only when an offline engine is actually there.
-        engineStatus(true).then(function (s) {
-            if (t) t.disabled = false;
-            refreshUi();
-            if (rememberEnabled() && s.available) start();
-        });
+        // Honour a previous "on", but never before the user is in the app.
+        if (enabledByDefault()) {
+            var t2 = document.getElementById('captions-toggle');
+            if (t2) t2.checked = true;
+            start();
+        }
+        refreshUi();
     });
 })();

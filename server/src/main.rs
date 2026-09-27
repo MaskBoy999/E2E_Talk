@@ -322,7 +322,12 @@ async fn serve_static(
             // matter what artwork they contained.
             let mime = if path.ends_with(".html") {
                 "text/html"
-            } else if path.ends_with(".js") {
+            } else if path.ends_with(".js") || path.ends_with(".mjs") {
+                // .mjs matters: the bundled offline speech runtime
+                // (static/vendor/asr/*.mjs) is loaded as an ES module, and
+                // `nosniff` means an octet-stream response is refused outright --
+                // which also means the extension must never be dropped from this
+                // list without captions breaking again.
                 "application/javascript"
             } else if path.ends_with(".css") {
                 "text/css"
@@ -643,6 +648,10 @@ async fn main() {
         .route("/api/user-css/slots", get(handlers::get_css_slots))
         .route("/api/user-css/slot/{slot}", put(handlers::save_css_slot).delete(handlers::delete_css_slot))
         .route("/api/user-css/active", put(handlers::set_css_active_slot))
+        // F15: user custom UI icon slots (app-only settings tab)
+        .route("/api/user-icons/slots", get(handlers::get_icon_slots))
+        .route("/api/user-icons/slot/{slot}", put(handlers::save_icon_slot).delete(handlers::delete_icon_slot))
+        .route("/api/user-icons/active", put(handlers::set_icon_active_slot))
 
         .route("/api/channels/{channel_id}", delete(handlers::delete_channel))
         // E2E blind-index message search (GET query + client token-index backfill)
@@ -773,6 +782,8 @@ async fn main() {
         .route("/api/files/init", post(handlers::init_file_upload))
         .route("/api/files/{file_id}/chunk/{index}", post(handlers::upload_file_chunk))
         .route("/api/files/{file_id}/complete", post(handlers::complete_file_upload))
+        // Cancel a cancelled upload: drops the record + every chunk written so far.
+        .route("/api/files/{file_id}", delete(handlers::cancel_file_upload))
         .route("/api/files/{file_id}/download", get(handlers::download_file))
         .route("/api/files/by-hash/{hash}/download", get(handlers::download_file_by_hash))
         // Phase 10: Server Stickers

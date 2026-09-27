@@ -1980,3 +1980,48 @@ closes §13.16's open gap: the copy is made from the app's own
 `copyFileToOsClipboard` in the real window and verified with PowerShell's
 `Get-Clipboard -Format FileDropList`, byte for byte, in the app's own clipboard
 folder.
+
+### 13.18 Real cancel, deletes that leave nothing, icon packs, on-device captions, an Arch window that paints — v0.2.33
+
+Five user-visible fixes, plus three bugs found while verifying them. Each one
+had a plausible-looking implementation that did not do what it said.
+
+| Claim | What was actually true | Fix |
+|---|---|---|
+| **Cancel** stops an upload | it only flipped a flag the chunk loop checked, so the in-flight request finished, the `files` row remained and every written chunk stayed on disk forever | an `AbortController` threaded through init/chunk/complete, plus `DELETE /api/files/{id}` (owner-only, and it refuses a file a message already references), which drops the record and `remove_dir_all`s the chunk directory |
+| Deleting a **server/channel/DM/account** removes it | six paths, six different `DELETE` lists, each missing rows with no FK (`voice_sessions`/`voice_participants`, `role_overwrites`, `conversation_profile_data`, `soundboard_*`) and **all of them missing the encrypted attachments on disk** | one `delete_server_rows_c` / `delete_channel_inner` / `delete_dm_channel_rows_c` / `delete_user_rows` that every path calls, each returning the file references it found so they are shredded |
+| The **Icons** tab works on desktop | the panel's `id` was `icon-settings`, which the SVG sprite already owns for its gear symbol; the tab switch resolves the panel with `getElementById(tab.dataset.tab)` and found the symbol, so the tab never opened | the panel is `icon-packs-settings`, distinct from every sprite symbol |
+| **Captions** load the bundled model | supplying a `progress_callback` makes this vendored transformers build read the model with a streaming reader that never settles — the model downloaded in full and `pipeline()` hung forever | the callback is deliberately not passed (`dtype: 'q8'` string, not the per-component object); the UI shows the loading state until the promise resolves |
+| The **Arch** package launches | it opened a grey window: WebKitGTK's DMA-BUF renderer fails on many drivers and leaves an empty surface | `WEBKIT_DISABLE_DMABUF_RENDERER=1` is set before any webview exists, with `E2E_CHAT_WEBKIT_DMABUF` as the opt-in escape hatch; the AUR dependencies were widened to what the published `.deb` links against and cross-checked by `tools/check-arch-deps.mjs` |
+
+Two defects fell out of the deletion work and are worth recording because both
+were silent. `delete_message_inner` called `delete_file_record` — a method that
+takes the same `std::sync::Mutex` — **while still holding the guard**. A
+`std::sync::Mutex` is not reentrant, so deleting any message with an attachment
+stopped the entire server: the thread waited on a lock it already held and every
+other database operation, from every connection, queued behind it. And the
+chunk cleanup used `remove_dir`, which fails on a non-empty directory — a
+cancelled or crashed upload leaves exactly that, so the ciphertext stayed on
+disk with no row to point at it. The tests in `db.rs` assert on the directory as
+well as the row for this reason.
+
+A third silent one was found in the box: `showVaultLockScreen` referenced an
+undefined `bioOk` (a leftover from the removed biometric unlock). On the vault
+lock screen that `ReferenceError` aborted the whole `DOMContentLoaded` boot, so
+nothing after it ran — the app-only settings tabs were never revealed and the
+page looked half-booted. It is a one-line fix with an outsized blast radius,
+which is why it is called out here.
+
+**Verification.** `tests/upload-cancel-overflow.spec.ts` cancels a real 8 MB
+upload mid-transfer, asserts the upload rejects, and polls the download endpoint
+until it 404s for the file the server had already accepted; the same file also
+pins the file-card overflow fix, and its layout assertions were run against the
+un-fixed CSS to prove they fail when the rule is removed. Eight `db.rs` tests
+drive a real SQLite database with real chunk files on disk. Captions are pinned
+by `tests/captions-local.spec.ts` (real speech through the real worker, with the
+speaker label, the energy gate and "no request leaves the origin" all asserted)
+and by `tests/desktop-box-tabs.spec.ts`, which runs the same transcription inside
+the real box window over CDP. The app-only gate itself is pinned by
+`tests/app-only-tabs.spec.ts`, which injects the Tauri bridge into a normal
+browser: with it the Icons and Connection tabs appear and the panel opens,
+without it both stay hidden.

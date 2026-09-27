@@ -17,7 +17,13 @@ pkgdesc='End-to-end encrypted chat with voice, video and screen share (prebuilt 
 arch=('x86_64')
 url='https://github.com/MaskBoy999/E2E_Talk'
 license=('ISC')
-depends=('cairo' 'desktop-file-utils' 'gdk-pixbuf2' 'glib2' 'gtk3' 'hicolor-icon-theme' 'libayatana-appindicator' 'libsoup3' 'pango' 'webkit2gtk-4.1')
+# Every entry here is load-bearing and cross-checked against the published .deb
+# by tools/check-arch-deps.mjs: gtk3/webkit2gtk-4.1/libsoup3/libayatana-appindicator
+# are the binary's own shared libraries, cairo/glib2/pango/gdk-pixbuf2 are what
+# GTK and WebKit link against, dbus is the session bus libwebkit's network process
+# needs, and librsvg is GTK's SVG loader (without it GTK silently drops every SVG
+# icon it is asked to render). Keep this on ONE line.
+depends=('cairo' 'dbus' 'desktop-file-utils' 'gdk-pixbuf2' 'glib2' 'gtk3' 'hicolor-icon-theme' 'libayatana-appindicator' 'librsvg' 'libsoup3' 'pango' 'webkit2gtk-4.1')
 options=('!strip')
 install=e2e-chat-bin.install
 # The exact asset name Tauri publishes (verified against the published release),

@@ -120,7 +120,7 @@ Effort letters are from `FEATURE_RESEARCH.md`. Verdict key:
 | 1.4 Audio focus | Your music pauses when a call starts, notifications duck | ✅ | OS audio-policy negotiation only. |
 | 1.5 Self-managed ConnectionService | The call appears in the system dialer/recents and answers from car/Wear/headset buttons | ⚠️ | System recents now show *who called*. Only the plaintext `@username` may be used as the call's "number"/display — never a display name (R1). Self-managed accounts don't write the telephony call log; the Dialer's recents entry is still an OS-held copy of call metadata (caller + time), which is server-known and accepted. |
 | 1.6 VAD / hold-to-talk | Mic only opens while you speak (energy gate in the existing worklet) | ✅ | Local DSP. Also *reduces* exposure: less ambient audio captured. |
-| 1.7 On-device live captions | Whisper/`SpeechRecognizer` transcribes the call **on the device** — no audio ever leaves | ✅ (preserves E2EE — this is the point) | Exploit review: (a) engine must be **offline** — Android's `SpeechRecognizer` in network mode ships audio to Google → require `EXTRA_PREFER_OFFLINE`; whisper.cpp is local by nature. (b) Captions are display-only by default; **publishing** to peers is a second explicit toggle and rides the existing E2EE data channel. (c) Captions must never enter notifications or logs (R3). |
+| 1.7 On-device live captions | Whisper/`SpeechRecognizer` transcribes the call **on the device** — no audio ever leaves | ✅ (preserves E2EE — this is the point) | Exploit review: (a) engine must be **offline** — Android's `SpeechRecognizer` in network mode ships audio to Google → require `EXTRA_PREFER_OFFLINE`; the shipped whisper model is bundled with the app and loaded with `allowRemoteModels = false`, so it is local by construction. (b) Captions are **display-only, full stop**: there is no publish path — no `publish` toggle, no caption event on the wire, and a caption event from an older client is ignored rather than shown. The model transcribes every participant's *already-decrypted* audio on the device, so a transcript cannot reach anyone. (c) Captions must never enter notifications or logs (R3) and are dropped from memory the moment they are turned off. |
 | 1.8 Connection-quality overlay | ping/jitter/loss per peer, to debug "it sounds bad" | ✅ | Reads `getStats()` locally. Don't put peer names into any OS notification — panel is in-app. |
 
 ### §2 Notifications and system presence
@@ -235,7 +235,7 @@ with random topics (R6); diagnostics and logs ship scrubbed (R3).
 **Sprint 3 — "nobody else can do this":** 5.1, 5.4, 5.7, 1.7, 7.3 — each L,
 each strengthens or preserves E2EE, each needing its at-rest story (R5):
 biometric via Keystore, verification codes in-app only, FTS5 bounded +
-wipe-covered, captions offline + publish-is-opt-in, LiveKit with the
+wipe-covered, captions fully offline with no publish path at all, LiveKit with the
 fail-closed signaling guarantee intact.
 
 **Deferred / requires a security decision first:** 4.5 (Discord presence —
@@ -261,7 +261,7 @@ the spec that goes red if it regresses. Run one with
 | **1.3** | The output picker is a real control over the OS output devices (`audioRoutes` / `setAudioRoute`) | `batch-b.spec.ts` |
 | **1.4** | The call requests transient audio focus (music pauses, notifications duck) and abandons it on teardown | `android-plugin-startup.spec.ts` |
 | **1.6** | Speak-only rides the existing RNNoise energy gate (never a second detector, never a mode it cannot gate); hold-to-talk keeps the mic track disabled until held — a gate, not a mute — and a server mute wins | `voice-activation.spec.ts` |
-| **1.7** | On-device captions: an **offline** engine only (no engine ⇒ captions refuse and say why, and `captionsStart` is never invoked, so no recogniser is handed the mic); display-only by default; publishing a second opt-in over the call channel, finals only; never on disk, in the console or in notifications | `captions.spec.ts` |
+| **1.7** | On-device captions: the bundled whisper model (served by the user's own server, `allowRemoteModels = false`) transcribes **every participant's already-decrypted audio** in a module worker, energy-gated into windows and labelled with the speaker; nothing is published (the publish path and toggle are gone, and a `caption` event from an older client is ignored); never on disk, in the console or in notifications, and dropped from memory on stop | `captions.spec.ts`, `captions-local.spec.ts` |
 | **1.8** | Per-peer ping / rtt / jitter beside frames, loss and E2EE transform counts in the diagnostics panel — in-app only, ids and numbers | `voice-diag.spec.ts` |
 | **2.3** | Quick Settings tile: literal labels only ("Mute"/"Unmute"/"Answer"/"E2E Chat"), boolean state, forwards the same verbs as the notification buttons | `batch-b.spec.ts` |
 | **2.6** | The message chime is ringer/DND-aware; Settings' "Test sound" deliberately bypasses the gate | `quiet-hours.spec.ts` |

@@ -164,6 +164,31 @@ function setDmChannelId(id) {
 }
 let isUploading = false;
 let _uploadAbortController = null;
+// Cancel must be real: the batch the user is uploading is only ever referenced
+// by a message once EVERY file in it finished and the message went out, so
+// cancelling has to delete whatever already reached the server. These track the
+// ids needed to do that (per-batch, plus the one currently in flight so an
+// abort mid-chunk still gets purged).
+let _uploadCancelled = false;
+let _uploadBatchFileIds = [];
+let _uploadInFlightFileId = null;
+// The sticker/GIF/emoji uploader has its own controller for the same reason.
+let _stickerUploadAbort = null;
+
+/**
+ * Delete file records the server still holds for a cancelled upload.
+ * Fire-and-forget: the user already moved on, and the server refuses to delete
+ * anything a message references, so a late call can never break a sent message.
+ */
+function _purgeUploadFiles(ids) {
+    (ids || []).forEach(function (id) {
+        if (!id) return;
+        try {
+            authFetch('/api/files/' + encodeURIComponent(id), { method: 'DELETE' })
+                .catch(function () {});
+        } catch (_) {}
+    });
+}
 let isSendingSticker = false;
 let selectedFiles = [];
 let currentServerMemberList = [];
@@ -3723,7 +3748,12 @@ function showVaultLockScreen() {
         }
     });
 
-    if (input && !bioOk) input.focus();
+    // Focus the password field. (This used to be `!bioOk` — a leftover from the
+    // biometric unlock that was removed; the undefined name threw a
+    // ReferenceError here, which aborted the whole DOMContentLoaded boot on the
+    // lock screen, so NOTHING after it ran: the box's app-only settings tabs
+    // never got revealed and the page looked half-booted.)
+    if (input) input.focus();
 }
 
 window.__vaultShowLock = showVaultLockScreen;
@@ -4446,6 +4476,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 var cc = document.getElementById('custom-css-editor-container');
                 if (cc) renderCustomCssSettings(cc);
             }
+            // F15: custom icon packs — repaint from the server on every open so
+            // the grid and the slot list always match what is stored.
+            // NOTE: the panel id must stay distinct from the SVG sprite symbol
+            // (there is already a `#icon-settings` gear in the sprite), because
+            // the tab switch below looks the panel up with
+            // `getElementById(tab.dataset.tab)` and would otherwise find the
+            // symbol and leave the panel hidden.
+            if (tab.dataset.tab === 'icon-packs-settings' && window.IconPacks && typeof window.IconPacks.renderTab === 'function') {
+                var ic = document.getElementById('icon-settings-container');
+                if (ic) window.IconPacks.renderTab(ic);
+            }
         });
     });
 
@@ -4453,6 +4494,16 @@ document.addEventListener('DOMContentLoaded', () => {
     // and reopens the setup screen to change it. The Android box has no tray
     // menu, so without this the address could only be changed by wiping app data
     // (a plain browser simply never reveals the tab).
+    // Box app only: the Icons tab (F15). A pack is applied to this app's sprite
+    // and stored encrypted for the account; the same gate as Connection applies,
+    // so the tab exists only where the app runs (desktop box / Android).
+    (function initIconSettingsTab() {
+        const iconTab = document.getElementById('icon-settings-tab');
+        const tauri = window.__TAURI__;
+        if (!iconTab || !tauri || !tauri.core || !tauri.core.invoke) return;
+        iconTab.style.display = '';
+    })();
+
     (function initConnectionSettings() {
         const connTab = document.getElementById('connection-settings-tab');
         const tauri = window.__TAURI__;
@@ -8350,6 +8401,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (local) applyCustomCss(local);
         }
     })();
+    // F15: Apply the account's active custom icon pack (decrypted locally with
+    // the identity key; the server only ever held ciphertext).
+    if (window.IconPacks && typeof window.IconPacks.init === 'function') {
+        window.IconPacks.init();
+    }
     requestNotificationPermission();
     setupMentionAutocomplete();
     initMentionsInbox();
@@ -9026,6 +9082,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     
     document.getElementById('file-input').addEventListener('change', handleFileSelect);
+    // Cancel closes the modal when nothing is running and really cancels the
+    // upload when something is (closeUploadModal routes to cancelUpload).
     document.getElementById('cancel-upload').addEventListener('click', closeUploadModal);
 
     // Upload quick action buttons
@@ -25387,6 +25445,14 @@ function renderUploadPreview() {
 }
 
 function closeUploadModal() {
+    // Closing mid-upload IS cancelling it — the X, the backdrop and the Cancel
+    // button all land here, and every one of them has to stop the transfer and
+    // throw away what it already sent.
+    if (isUploading) { cancelUpload(); return; }
+    _closeUploadModalNow();
+}
+
+function _closeUploadModalNow() {
     const modal = document.getElementById('upload-modal');
     const previewEl = document.getElementById('upload-preview');
     if (previewEl) {
@@ -27433,6 +27499,12 @@ async function uploadFileToServer(file) {
         throw new Error(magicErr);
     }
 
+    // One signal for the whole batch: an aborted request rejects immediately, so
+    // Cancel stops the transfer instead of only flipping a flag the next loop
+    // iteration would have noticed.
+    var signal = _uploadAbortController ? _uploadAbortController.signal : undefined;
+    var file_id = null;
+
     const fileKey = E2ECrypto.generateFileKey();
     const fileKeyB64 = E2ECrypto.arrayBufferToBase64(fileKey);
 
@@ -27440,45 +27512,59 @@ async function uploadFileToServer(file) {
     var rawMime = getCorrectMimeType(file.name, file.type) || 'application/octet-stream';
     var encMime = E2ECrypto.aeadEncrypt(rawMime, fileKey);
 
-    const initRes = await authFetch('/api/files/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            size: file.size,
-            encrypted_mime: encMime.ciphertext,
-            mime_nonce: encMime.nonce
-        })
-    });
-    if (!initRes.ok) {
-        const err = await initRes.json();
-        throw new Error(err.error || 'Failed to initialize upload');
-    }
-    const { file_id } = await initRes.json();
-
-    const CHUNK_SIZE = 64 * 1024;
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-    for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunkData = new Uint8Array(await file.slice(start, end).arrayBuffer());
-        const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData, i);
-        const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
+    try {
+        const initRes = await authFetch('/api/files/init', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: encryptedChunk
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                size: file.size,
+                encrypted_mime: encMime.ciphertext,
+                mime_nonce: encMime.nonce
+            }),
+            signal: signal
         });
-        if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
+        if (!initRes.ok) {
+            const err = await initRes.json();
+            throw new Error(err.error || 'Failed to initialize upload');
+        }
+        file_id = (await initRes.json()).file_id;
+        _uploadInFlightFileId = file_id;
+
+        const CHUNK_SIZE = 64 * 1024;
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+        for (let i = 0; i < totalChunks; i++) {
+            if (_uploadCancelled) throw new Error('Upload cancelled');
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunkData = new Uint8Array(await file.slice(start, end).arrayBuffer());
+            const encryptedChunk = E2ECrypto.encryptFileChunk(fileKey, chunkData, i);
+            const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: encryptedChunk,
+                signal: signal
+            });
+            if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
+        }
+
+        const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST', signal: signal });
+        if (!completeRes.ok) throw new Error('Failed to finalize upload');
+
+        return {
+            type: 'file', file_id, filename: file.name,
+            mime_type: getCorrectMimeType(file.name, file.type) || 'application/octet-stream',
+            file_size: file.size, file_key: fileKeyB64
+        };
+    } catch (err) {
+        // Nothing was posted anywhere yet, so the bytes already on the server are
+        // garbage: delete the record and forget them. Without this the cancel was
+        // purely cosmetic and the partial upload sat there forever.
+        if (file_id) _purgeUploadFiles([file_id]);
+        throw err;
+    } finally {
+        if (_uploadInFlightFileId === file_id) _uploadInFlightFileId = null;
     }
-
-    const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST' });
-    if (!completeRes.ok) throw new Error('Failed to finalize upload');
-
-    return {
-        type: 'file', file_id, filename: file.name,
-        mime_type: getCorrectMimeType(file.name, file.type) || 'application/octet-stream',
-        file_size: file.size, file_key: fileKeyB64
-    };
 }
 
 async function startFileUpload() {
@@ -27489,6 +27575,8 @@ async function startFileUpload() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     isUploading = true;
+    _uploadCancelled = false;
+    _uploadBatchFileIds = [];
     _uploadAbortController = new AbortController();
     const confirmBtn = document.getElementById('confirm-upload');
     const progressContainer = document.getElementById('upload-progress-container');
@@ -27515,6 +27603,10 @@ async function startFileUpload() {
             progressFill.style.width = Math.round(((uploadedFiles) / totalFiles) * 100) + '%';
             var transformedFile = await _applyUploadTransformsToFile(file, fi);
             const payload = await uploadFileToServer(transformedFile);
+            // Remember it: if the user cancels later in this batch, every file
+            // that already finished has to be deleted too, because no message
+            // references any of them yet.
+            if (payload && payload.file_id) _uploadBatchFileIds.push(payload.file_id);
             filePayloads.push(payload);
             uploadedFiles++;
             progressFill.style.width = Math.round((uploadedFiles / totalFiles) * 100) + '%';
@@ -27605,14 +27697,49 @@ async function startFileUpload() {
             }
         }
 
+        // The message now owns these files; they are no longer cancellable. The
+        // flag must be cleared BEFORE closeUploadModal, which treats a close
+        // while uploading as a cancel.
+        _uploadBatchFileIds = [];
+        isUploading = false;
         closeUploadModal();
     } catch (err) {
+        if (_uploadCancelled || (err && err.name === 'AbortError') || !isUploading) {
+            // Cancelled by the user: the in-flight file was purged by
+            // uploadFileToServer, the finished ones are purged here, and the
+            // modal is already gone — so no error banner.
+            _purgeUploadFiles(_uploadBatchFileIds);
+            _uploadBatchFileIds = [];
+            isUploading = false;
+            return;
+        }
         console.error('File upload failed:', err);
         errorEl.textContent = err.message || 'Upload failed';
         errorEl.style.display = 'block';
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Retry';
     }
+}
+
+/**
+ * Cancel an in-flight upload batch for real: abort the transfer, delete every
+ * file that already reached the server (in-flight and finished), then close the
+ * modal. Nothing was sent to a channel or DM, so nothing should remain.
+ */
+function cancelUpload() {
+    _uploadCancelled = true;
+    isUploading = false;   // stops the batch loop at its next check
+    const batch = _uploadBatchFileIds.slice();
+    _uploadBatchFileIds = [];
+    // The in-flight file is not in `batch` until it finishes, so it is purged by
+    // uploadFileToServer's own catch (which runs because of this abort).
+    if (_uploadAbortController) {
+        try { _uploadAbortController.abort(); } catch (_) {}
+        _uploadAbortController = null;
+    }
+    _purgeUploadFiles(batch);
+    _closeUploadModalNow();
+    if (typeof showToast === 'function') showToast('Upload cancelled');
 }
 
 function buildFileCardHtml(fileData) {
@@ -30861,6 +30988,9 @@ function setupStickerUploadModal() {
 
     if (cancelBtn) {
         cancelBtn.addEventListener('click', () => {
+            // Cancel during the transfer stops it and deletes the partial file.
+            var stickerFile = _stickerUploadAbort;
+            if (stickerFile) { try { stickerFile.abort(); } catch (_) {} }
             document.getElementById('sticker-upload-modal').style.display = 'none';
             resetStickerUpload();
         });
@@ -31091,6 +31221,12 @@ async function processAndUploadSticker() {
     if (progressText) progressText.textContent = 'Processing image...';
     if (progressFill) progressFill.style.width = '2%';
 
+    // Abortable like the attachment uploader: cancelling the sticker/GIF/emoji
+    // upload must stop the transfer and delete the file it already created.
+    _stickerUploadAbort = new AbortController();
+    var stickerSignal = _stickerUploadAbort.signal;
+    var stickerFileId = null;
+
     try {
         const img = stickerCropState.image;
         const originalFile = stickerCropState.file;
@@ -31161,10 +31297,12 @@ async function processAndUploadSticker() {
         const initRes = await authFetch('/api/files/init', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ size: blob.size })
+            body: JSON.stringify({ size: blob.size }),
+            signal: stickerSignal
         });
         if (!initRes.ok) { const errText = await initRes.text(); console.error('Upload init failed:', initRes.status, errText); throw new Error('Failed to initialize upload (HTTP ' + initRes.status + ')'); }
         const { file_id } = await initRes.json();
+        stickerFileId = file_id;
 
         // Read blob and upload in 64KB encrypted chunks
         const fileData = new Uint8Array(await blob.arrayBuffer());
@@ -31181,12 +31319,13 @@ async function processAndUploadSticker() {
             const chunkRes = await authFetch('/api/files/' + file_id + '/chunk/' + i, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/octet-stream' },
-                body: encryptedChunk
+                body: encryptedChunk,
+                signal: stickerSignal
             });
             if (!chunkRes.ok) throw new Error('Failed to upload chunk ' + (i + 1));
         }
 
-        const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST' });
+        const completeRes = await authFetch('/api/files/' + file_id + '/complete', { method: 'POST', signal: stickerSignal });
         if (!completeRes.ok) throw new Error('Failed to finalize upload');
 
         // Register as user sticker. All types store their random shareable key
@@ -31249,8 +31388,14 @@ async function processAndUploadSticker() {
         }
 
     } catch (e) {
-        if (errorDiv) { errorDiv.textContent = e.message || 'Upload failed'; errorDiv.style.display = 'block'; }
+        // Whatever reached the server belongs to a cancelled/failed upload: the
+        // sticker was never registered, so no message can reference it.
+        if (stickerFileId) _purgeUploadFiles([stickerFileId]);
         if (progressContainer) progressContainer.style.display = 'none';
+        if (e && e.name === 'AbortError') return;   // cancelled — the modal is gone
+        if (errorDiv) { errorDiv.textContent = e.message || 'Upload failed'; errorDiv.style.display = 'block'; }
+    } finally {
+        _stickerUploadAbort = null;
     }
 }
 
