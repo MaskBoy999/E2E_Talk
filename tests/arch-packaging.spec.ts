@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,6 +15,10 @@ import { join } from 'node:path';
 // milliseconds, with a fake version.
 
 const ROOT = process.cwd();
+// The container script is checked with bash itself, so make sure bash is there
+// (it is on Linux CI and in Git Bash on Windows; the check is skipped rather
+// than failed on a host without it).
+const hasBash = spawnSync('bash', ['-c', 'true']).status === 0;
 const FAKE_VER = '9.9.9';
 const FAKE_SHA = 'ab'.repeat(32); // 64 hex chars, as sha256sum emits
 const PKGNAME = 'e2e-chat-bin';
@@ -163,5 +167,71 @@ test.describe('Arch packaging', () => {
     expect(license).toContain('Copyright (c) 2026 Dorcu Eduard-Daniel');
     expect(license).toContain('Permission to use, copy, modify, and/or distribute');
     expect(license).not.toMatch(/<holder>|YOUR NAME|TODO/i);
+  });
+
+  test('the container build script parses as bash — the check it can never run on itself', () => {
+    // v0.2.33's tag run failed at the very last Arch step, after makepkg had
+    // already built a correct package. The cause was not the package: the step
+    // passed the whole container script to `bash -ec '<script>'`, and the
+    // `grep 'not found'` line inside it closed the wrapper's quote. The
+    // container therefore received a TRUNCATED script, ran everything up to
+    // the cut, and then died parsing the tail with "unexpected EOF while
+    // looking for matching `)'" (exit 2). A broken script that only ever gets
+    // parsed inside a container cannot be caught by the container — so it is a
+    // file in the repo, and it is parsed here.
+    const scriptPath = join(ROOT, 'packaging', 'aur', 'build-in-container.sh');
+    expect(existsSync(scriptPath), 'container build script is missing').toBe(true);
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toContain('makepkg');
+    expect(script).toContain('pacman -Qp'); // reads the artifact back
+    expect(script).toContain('PKGVER'); // …and asserts it matches the tag
+    expect(script).toContain('ldd'); // the grey-window check
+    // It runs with `set -e`, so a partial build cannot pass silently.
+    expect(script).toMatch(/^set -euo pipefail$/m);
+    // A CR at the end of every line is fatal in the container (even
+    // `set -euo pipefail` becomes an invalid option name) and this repo is
+    // checked out with core.autocrlf=true on Windows, so the file must be LF
+    // in the tree — .gitattributes pins it.
+    expect(script).not.toContain('\r');
+
+    if (!hasBash) {
+      test.skip(true, 'bash is not available on this host');
+      return;
+    }
+    const res = spawnSync('bash', ['-n', scriptPath], { encoding: 'utf8' });
+    expect(res.status, `bash -n rejected the container script:\n${res.stderr}`).toBe(0);
+    expect(res.stderr).not.toContain('unexpected EOF');
+  });
+
+  test('the step mounts that script instead of inlining it, and reports docker\'s status', () => {
+    const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+    const start = wf.indexOf('- name: Build Arch package (pacman)');
+    expect(start).toBeGreaterThan(-1);
+    const next = wf.indexOf('- name:', start + 10);
+    const block = wf.slice(start, next === -1 ? undefined : next);
+
+    // The script travels as a file into the container…
+    expect(block).toContain('packaging/aur/build-in-container.sh');
+    expect(block).toContain('bash /build.sh');
+    expect(block).toContain('/build.sh:ro');
+    // …with CR stripped on the way in (see the LF note above: the mounted copy
+    // is what the container executes, and it must not depend on how the
+    // checkout on the runner happened to land).
+    expect(block).toMatch(/tr -d '\\r' < packaging\/aur\/build-in-container\.sh/);
+    // The step's own exit status must be DOCKER's. A bare `$?` after a pipe is
+    // tee's, which is always 0 — that would turn every container failure into
+    // a green run with no package attached.
+    expect(block).toContain('PIPESTATUS[0]');
+
+    // No script may be handed to bash as a multi-line single-quoted string
+    // again, anywhere in any workflow: that is the exact shape that truncated
+    // v0.2.33, and an inner `'` is all it takes.
+    const workflows = readdirSync(join(ROOT, '.github', 'workflows'))
+      .filter((f) => f.endsWith('.yml'))
+      .map((f) => ({ f, text: readFileSync(join(ROOT, '.github', 'workflows', f), 'utf8') }));
+    for (const { f, text } of workflows) {
+      const inline = /\bbash\s+-\w*c\s+'(?:[^'\n]*\n)/.exec(text);
+      expect(inline ? `${f}: ${inline[0].split('\n')[0]}` : null, f).toBeNull();
+    }
   });
 });

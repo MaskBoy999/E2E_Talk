@@ -336,69 +336,35 @@ jobs:
           # — on failure — re-emit its tail as an annotation: the one failure
           # surface that IS publicly readable.
           set +e
+          # The container script lives in packaging/aur/build-in-container.sh
+          # and is MOUNTED — never passed as an inline `bash -ec '...'`
+          # argument. Wrapping a script in single quotes means the first single
+          # quote inside it closes the wrapper: the `grep 'not found'` line at
+          # the bottom truncated the script mid-pipeline, the container ran
+          # everything up to that point (makepkg built, `pacman -Qp` printed
+          # the right version) and then died with "unexpected EOF while looking
+          # for matching `)'" — exit 2, which is what failed the v0.2.33 tag
+          # run and left the log looking mysterious. A file cannot be mangled
+          # by the caller's quoting, and `bash -n` can check it in tests
+          # (tests/arch-packaging.spec.ts does, on every run).
+          script="$RUNNER_TEMP/build-in-container.sh"
+          # Strip CR on the way in: this tree is checked out with
+          # core.autocrlf=true, and a \r at the end of every line is fatal to a
+          # script executed in a Linux container — even `set -euo pipefail`
+          # becomes an invalid option name. (Inline run: blocks never hit this
+          # because YAML parses CRLF as a newline.)
+          tr -d '\r' < packaging/aur/build-in-container.sh > "$script"
+          chmod +x "$script"
           docker run --rm \
             -v "$out":/pkgbuild:ro \
+            -v "$script":/build.sh:ro \
             -v "$PWD/dist":/dist \
             -e PKGVER="$pkgver" \
-            archlinux:base-devel bash -ec '
-              # makepkg refuses to run as root — build as an unprivileged user
-              # (sudo ships in the base-devel group this image is built from).
-              useradd -m builder
-              echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
-              cp /pkgbuild/PKGBUILD /pkgbuild/e2e-chat-bin.install /home/builder/
-              chown -R builder:builder /home/builder
-              # -Syu, never -Sy: syncing without upgrading against a stale
-              # image snapshot can leave versioned dependencies unsatisfiable
-              # (the classic partial-upgrade transaction failure). curl is not
-              # in the image either — pacman links libcurl, it does not ship
-              # the tool makepkg downloads with.
-              pacman -Syu --noconfirm --needed curl
-              # The image sets no WORKDIR, so the container starts in / —
-              # and makepkg only ever reads ./PKGBUILD from the current
-              # directory. Without this cd it dies with "PKGBUILD does not
-              # exist" while the rendered file sits in /home/builder. This is
-              # what failed the first v0.2.22 tag run.
-              cd /home/builder
-              # --nodeps: this image carries base-devel, not the GTK /
-              # webkit2gtk runtime stack the package depends on. Installing
-              # that whole desktop tree just to repack a prebuilt .deb is
-              # pointless, and the makepkg dependency check otherwise fails
-              # the build with "Could not resolve all dependencies" — which is
-              # what failed the second v0.2.22 run (after the cd above fixed
-              # the first). The depends stay declared for the machine that
-              # installs the package, and pacman -Qp / -Qlp below still read
-              # the produced artifact back.
-              sudo -u builder makepkg --nodeps --force --noconfirm
-              cp /home/builder/*.pkg.tar.zst /dist/
-
-              info="$(pacman -Qp /dist/*.pkg.tar.zst)"
-              echo "pacman reads back: $info"
-              case "$info" in
-                "e2e-chat-bin $PKGVER-"*) ;;
-                *) echo "::error::built package [$info] does not match tag v$PKGVER"; exit 1 ;;
-              esac
-              echo "--- package contents ---"
-              pacman -Qlp /dist/*.pkg.tar.zst | sed -n "1,40p"
-
-              # Prove the declared depends are ENOUGH on a real Arch userland:
-              # install the package we just built (pacman resolves and installs
-              # its depends from the official repos) and then ask the dynamic
-              # linker to resolve the installed binary. A "not found" line here
-              # IS the broken-on-Arch report — the app starts and paints nothing.
-              # Heavy (the webkit/gtk stack is ~400 MB) but this runs on tag
-              # pushes only, and it is the one check no other job can make.
-              if pacman -U --noconfirm --needed --noprogressbar /dist/*.pkg.tar.zst; then
-                missing="$(ldd /usr/bin/e2e-chat-app | grep 'not found' || true)"
-                if [ -n "$missing" ]; then
-                  echo "::error::the installed Arch package has unresolved libraries:%0A$missing"
-                  exit 1
-                fi
-                echo "dependency check: every shared library of the installed binary resolves"
-              else
-                echo "::warning::could not install the built package in the container — its dependency closure was NOT verified"
-              fi
-            ' 2>&1 | tee "$RUNNER_TEMP/arch-build.log"
-          rc=$?
+            archlinux:base-devel bash /build.sh 2>&1 | tee "$RUNNER_TEMP/arch-build.log"
+          # PIPESTATUS[0] is docker's status; a bare $? here would be tee's,
+          # which is always 0. (pipefail is on as well, but do not rely on
+          # that silently — an added `set +o pipefail` would un-fail the step.)
+          rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
             BLOCK="Arch package build failed (exit $rc) — tail of the container log:%0A$(tail -n 25 "$RUNNER_TEMP/arch-build.log" | sed -e 's/%/%25/g' -e 's/\r$//' | sed ':a;N;$!ba;s/\n/%0A/g')"

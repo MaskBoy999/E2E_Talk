@@ -26,11 +26,26 @@ container — the standard pattern for Arch packaging in CI — from the same
    `e2e-chat-bin <tag>-1`, and `pacman -Qlp` prints the file list into the job
    log. Version drift (the v0.2.19 phantom-re-update lesson) fails the release
    instead of shipping.
-5. The package joins `SHA256SUMS-linux-x64.txt` and is attached to the
+5. Then the package is installed for real: `pacman -U` resolves and installs
+   the declared `depends` from the official repos, and `ldd` has to resolve
+   the installed binary. A single `not found` line fails the release — that is
+   the "installs, then paints grey" release, stopped before it ships.
+6. The package joins `SHA256SUMS-linux-x64.txt` and is attached to the
    release next to `.deb` / `.rpm` / `.AppImage`.
 
+That container script is `packaging/aur/build-in-container.sh`, a **file**
+rather than an inline `bash -ec '…'` argument — the v0.2.33 tag lost a whole
+run to the `grep 'not found'` in step 5: its single quotes closed the
+wrapper's quote, so the container received a *truncated* script and died with
+`unexpected EOF while looking for matching `)'`. A file cannot be mangled by
+its caller's quoting, and it can be parsed (`bash -n`) before it ever runs.
+CI also strips CR on the way in — a `\r` at the end of every line is fatal in
+the container — and `.gitattributes` pins the file to `eol=lf`.
+
 `tests/arch-packaging.spec.ts` pins all of this — plus the render output — on
-any OS, in milliseconds.
+any OS, in milliseconds: including that the container script parses, that the
+step mounts it instead of inlining it, and that no workflow ever hands bash a
+multi-line single-quoted script again.
 
 ## Why not the AUR
 
@@ -45,14 +60,17 @@ spec, done.
 
 With Docker (mirrors CI exactly):
 
-    node tools/aur-render.mjs --pkgver 0.2.22 --sha256 <64-hex> --outdir /tmp/arch
-    docker run --rm -v /tmp/arch:/pkgbuild:ro archlinux:base-devel bash -ec '
-      useradd -m b; echo "b ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/b
-      cp /pkgbuild/* /home/b/; chown -R b /home/b
-      pacman -Syu --noconfirm --needed curl
-      cd /home/b
-      sudo -u b makepkg --nodeps --force --noconfirm
-      pacman -Qp /home/b/*.pkg.tar.zst'
+    node tools/aur-render.mjs --pkgver 0.2.33 --sha256 <64-hex> --outdir /tmp/arch
+    mkdir -p dist
+    docker run --rm \
+      -v /tmp/arch:/pkgbuild:ro \
+      -v "$PWD/packaging/aur/build-in-container.sh:/build.sh:ro" \
+      -v "$PWD/dist:/dist" \
+      -e PKGVER=0.2.33 \
+      archlinux:base-devel bash /build.sh
+
+The script is the same one CI runs, so it also installs the package and runs
+`ldd` on it (a few hundred MB of webkit2gtk, a few minutes).
 
 Without Docker, the extraction half still checks out on any OS — Windows' built-in
 `tar.exe` (bsdtar) reads the `.deb` exactly like `package()` does:

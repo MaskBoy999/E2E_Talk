@@ -8786,3 +8786,48 @@ the file, images keep the page clipboard path (so a sticker still pastes as a
 picture), both plugin halves plus the ACL declare the command, and the clipboard
 stays write-only.
 
+### 158. v0.2.33's Arch step failed: the container script was truncated by its own quotes
+
+**Why:** the tag went red on the Linux leg's last step, *after* makepkg had
+succeeded — the log tail showed the package built correctly (`pacman -Qp`
+reading back `e2e-chat-bin 0.2.33-1`, `pacman -Qlp` listing
+`/usr/bin/e2e-chat-app`) and then bash dying with `unexpected EOF while
+looking for matching `)'`, exit 2. The package was never the problem. The STEP
+was: it passed the whole container script to `bash -ec '<script>'`, and the
+`grep 'not found'` in the dependency-closure `ldd` check added in this release
+closed the wrapper's quote. Everything after that line became a *positional
+argument* instead of script text, so the container received a truncated script
+(2625 bytes of 4418) and ran the part it had. Running the original step text
+against a `docker` shim reproduces it exactly: `ARG[11]` 2625 bytes, the rest
+(`found || true)"…`) arriving as `ARG[12]`.
+
+**What:**
+* The container script is now `packaging/aur/build-in-container.sh`, mounted at
+  `/build.sh` and run as `bash /build.sh`. A file cannot be mangled by its
+  caller's quoting.
+* The step copies it through `tr -d '\r'` before mounting, because this repo is
+  checked out with `core.autocrlf=true` and a `\r` at the end of every line is
+  fatal in the container (`set -euo pipefail` becomes an *invalid option
+  name*). Inline `run:` blocks never hit this — YAML parses CRLF as a newline —
+  which is exactly why the hazard only appeared once the script became a file.
+  `.gitattributes` pins the file to `eol=lf` as well.
+* `rc=${PIPESTATUS[0]}`: the step's failure detection was riding entirely on
+  `pipefail`, since a bare `$?` after `… | tee` is *tee's* status and therefore
+  always 0. It still fails loudly — with a shim returning 3 the step exits 3
+  and re-emits the container log tail as an annotation.
+
+**Verified locally:** `bash -n packaging/aur/build-in-container.sh` clean;
+`tests/arch-packaging.spec.ts` 7/7. Two of those tests are new and both are
+non-vacuous: one parses the container script with bash, the other asserts the
+step mounts the file (`tr -d` swept the CR out first) and that no workflow
+hands bash a multi-line single-quoted script again — the guard matches the old
+`bash -ec '` shape in `git show HEAD:.github/workflows/release.yml` and is
+silent on the fix. The step text itself was executed against a `docker` shim:
+13 clean args, mounted script 4418 bytes byte-identical to the source, 0 CR
+bytes. The full makepkg/`pacman -U`/`ldd` run happens on CI (no Docker here),
+where it is the authoritative check.
+
+**Files:** `.github/workflows/release.yml`,
+`packaging/aur/build-in-container.sh`,
+`tests/arch-packaging.spec.ts`, `.gitattributes`
+

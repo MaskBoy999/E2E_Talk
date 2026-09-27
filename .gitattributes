@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# This script is executed by bash inside the archlinux container on CI. Keep it
+# LF everywhere: a CR at the end of every line is fatal there (even
+# `set -euo pipefail` becomes an invalid option name), and it cannot be caught
+# by the YAML parser the way an inline run: block is.
+packaging/aur/build-in-container.sh text eol=lf
