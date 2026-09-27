@@ -87,6 +87,18 @@ test.describe('release publishing', () => {
     const build = wf.indexOf('  build:');
     expect(creator, 'the create-release job is missing from release.yml').toBeGreaterThan(-1);
     expect(build).toBeGreaterThan(creator);
+    // The creator runs `gh`, and gh resolves the repository from the git
+    // remote: a job with no checkout is not inside a repository at all, so
+    // every `gh release` call in it fails. That is exactly how v0.2.34's first
+    // attempt died — "Create release" was the only failing step while the
+    // build legs (which do check out) are where gh has always worked.
+    const creatorJob = wf.slice(creator, build);
+    expect(creatorJob, 'the release creator must check the repository out').toContain(
+      'uses: actions/checkout',
+    );
+    // Belt and braces: the repo is named outright, so the call is correct even
+    // without a checkout to resolve it from.
+    expect(creatorJob, 'the creator should name the repository explicitly').toContain('-R "$repo"');
   });
 
   test('the release is published before the Arch step repacks its .deb', () => {

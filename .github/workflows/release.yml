@@ -49,6 +49,15 @@ jobs:
   create-release:
     runs-on: ubuntu-22.04
     steps:
+      # `gh` resolves the repository from the git remote, so this job needs a
+      # checkout: without one it is not inside a repository at all and every
+      # `gh release` call fails. The v0.2.34 attempt died exactly here —
+      # "Create release" was the only failing step, and the build legs (which
+      # do check out) are where gh has always worked. `-R "$repo"` below is
+      # the belt-and-braces half so the commands stay correct on their own.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -57,13 +66,16 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
+          repo="$GITHUB_REPOSITORY"
+          gh --version | head -1
+          echo "create-release: tag=$tag repo=$repo"
           # Re-running a tag must FINISH the existing release, never make a
           # second one. Notes are written on the create path only: this token
           # can create a release and upload assets to it, but `update-a-release`
           # (a PATCH, i.e. `gh release edit`) comes back "Resource not
           # accessible by integration" — the wall softprops died on across
           # v0.2.22 and v0.2.24.
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if gh release view "$tag" -R "$repo" >/dev/null 2>&1; then
             echo "release $tag already exists — leaving its notes alone"
             exit 0
           fi
@@ -98,8 +110,10 @@ jobs:
           To update later, download the new installer from this page again.
           NOTES
           )
-          gh release create "$tag" --title "E2E Chat $tag" --notes "$notes"
-          gh release view "$tag" --json url --jq '"created: " + .url'
+          gh release create "$tag" -R "$repo" --title "E2E Chat $tag" --notes "$notes"
+          # Verify it is really there before the build legs start uploading.
+          gh release view "$tag" -R "$repo" >/dev/null
+          echo "release $tag is live"
 
   build:
     # The release object must exist before either leg uploads to it.
