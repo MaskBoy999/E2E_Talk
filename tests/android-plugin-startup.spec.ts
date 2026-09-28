@@ -409,7 +409,7 @@ test.describe('native PiP, notification decline and ringer awareness', () => {
         expect(/getAudioProfile/.test(VOICE_JS)).toBe(true);
     });
 
-    test('the call takes transient audio focus and hands it back (1.4)', () => {
+    test('the call takes transient audio focus, and only when the user allows it (1.4)', () => {
         // Music must pause while the call runs and resume when it ends:
         // a transient focus request on the call's start path, an abandon on
         // its teardown path — both in real code, not in a comment (hence
@@ -420,5 +420,40 @@ test.describe('native PiP, notification decline and ringer awareness', () => {
         expect(/AUDIOFOCUS_GAIN_TRANSIENT/.test(fg)).toBe(true);
         expect(/requestAudioFocus\(\)/.test(fg)).toBe(true);
         expect(/abandonAudioFocusRequest|abandonAudioFocus\(/.test(fg)).toBe(true);
+
+        // …but it is the user's setting now, not a decision the app makes for
+        // them. The service reads the flag off the intent and HANDS THE SESSION
+        // BACK when it is off — an abandon is what makes Android resume the
+        // previous owner, so flipping the toggle mid-call starts the music again
+        // instead of waiting for the next one.
+        expect(/EXTRA_PAUSE_OTHER_AUDIO\s*=\s*"pauseOtherAudio"/.test(fg)).toBe(true);
+        expect(
+            /if \(intent\?\.getBooleanExtra\(EXTRA_PAUSE_OTHER_AUDIO, true\) == true\)\s*\{\s*requestAudioFocus\(\)\s*\} else \{\s*abandonAudioFocus\(\)/
+                .test(fg),
+            'an absent extra must mean yes (a cached page keeps the old behaviour) and false must abandon',
+        ).toBe(true);
+
+        // The page has to be able to say so: the flag is part of the args the
+        // plugin parses, and it rides on every intent the call service is given
+        // (start, state update, media update).
+        const plugin = code(fs.readFileSync(path.join(KOTLIN_DIR, 'CallServicePlugin.kt'), 'utf8'));
+        expect(
+            (plugin.match(/var pauseOtherAudio: Boolean\? = null/g) || []).length,
+            'StartArgs and UpdateCallStateArgs both carry it',
+        ).toBeGreaterThanOrEqual(2);
+        expect(
+            (plugin.match(/putExtra\(CallForegroundService\.EXTRA_PAUSE_OTHER_AUDIO, args\.pauseOtherAudio == true\)/g) || []).length,
+            'start, updateCallState and updateMedia all send the setting',
+        ).toBe(3);
+
+        // And the JS side sends the real setting with both payloads, with the
+        // control that sets it present in the voice settings tab.
+        const VOICE_JS = fs.readFileSync(path.join(ROOT, 'static', 'voice.js'), 'utf8');
+        expect(
+            (VOICE_JS.match(/pauseOtherAudio: S\.settings\.pauseOtherAudio !== false/g) || []).length,
+            'the start and state payloads both carry it',
+        ).toBeGreaterThanOrEqual(2);
+        const HTML = fs.readFileSync(path.join(ROOT, 'static', 'index.html'), 'utf8');
+        expect(/id="voice-pause-other-audio"/.test(HTML)).toBe(true);
     });
 });

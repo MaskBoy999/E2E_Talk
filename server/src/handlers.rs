@@ -9402,10 +9402,21 @@ pub async fn save_css_slot(
 // server only ever stores the ciphertext. Every icon in the app is drawn from
 // the page's sprite, so a slot is a set of overrides for those symbols.
 
-/// Largest accepted ciphertext for one icon slot. A pack is SVG markup for a
-/// handful of 24x24 icons; 512 KiB is generous and keeps one account from
-/// filling the database with a "pack".
-const MAX_ICON_SLOT_B64: usize = 512 * 1024;
+/// Largest accepted ciphertext for one icon slot.
+///
+/// This was 512 KiB, and that number was wrong for half the feature. A slot is
+/// not only SVG shapes any more: a **picture** icon (the only way to get an
+/// animated icon — the crop is expressed as an SVG `viewBox` over the original
+/// bytes, so a GIF is stored as a `data:` URL inside the map) is a whole image,
+/// base64-inflated twice on the way here (once inside the map's data URL, once
+/// again by the AEAD envelope). A 300 KB GIF is already ~630 KB of ciphertext,
+/// so every animated icon over a couple of hundred kilobytes was being rejected
+/// — silently, because the page never checked this response (see
+/// `saveSlot()` in static/icon-packs.js). The cap is now sized for an actual
+/// picture (~2 MB of original image) and the client measures the *same* number
+/// in the *same* units (the ciphertext length), so the two cannot disagree
+/// again.
+const MAX_ICON_SLOT_B64: usize = 4 * 1024 * 1024;
 
 /// GET /api/user-icons/slots — both slots + the active choice for the caller.
 pub async fn get_icon_slots(
@@ -9444,7 +9455,19 @@ pub async fn save_icon_slot(
     let encrypted_icons = body["encrypted_icons"].as_str().unwrap_or("");
     let nonce = body["nonce"].as_str().unwrap_or("");
     if encrypted_icons.len() > MAX_ICON_SLOT_B64 {
-        return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "icon pack too large"}))).into_response();
+        // Say what the limit is: the page shows this verbatim, and "too large"
+        // alone leaves the user guessing which picture to shrink.
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "icon pack too large ({} KiB; the limit is {} KiB)",
+                    encrypted_icons.len() / 1024,
+                    MAX_ICON_SLOT_B64 / 1024
+                )
+            })),
+        )
+            .into_response();
     }
     match state.db.save_icon_slot(&user_id, slot_num, encrypted_icons, nonce) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),

@@ -26,6 +26,14 @@ class StartArgs {
      * the foreground app (see CallForegroundService).
      */
     var mediaTypes: List<String>? = null
+
+    /**
+     * 1.4: may this call pause other apps' audio (transient audio focus)? The
+     * user's setting, sent by the page. `null` means an older page that has no
+     * such toggle — the service then keeps the behaviour it shipped with, which
+     * is to take the focus.
+     */
+    var pauseOtherAudio: Boolean? = null
 }
 
 @InvokeArg
@@ -52,6 +60,8 @@ class UpdateCallStateArgs {
     var muted: Boolean? = null
     var deafened: Boolean? = null
     var mediaTypes: List<String>? = null
+    /** 1.4: rides with every state update so the toggle applies mid-call. */
+    var pauseOtherAudio: Boolean? = null
 }
 
 /** `enterPip` — the tile's aspect ratio, so the PiP window has no black bars. */
@@ -310,6 +320,12 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 CallForegroundService.EXTRA_MEDIA_TYPES,
                 ArrayList(args.mediaTypes ?: listOf("audio"))
             )
+            // 1.4: only sent when the page has an opinion — an absent extra means
+            // "yes, pause other audio" to the service, which is what a cached
+            // page from before the toggle expects.
+            if (args.pauseOtherAudio != null) {
+                putExtra(CallForegroundService.EXTRA_PAUSE_OTHER_AUDIO, args.pauseOtherAudio == true)
+            }
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -351,6 +367,9 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 CallForegroundService.EXTRA_MEDIA_TYPES,
                 ArrayList(args.mediaTypes ?: listOf("audio"))
             )
+            if (args.pauseOtherAudio != null) {
+                putExtra(CallForegroundService.EXTRA_PAUSE_OTHER_AUDIO, args.pauseOtherAudio == true)
+            }
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -384,6 +403,9 @@ class CallServicePlugin(private val activity: Activity) : Plugin(activity) {
                 CallForegroundService.EXTRA_MEDIA_TYPES,
                 ArrayList(args.mediaTypes ?: listOf("audio"))
             )
+            if (args.pauseOtherAudio != null) {
+                putExtra(CallForegroundService.EXTRA_PAUSE_OTHER_AUDIO, args.pauseOtherAudio == true)
+            }
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

@@ -11,6 +11,9 @@
 //! the same crate builds for Android via `cargo tauri android build`.
 
 mod cert_probe;
+// WebKitGTK certificate hook (Linux) — compiled everywhere so its pure helpers
+// stay unit-testable; `install` is a no-op outside Linux. See the file header.
+mod linux_webview;
 mod config;
 #[cfg(windows)]
 mod win_webview;
@@ -47,6 +50,13 @@ const SETUP_PAGE: &str = "box-setup.html";
 /// capability grants it (see `run()`, and `grant_remote_ipc` for what that
 /// origin does get).
 const CHANGE_SERVER_EVENT: &str = "box:change-server";
+
+/// The always-on "clear all app data" overlay (`static/app-overlay.js`) has
+/// erased the page's own storage and signed the account out; what is left is the
+/// one thing a page cannot reach — the *connection*, which lives in this shell's
+/// config file (server address + the pinned certificate). Without this the next
+/// launch would open the app window straight back at the old host.
+const CLEAR_CONNECTION_EVENT: &str = "box:clear-connection";
 
 /// Event the page raises to ask for a **desktop** toast (audit fix F3,
 /// `FEATURE_PLAN.md`). An event rather than an app command for the same reason
@@ -551,7 +561,10 @@ fn grant_remote_ipc(app: &tauri::AppHandle, server_url: &str) {
 }
 
 /// The certificate fingerprint the user trusted, if any.
-fn pinned_cert(app: &tauri::AppHandle) -> Option<String> {
+///
+/// `pub(crate)` because the Linux certificate hook (`linux_webview.rs`) reads it
+/// live, per TLS failure, rather than capturing it when the window is built.
+pub(crate) fn pinned_cert(app: &tauri::AppHandle) -> Option<String> {
     app.state::<AppState>()
         .cfg
         .lock()
@@ -803,6 +816,12 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
 
     #[cfg(windows)]
     win_webview::install(&window);
+
+    // Linux: same decision, different WebView. WebKitGTK has no
+    // `ServerCertificateErrorDetected` equivalent that wry exposes, so the hook
+    // goes through `load-failed-with-tls-errors` on the raw WebKit view — see
+    // `linux_webview.rs`. Installed here, before the first remote navigation.
+    linux_webview::install(&window, app.clone());
 
     // Never leave an invisible window behind: whatever happens, the user sees a
     // window (the error path shows the blank one rather than nothing at all).
@@ -1146,6 +1165,57 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// The command form of [`CLEAR_CONNECTION_EVENT`], for **local** pages only —
+/// the setup screen has the same wipe button and can call app commands directly
+/// (`open_setup`/`show_setup` are reached the same two ways). The app's own page
+/// is served by the host, where Tauri refuses app commands, so it asks over the
+/// event channel instead.
+#[tauri::command]
+fn reset_connection(app: tauri::AppHandle) -> Result<(), String> {
+    forget_connection(&app);
+    Ok(())
+}
+
+/// Forget the saved connection and put the address screen back in front of the
+/// user: the address and the pinned certificate are dropped, so the next launch
+/// starts at setup instead of reconnecting to a server this device no longer
+/// has any business talking to.
+///
+/// The main window is **navigated**, not closed, on purpose: on desktop it is
+/// usually the last window open, and closing it takes the whole app down with it
+/// (Tauri exits when the last window closes) — the user would press "erase
+/// everything" and watch the app quit. Navigating also drops the old page, whose
+/// in-memory session, keys and socket outlive the storage wipe that just ran.
+fn forget_connection(app: &tauri::AppHandle) {
+    if let Ok(mut cfg) = app.state::<AppState>().cfg.lock() {
+        cfg.server_url = None;
+        cfg.pinned_cert_sha256 = None;
+        if let Err(e) = config::save(app, &cfg) {
+            eprintln!("could not persist the wiped connection: {e}");
+        }
+    }
+    let had_main = app.get_webview_window(MAIN_LABEL).is_some();
+    if had_main {
+        // Two address screens would be worse than one: the main window is about
+        // to become the address screen.
+        if let Some(setup) = app.get_webview_window(SETUP_LABEL) {
+            let _ = setup.close();
+        }
+        if let Err(e) = open_setup_in_main(app) {
+            eprintln!("reset connection: could not show setup in the main window: {e}");
+            return;
+        }
+        if let Some(w) = app.get_webview_window(MAIN_LABEL) {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        return;
+    }
+    if let Err(e) = open_setup(app) {
+        eprintln!("reset connection: could not open setup: {e}");
+    }
+}
+
 // There is deliberately **no** `notify` command any more. Notifications go
 // through `tauri-plugin-notification` in every case: the plugin's init script
 // replaces `window.Notification` in the WebView with a shim that posts
@@ -1338,6 +1408,7 @@ pub fn run() {
             probe_certificate,
             save_config,
             show_setup,
+            reset_connection,
             quit_app
         ])
         .setup(|app| {
@@ -1421,6 +1492,16 @@ pub fn run() {
                     if let Err(e) = open_setup(&for_events) {
                         eprintln!("{CHANGE_SERVER_EVENT}: could not open setup: {e}");
                     }
+                });
+            }
+
+            // The overlay's "erase everything" (see CLEAR_CONNECTION_EVENT).
+            // All-platform, like the change-server listener above: a phone needs
+            // it too, and the page reaches no app command on any platform.
+            {
+                let for_wipe = handle.clone();
+                handle.listen(CLEAR_CONNECTION_EVENT, move |_| {
+                    forget_connection(&for_wipe);
                 });
             }
 

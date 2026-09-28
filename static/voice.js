@@ -97,6 +97,16 @@
             // mirror the device's playback into the stream. The sheet rewrites
             // it on every share, so this default only decides the FIRST one.
             shareScreenAudio: true,
+            // 1.4 (FEATURE_PLAN.md): whether a call takes transient audio
+            // focus — which is what pauses whatever else is playing on the phone
+            // — is the user's setting, not the app's decision. ON by default,
+            // because that is what the app has always done; it is a toggle
+            // because it is not always what the user wants: a call used as
+            // background (a watch-along, a long open room) should not stop the
+            // music. Android-only — a desktop browser has no audio-focus
+            // equivalent to hand playback back from, and nothing pauses there
+            // either way.
+            pauseOtherAudio: true,
             // Haptic cues (mobile). hapticIncoming: vibrate when a NEW
             // incoming ring starts (notice a call on silent mode).
             // hapticWaiting: vibrate when the ring flips to the waiting state
@@ -739,6 +749,8 @@
         var rsaq = document.getElementById('voice-recv-screen-audio-quality');
         if (rsaq) rsaq.value = S.settings.recvScreenAudioQuality || 'medium';
         // hear-self is now a button, not a checkbox — no sync needed
+        var vpoa = document.getElementById('voice-pause-other-audio');
+        if (vpoa) vpoa.checked = S.settings.pauseOtherAudio !== false;
         var hi = document.getElementById('voice-haptic-incoming');
         if (hi) hi.checked = S.settings.hapticIncoming !== false;
         var hw = document.getElementById('voice-haptic-waiting');
@@ -1181,7 +1193,11 @@
             // deliberately ignored here.
             args = {
                 channelName: S.roomType === 'dm' ? 'Direct call' : 'Voice call',
-                mediaTypes: _boxCallMediaTypes()
+                mediaTypes: _boxCallMediaTypes(),
+                // 1.4: whether the call may pause the user's music. Sent with
+                // every start and media update, so turning the toggle off during
+                // a call releases the audio session immediately.
+                pauseOtherAudio: S.settings.pauseOtherAudio !== false
             };
         }
         return tauri.core.invoke('plugin:call-service|' + action, args).catch(function (e) {
@@ -1255,7 +1271,11 @@
         return tauri.core.invoke('plugin:call-service|updateCallState', {
             muted: !!S.muted,
             deafened: !!S.deafened,
-            mediaTypes: _boxCallMediaTypes()
+            mediaTypes: _boxCallMediaTypes(),
+            // 1.4: the audio-focus setting rides along with the state, so the
+            // service can abandon focus the moment it is switched off mid-call
+            // (and take it when it is switched back on).
+            pauseOtherAudio: S.settings.pauseOtherAudio !== false
         }).catch(function (e) {
             console.warn('[box] call-service updateCallState failed:', e);
         });
@@ -7789,6 +7809,15 @@
                 if (S.settings.hearSelf) stopHearSelfTest();
             });
         }
+        var vpoaToggle = document.getElementById('voice-pause-other-audio');
+        if (vpoaToggle) vpoaToggle.addEventListener('change', function (e) {
+            S.settings.pauseOtherAudio = !!e.target.checked;
+            saveSettings();
+            // Applied live rather than at the next call: every start/update
+            // carries the flag, so the service releases (or takes) the audio
+            // session as soon as this changes.
+            if (S.connected) _boxCallState();
+        });
         var shi = document.getElementById('voice-haptic-incoming');
         if (shi) shi.addEventListener('change', function (e) {
             S.settings.hapticIncoming = !!e.target.checked;

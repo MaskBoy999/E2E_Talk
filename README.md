@@ -284,9 +284,12 @@ not a missing feature:
 - **Audio output routing** — speakers/headphones/wired/Bluetooth; on Android
   the phone's own call-audio routing (earpiece/speaker/BT), applied live
   without rejoining
-- **Audio focus** — your music pauses when a call starts and resumes when it
-  ends; **keep screen on** for exactly the call's length; **battery-optimization
-  prompt** (once, via Android's own dialog) so Doze can't silently kill calls
+- **Audio focus, as your choice** — your music pauses when a call starts and
+  resumes when it ends, and *Settings → Voice → Other Apps' Audio* turns that
+  off when the call is background noise rather than something you are speaking
+  in (flipping it mid-call hands the audio session straight back); **keep screen
+  on** for exactly the call's length; **battery-optimization prompt** (once, via
+  Android's own dialog) so Doze can't silently kill calls
 - **Live captions** — an **offline** recogniser only (audio is never sent to an
   online speech service); display-only by default; publishing to the call is a
   separate opt-in riding the encrypted call channel; never written to disk,

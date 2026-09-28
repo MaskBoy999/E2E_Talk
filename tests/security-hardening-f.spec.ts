@@ -327,16 +327,36 @@ test.describe('F-series hardening (main server)', () => {
         }
     });
 
-    test('F3: CDN scripts carry SRI integrity attributes', async () => {
+    test('F3: no third-party script origin, in the HTML or in the CSP', async () => {
+        // This used to assert the CDN tags carried SRI. SRI is not the property
+        // that matters: a third-party origin in `script-src` is a party that can
+        // serve code into an origin holding decrypted messages and the session
+        // token, and it makes the app unable to start offline. The scanner is
+        // vendored now (static/vendor/jsqr/jsQR.js, fetched with its SRI hash
+        // verified by tools/fetch-qr-assets.mjs), so the rule is stronger and
+        // simpler: the app names NO external origin anywhere.
         const r = await req({ host: 'localhost', port: 3443, path: '/index.html', rejectUnauthorized: false });
         const html = r.data;
-        const jsqr = html.match(/<script[^>]*src="https:\/\/cdn\.jsdelivr\.net\/npm\/jsqr@[^"]*"[^>]*>/);
-        expect(jsqr).toBeTruthy();
-        expect(jsqr![0]).toContain('integrity="sha384-');
-        expect(jsqr![0]).toContain('crossorigin="anonymous"');
-        const qrgen = html.match(/<script[^>]*src="https:\/\/cdn\.jsdelivr\.net\/npm\/qrcode-generator@[^"]*"[^>]*>/);
-        expect(qrgen).toBeTruthy();
-        expect(qrgen![0]).toContain('integrity="sha384-');
+
+        // Every <script src> is same-origin (a relative path or nothing at all).
+        const scriptSrcs = [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)].map((m) => m[1]);
+        expect(scriptSrcs.length).toBeGreaterThan(5);
+        const external = scriptSrcs.filter((s) => /^(https?:)?\/\//i.test(s));
+        expect(external, `external script origins are not allowed any more: ${external.join(', ')}`).toEqual([]);
+        expect(scriptSrcs).toContain('vendor/jsqr/jsQR.js');
+
+        // …and the CSP names no origin either (no scheme-host, only 'self' and
+        // the ws: schemes the app connects with).
+        const csp = r.headers['content-security-policy'] as string;
+        expect(csp).toBeTruthy();
+        expect(csp, 'the CSP must not allow a CDN').not.toMatch(/https?:\/\//);
+        expect(csp).toContain("script-src 'self'");
+
+        // The vendored scanner is actually served, as JavaScript.
+        const js = await req({ host: 'localhost', port: 3443, path: '/vendor/jsqr/jsQR.js', rejectUnauthorized: false });
+        expect(js.status).toBe(200);
+        expect(String(js.headers['content-type'])).toContain('javascript');
+        expect(js.data).toContain('jsQR');
     });
 
     test('F3: message content is escaped — no XSS from user text (DM)', async ({ page, context }) => {

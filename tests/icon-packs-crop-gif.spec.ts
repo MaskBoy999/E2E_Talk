@@ -187,3 +187,93 @@ test.describe('icons: customizable DM button, 1:1 crop, animated GIFs', () => {
         expect(new Set(seen).size, 'the GIF icon must still animate in the strip').toBeGreaterThan(1);
     });
 });
+
+/**
+ * The slot half of the same feature, and the bug the user hit: an animated icon
+ * looked like it saved, and was gone after switching slots (or reloading) until
+ * the file was uploaded again.
+ *
+ * Why it happened, so this cannot come back unnoticed: the page measured the
+ * pack as JSON (480 KiB) while the server measured the *encrypted* string
+ * (512 KiB), and base64 inflation means the first limit sits above the second.
+ * A picture icon is a whole base64 data URL, so a 300 KB GIF blew the server's
+ * cap, the PUT came back 413 — and nothing in the save path looked at the
+ * response. The page said "Saved to slot 1 and applied", dropped the local
+ * draft, and the icon vanished at the next render. These two tests pin both
+ * halves of the fix: the slot really holds the icon through a switch and a
+ * reload, and a refusal is reported instead of swallowed.
+ */
+test.describe('icons: a saved picture icon survives the slot it lives in', () => {
+    test('a GIF saved to slot 1 is still there after switching slots and after a reload', async ({ page }) => {
+        await page.addInitScript(TAURI_STUB);
+        await registerAndOpenIcons(page);
+
+        const gif = readFileSync(join(__dirname, 'fixtures', 'anim-2frame.gif'));
+        await replaceIconWith(page, 'dm', { name: 'anim.gif', mimeType: 'image/gif', buffer: gif });
+        await expect(page.getByText('Crop this icon to a square')).toBeVisible({ timeout: 10000 });
+        await page.click('[data-icon-crop-apply]');
+
+        await page.locator('#icon-settings-container button', { hasText: 'Save & apply' }).click();
+        await expect(page.locator('#icon-pack-status')).toContainText('Saved to slot 1', { timeout: 30000 });
+
+        // The point of the fix: the server really has it (the old code never
+        // asked, so a refused PUT looked exactly like this and was not).
+        const stored = await page.evaluate(async () => {
+            const r = await (window as any).authFetch('/api/user-icons/slots');
+            const j = await r.json();
+            return { slot1: j.slot1 && j.slot1.encrypted_icons ? j.slot1.encrypted_icons.length : 0, active: j.active_slot };
+        });
+        expect(stored.slot1, 'the server must hold the icon pack').toBeGreaterThan(100);
+        expect(stored.active).toBe(1);
+
+        // Switch to the empty slot: the picture icon is gone from the sprite
+        // (that is what a different slot means), and nothing is lost server-side.
+        await page.getByText('Slot 2', { exact: true }).click();
+        await expect(page.locator('#icon-pack-status')).toContainText('Slot 2 draft', { timeout: 20000 });
+        await expect.poll(() => page.evaluate(() => (window as any).IconPacks.applied()), { timeout: 15000 })
+            .not.toContain('dm');
+
+        // …and switching BACK brings the same GIF back, from the server.
+        await page.getByText('Slot 1', { exact: true }).click();
+        await expect.poll(() => page.evaluate(() => (window as any).IconPacks.applied()), { timeout: 20000 })
+            .toContain('dm');
+        const inner = await page.evaluate(() => {
+            const sym = document.getElementById('icon-dm') as any;
+            return sym ? sym.innerHTML : '';
+        });
+        expect(inner, 'the slot must still be the animated GIF, not a re-encode').toContain('data:image/gif;base64,');
+
+        // A reload reads it back from the server, which is what the user means by
+        // "the switching works".
+        await page.reload();
+        await page.waitForSelector('#dm-strip-btn', { timeout: 60000 });
+        await expect.poll(() => page.evaluate(() => (window as any).IconPacks && (window as any).IconPacks.applied()), { timeout: 40000 })
+            .toContain('dm');
+    });
+
+    test('a slot the server refuses is reported, and the draft is kept', async ({ page }) => {
+        await page.addInitScript(TAURI_STUB);
+        // Stand in for the one response the page used to ignore: a 413, with the
+        // server's own wording (server/src/handlers.rs, MAX_ICON_SLOT_B64).
+        await page.route('**/api/user-icons/slot/*', (route) => route.fulfill({
+            status: 413,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'icon pack too large (5112 KiB; the limit is 4096 KiB)' }),
+        }));
+        await registerAndOpenIcons(page);
+
+        await replaceIconWith(page, 'dm', { name: 'icon.png', mimeType: 'image/png', buffer: makePng(32, 32) });
+        await expect(page.getByText('Crop this icon to a square')).toBeVisible({ timeout: 10000 });
+        await page.click('[data-icon-crop-apply]');
+
+        await page.locator('#icon-settings-container button', { hasText: 'Save & apply' }).click();
+        const status = page.locator('#icon-pack-status');
+        await expect(status).toContainText('Save failed', { timeout: 20000 });
+        await expect(status).toContainText('the limit is 4096 KiB');
+        // Never claim success, never throw the draft away — the whole point.
+        await expect(status).not.toContainText('Saved to slot');
+        expect(await draftEntry(page, 'dm'), 'the draft must survive a refused save').toBeTruthy();
+        await expect(page.locator('#icon-settings-container button', { hasText: 'Save & apply' }))
+            .toBeEnabled({ timeout: 10000 });
+    });
+});

@@ -45,6 +45,18 @@ class CallForegroundService : Service() {
         const val EXTRA_MUTED = "muted"
         const val EXTRA_DEAFENED = "deafened"
 
+        /**
+         * 1.4: whether this call may take transient audio focus — i.e. whether
+         * it may pause whatever else is playing on the phone. The user's setting
+         * (Settings → Voice → Other Apps' Audio) arrives with every start and
+         * update, so a call in progress reacts to a change straight away.
+         *
+         * ABSENT MEANS YES. A cached page from before the toggle exists sends no
+         * such extra, and it must keep the behaviour it shipped with rather than
+         * silently leaving the user's music playing over a call.
+         */
+        const val EXTRA_PAUSE_OTHER_AUDIO = "pauseOtherAudio"
+
         /** Action taps handled by [CallActionReceiver], not by the service. */
         const val ACTION_MUTE = "com.e2echat.callservice.action.MUTE"
         const val ACTION_DEAFEN = "com.e2echat.callservice.action.DEAFEN"
@@ -162,10 +174,19 @@ class CallForegroundService : Service() {
         if (intent?.hasExtra(EXTRA_MUTED) == true) muted = intent.getBooleanExtra(EXTRA_MUTED, false)
         if (intent?.hasExtra(EXTRA_DEAFENED) == true) deafened = intent.getBooleanExtra(EXTRA_DEAFENED, false)
 
+        // 1.4: taking the audio session is a request the user makes, not a
+        // decision the app makes for them. Off means hand it straight back —
+        // abandonAudioFocus is what makes Android resume the previous owner, so
+        // turning the toggle off mid-call starts their music again.
+        if (intent?.getBooleanExtra(EXTRA_PAUSE_OTHER_AUDIO, true) == true) {
+            requestAudioFocus()
+        } else {
+            abandonAudioFocus()
+        }
+
         // An update that arrives before the service was ever foregrounded (a
         // camera/screen toggle racing the connect) is just a start — and an
         // update whose mask is unchanged costs nothing but a re-post.
-        requestAudioFocus()
         ensureChannel()
         val notification = buildNotification()
         applyTypes(mediaTypes, notification)

@@ -17,7 +17,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=31">
+    <link rel="stylesheet" href="style.css?v=32">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -119,8 +119,20 @@
         <div class="loading-spinner"></div>
         <div class="loading-text">Loading…</div>
     </div>
-    <!-- Device-local app background photo layer (one image underneath the whole app) -->
-    <div id="app-bg"></div>
+    <!-- Device-local app background layer (one wallpaper underneath the whole
+         app). It holds a still picture (the CSS background) OR an animation:
+         a <video> for a video file, an <img> for a GIF/animated WebP/APNG. Only
+         one is ever shown, and the still path is untouched. See the
+         "Animated wallpaper" block in chat.js. -->
+    <div id="app-bg">
+        <img id="app-bg-anim-img" alt="" style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center center;pointer-events:none">
+        <video id="app-bg-anim-video" muted loop playsinline autoplay style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center center;pointer-events:none"></video>
+        <!-- Nothing in this file's own header makes a browser play a GIF at a
+             rate other than the one baked into it, so a speed other than 1×
+             decodes the frames and draws them here instead. Hidden at 1×, where
+             the <img> above animates natively. -->
+        <canvas id="app-bg-anim-canvas" aria-hidden="true" style="display:none;position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+    </div>
     <!-- Transparent drag surface, only active while editing the background (desktop) -->
     <div id="app-bg-drag" title="Drag to move the background"></div>
     <!-- Live background-edit panel: floats over the real app so you tune every
@@ -154,6 +166,10 @@
             </select>
             <label class="app-bg-ctrl-label" for="app-bg-edit-zoom">Zoom <span id="app-bg-edit-zoom-val">100%</span></label>
             <input type="range" id="app-bg-edit-zoom" min="100" max="300" step="10" value="100" class="app-bg-zoom">
+            <span id="app-bg-edit-speed-wrap" style="display:none;align-items:center;gap:8px">
+                <label class="app-bg-ctrl-label" for="app-bg-edit-speed">Speed <span id="app-bg-edit-speed-val">1×</span></label>
+                <input type="range" id="app-bg-edit-speed" min="0.25" max="3" step="0.05" value="1" class="app-bg-zoom">
+            </span>
             <button class="btn btn-secondary" id="app-bg-edit-center" title="Reset position and pan">Center</button>
         </div>
         <div class="app-bg-sections" id="app-bg-edit-sections"></div>
@@ -721,14 +737,17 @@
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>App Background</h4>
-                    <p class="settings-hint">Put a photo behind the whole app. It is stored only on this device, so each device can have its own. Use the sliders to tune how the picture looks behind each section.</p>
+                    <p class="settings-hint">Put a photo, a GIF or a video behind the whole app. It is stored only on this device, so each device can have its own. Use the sliders to tune how the picture looks behind each section — they apply to an animation the same way.</p>
                     <div class="app-bg-row">
                         <input type="file" id="app-bg-file" accept="image/*" style="display:none">
+                        <input type="file" id="app-bg-anim-file" accept="image/gif,image/webp,image/apng,video/mp4,video/webm,video/*" style="display:none">
                         <button class="btn btn-primary" id="app-bg-upload-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Choose Image</button>
+                        <button class="btn btn-primary" id="app-bg-anim-upload-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-image"/></svg> Choose Animation</button>
                         <button class="btn btn-secondary" id="app-bg-edit-btn" style="display:none"><svg class="ui-icon" width="14" height="14"><use href="#icon-edit"/></svg> Edit</button>
                         <button class="btn btn-danger" id="app-bg-remove-btn" style="display:none">Remove</button>
                         <div class="app-bg-thumb" id="app-bg-thumb" style="display:none"></div>
                     </div>
+                    <p class="settings-hint" id="app-bg-anim-status" style="min-height:16px;margin:6px 0 0"></p>
                     <div id="app-bg-controls" style="display:none">
                         <div class="app-bg-ctrl-row">
                             <label class="app-bg-ctrl-label" for="app-bg-pos">Position</label>
@@ -746,12 +765,17 @@
                             <label class="app-bg-ctrl-label" for="app-bg-zoom">Zoom <span id="app-bg-zoom-val">100%</span></label>
                             <input type="range" id="app-bg-zoom" min="100" max="300" step="10" value="100" class="app-bg-zoom">
                         </div>
+                        <div class="app-bg-ctrl-row" id="app-bg-anim-speed-row" style="display:none">
+                            <label class="app-bg-ctrl-label" for="app-bg-speed">Animation speed <span id="app-bg-speed-val">1×</span></label>
+                            <input type="range" id="app-bg-speed" min="0.25" max="3" step="0.05" value="1" class="app-bg-zoom">
+                            <span class="settings-hint" id="app-bg-speed-hint" style="margin:0;flex:1;min-width:200px"></span>
+                        </div>
                         <div class="app-bg-sections" id="app-bg-sections"></div>
                     </div>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border)">
                     <h4>Appearance Backup</h4>
-                    <p class="settings-hint">Export your accent color, background color, theme mode, and app background (picture + position/zoom/per-section settings) to an encrypted file, or import one here. Everything is device-local — nothing is stored on the server.</p>
+                    <p class="settings-hint">Export your accent color, background color, theme mode, and app background (picture + position/zoom/per-section settings) to an encrypted file, or import one here. Everything is device-local — nothing is stored on the server. An animated wallpaper stays on the device that has it: a video is far too large to belong in a settings backup, so it is not included.</p>
                     <div class="app-bg-row">
                         <button class="btn btn-secondary" id="theme-export-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Export</button>
                         <button class="btn btn-secondary" id="theme-import-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-upload"/></svg> Import</button>
@@ -1202,13 +1226,42 @@
                         <span style="font-size:13px;color:var(--text-primary)">Spoken language</span>
                         <select id="captions-language" class="settings-field" style="max-width:200px"></select>
                     </div>
+                    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+                        <span style="font-size:13px;color:var(--text-primary)">Speech model</span>
+                        <select id="captions-model" class="settings-field" style="max-width:260px">
+                            <option value="tiny">whisper-tiny — fastest (~44 MB)</option>
+                            <option value="base">whisper-base — more accurate (~80 MB)</option>
+                        </select>
+                    </div>
+                    <p class="settings-hint">Both models ship with the app and run on this device. Tiny is the one that keeps up on a phone; base makes noticeably fewer word mistakes and costs about twice the time per window. Context matters as much as size: captions decode 30-second windows with a 5-second stride, so a sentence is never chopped at a window edge.</p>
                     <label class="settings-toggle" style="margin-top:10px">
                         <input type="checkbox" id="captions-self-toggle" disabled>
                         <span class="toggle-slider"></span>
                         <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Also caption my own voice</span>
                     </label>
+                    <label class="settings-toggle" style="margin-top:10px">
+                        <input type="checkbox" id="captions-gpu-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Use the GPU for captions (WebGPU)</span>
+                    </label>
+                    <p class="settings-hint">Off by default (CPU). On, the speech model runs on the graphics card, which decodes a window several times faster on a machine that has one — turn it on if captions lag behind the call — and measure it instead of assuming, with the benchmark below. It changes speed, not accuracy: a wrong word came from the model itself. If the GPU cannot take it (no WebGPU in this webview, no driver, an out-of-memory card) the page falls back to the CPU and the status line says which engine is actually running. Captions carry no new exposure either way — the model is still the one bundled in the app, run on this device.</p>
+                    <p class="settings-hint" id="captions-gpu-hint"></p>
+                    <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+                        <button class="btn btn-secondary" id="captions-bench-btn">Benchmark this machine</button>
+                        <span id="captions-bench-status" style="font-size:12px;color:var(--text-secondary)"></span>
+                    </div>
+                    <pre class="settings-hint" id="captions-bench-result" style="display:none;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;margin:6px 0 0;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:8px;padding:8px 10px"></pre>
                     <p class="settings-hint" id="captions-status"></p>
                     <p class="settings-hint">Captions are transcribed <b>on this device</b> by a speech model bundled in the app — no speech service, no network, nothing decrypted ever leaves the machine. Each participant is transcribed from the audio this device already decrypts to play it, so every line says who said it; captions are never sent to the other people in the call, never written to disk, and never put in notifications or logs.</p>
+                </div>
+                <div class="settings-group">
+                    <h4>Other Apps' Audio</h4>
+                    <label class="settings-toggle" style="margin-top:8px">
+                        <input type="checkbox" id="voice-pause-other-audio">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label" style="font-size:13px;color:var(--text-primary)">Pause other apps' music when I join a call</span>
+                    </label>
+                    <p class="settings-hint">On by default. Joining a call or a voice channel asks Android for transient audio focus, which pauses whatever else is playing on the phone and hands it back when you hang up. Turn it off to leave your music playing underneath the call — useful when a call is background noise (a watch-along, a long open room) rather than something you are speaking in. Flips take effect immediately, including mid-call. Android only: a desktop browser has no equivalent to hand playback back from, and nothing there pauses your music either way.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Hear Yourself (Test Mic)</h4>
@@ -2235,8 +2288,15 @@
     <script src="libsodium-wrappers.js"></script>
     <script src="crypto.js?v=10"></script>
     <script src="qrcode.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js" integrity="sha384-8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k" crossorigin="anonymous"></script>
+    <!-- The QR scanner ships with the app (tools/fetch-qr-assets.mjs). It used to
+         come from cdn.jsdelivr.net; a third-party script origin in front of an
+         origin that holds decrypted messages and the session token is the one
+         dependency this app cannot justify, and the CSP no longer names any
+         external origin. The vendored copy is byte-identical to what SRI was
+         enforcing (sha384 verified on the way in).
+         qrcode-generator is NOT needed: qrcode.js above already is that library
+         (same API, same output) — its CDN tag was removed. -->
+    <script src="vendor/jsqr/jsQR.js"></script>
     <!-- ===== Voice UI containers (managed by voice.js) ===== -->
 
     <!-- Voice bar (bottom-left; hidden while viewing the voice channel itself) -->
@@ -2563,13 +2623,16 @@
 <script src="ui-dialog.js?v=1"></script>
 <script src="keyvault.js?v=2"></script>
 <script src="secure-storage.js?v=5"></script>
-    <script src="voice.js?v=35"></script>
+    <script src="voice.js?v=36"></script>
     <script src="soundboard-pairing.js?v=12"></script>
     <script src="thread_categories_shortcuts.js?v=11"></script>
     <script src="roles.js?v=5"></script>
     <script src="doc-preview.js?v=5"></script>
-    <script src="chat.js?v=72"></script>
-<script src="captions.js?v=3"></script>
+    <script src="chat.js?v=74"></script>
+<!-- The always-on "clear all app data" overlay: one button, every page, whether
+     or not a connection exists. Inert in the mini call-controls window. -->
+<script src="app-overlay.js?v=1"></script>
+<script src="captions.js?v=5"></script>
 <!-- F15: custom UI icon packs (app-only settings tab) -->
 <script src="icon-packs.js?v=2"></script>
     <!-- Android shell: immersive system bars, Back closing the top layer, the

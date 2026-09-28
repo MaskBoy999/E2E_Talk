@@ -29,7 +29,13 @@
 (function () {
     'use strict';
 
-    var MAX_MAP_BYTES = 480 * 1024;   // server caps the ciphertext at 512 KiB
+    // Largest ciphertext one slot may store. This is the SAME number (and the
+    // same units — the encrypted string the server receives) as
+    // MAX_ICON_SLOT_B64 in server/src/handlers.rs; when the two drifted, the
+    // page's own limit was *larger* than the server's, so a pack could pass every
+    // check here and still be rejected with a 413 that nothing looked at. The
+    // result was "the icon is there until I switch slots, then it is gone".
+    var MAX_SLOT_CIPHERTEXT = 4 * 1024 * 1024;
     var DEFAULT_GRID_ICON = 'file';
     var SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -386,15 +392,53 @@
         }
     }
 
+    /** Human-readable size, for the messages a user has to act on. */
+    function kb(bytes) {
+        return Math.round(bytes / 1024) + ' KB';
+    }
+
+    /**
+     * The server's own `{error: "…"}` text for a failed response, so the reason
+     * shown is the reason that happened ("icon pack too large (6110 KiB; the
+     * limit is 4096 KiB)") rather than a generic failure.
+     */
+    function httpError(r, what) {
+        return r.json().then(function (body) {
+            return (body && body.error) || '';
+        }).catch(function () { return ''; }).then(function (detail) {
+            throw new Error(detail || what + ' failed (HTTP ' + r.status + ')')
+        });
+    }
+
+    /**
+     * Store one slot's map, then make it active.
+     *
+     * Every failure is a rejection with a message that says what to do about it:
+     * the previous revision fired this request and never looked at the response,
+     * so a slot the server refused (413 above all) was reported as "Saved to slot
+     * 1 and applied", the local draft was thrown away, and the icons vanished at
+     * the next render — which for a picture icon is the next slot switch.
+     */
     function saveSlot(slot, map) {
-        var enc = encryptMap(map);
-        return authFetch('/api/user-icons/slot/' + slot, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(enc),
-        }).then(function (r) {
-            _slots = null;
-            return setActive(slot);
+        return Promise.resolve().then(function () {
+            var enc = encryptMap(map);
+            if (enc.encrypted_icons.length > MAX_SLOT_CIPHERTEXT) {
+                throw new Error('That pack is ' + kb(enc.encrypted_icons.length) + ' once encrypted, and one icon slot '
+                    + 'can hold ' + kb(MAX_SLOT_CIPHERTEXT) + '. A picture icon is stored whole (so an animated one '
+                    + 'keeps animating), which is what makes this big: crop the animation tighter, shorten it, or use '
+                    + 'an .svg for that icon.');
+            }
+            return { enc: enc, bytes: enc.encrypted_icons.length };
+        }).then(function (prepared) {
+            return authFetch('/api/user-icons/slot/' + slot, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(prepared.enc),
+            }).then(function (r) {
+                if (!r.ok) return httpError(r, 'Saving the pack');
+                _slots = null;
+                return setActive(slot).then(function () { return prepared.bytes; });
+            });
         });
     }
 
@@ -411,6 +455,7 @@
             body: JSON.stringify({ active_slot: slot }),
         }).then(function (r) {
             _slots = null;
+            if (!r.ok) return httpError(r, 'Switching icons');
             return r;
         });
     }
@@ -500,7 +545,8 @@
                     localStorage.removeItem('iconDraft_1');
                     localStorage.removeItem('iconDraft_2');
                     resetToBuiltIn();
-                    setActive(0).then(function () { renderTab(container); });
+                    setActive(0).then(function () { renderTab(container); })
+                        .catch(function (e) { note('Using the built-in icons here, but the server was not told: ' + e.message, true); });
                     return;
                 }
                 localStorage.setItem('iconEditingSlot', String(c.id));
@@ -509,7 +555,8 @@
                     // behaves the same way) — the draft survives for the other one.
                     var map = slotMap(c.id);
                     applyMap(map);
-                    setActive(c.id).then(function () { renderTab(container); });
+                    setActive(c.id).then(function () { renderTab(container); })
+                        .catch(function (e) { note('Slot ' + c.id + ' is applied here, but the server was not told: ' + e.message, true); });
                 } else {
                     renderTab(container);
                 }
@@ -550,6 +597,10 @@
         container.appendChild(singleInput);
 
         var status = el('div', 'font-size:12px;color:var(--text-muted);margin:0 0 10px;min-height:16px');
+        // An id, not a style-attribute selector: every async handler here re-renders
+        // the tab, and writing to a detached node is how a successful-looking
+        // message goes missing.
+        status.id = 'icon-pack-status';
         container.appendChild(status);
 
         var hint = el('div', 'font-size:11px;color:var(--text-muted);margin:0 0 10px;line-height:1.45',
@@ -561,6 +612,24 @@
         status.textContent = 'Slot ' + editing + ' draft: ' + customCount + ' of ' + names.length +
             ' icons customised' + (active === editing ? ' (live)' : ' (not active yet)') +
             '. Click an icon below to replace just that one.';
+        if (_draftNotStored) {
+            status.style.color = 'var(--danger,#ed4245)';
+            status.textContent += ' This draft is too large to keep on this device between reloads —' +
+                ' press "Save & apply" now to store it on the server.';
+        }
+        if (_flash) {
+            status.style.color = _flash.error ? 'var(--danger,#ed4245)' : 'var(--accent,#4fc3f7)';
+            status.textContent = _flash.msg;
+            _flash = null;
+        }
+
+        /** Say something in the status line, whichever render is current. */
+        function note(msg, isError) {
+            var st = document.getElementById('icon-pack-status');
+            if (!st) return;
+            st.style.color = isError ? 'var(--danger,#ed4245)' : 'var(--accent,#4fc3f7)';
+            st.textContent = msg;
+        }
 
         // ── icon grid ──
         var grid = el('div', 'display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px');
@@ -619,9 +688,8 @@
                 if (unknown.length) msg += ' Ignored (no such icon in this app): ' + unknown.slice(0, 6).join(', ') +
                     (unknown.length > 6 ? '…' : '') + '.';
                 msg += ' Press "Save & apply" to store it.';
+                flash(msg, !added);
                 renderTab(container);
-                var st = container.querySelector('div[style*="min-height:16px"]');
-                if (st) { st.style.color = added ? 'var(--accent,#4fc3f7)' : 'var(--danger,#ed4245)'; st.textContent = msg; }
             };
             reader.onerror = function () { status.style.color = 'var(--danger,#ed4245)'; status.textContent = 'Could not read that file.'; };
             reader.readAsText(file);
@@ -659,21 +727,16 @@
         });
 
         save.addEventListener('click', function () {
-            var bytes = JSON.stringify(_draft).length;
-            if (bytes > MAX_MAP_BYTES) {
-                status.style.color = 'var(--danger,#ed4245)';
-                status.textContent = 'That pack is too large (' + Math.round(bytes / 1024) + ' KB). Keep it under ' +
-                    Math.round(MAX_MAP_BYTES / 1024) + ' KB — icons are shapes, not photos.';
-                return;
-            }
             save.textContent = 'Saving…';
             save.disabled = true;
-            saveSlot(editing, _draft).then(function () {
+            // The draft is only discarded once the SERVER took it (the promise
+            // resolves after `setActive` succeeded) — a failure keeps it in memory
+            // and in localStorage so the icons are still there to fix and retry.
+            saveSlot(editing, _draft).then(function (bytes) {
                 localStorage.removeItem('iconDraft_' + editing);
                 localStorage.setItem('iconEditingSlot', String(editing));
                 applyMap(_draft);
-                status.style.color = 'var(--accent,#4fc3f7)';
-                status.textContent = 'Saved to slot ' + editing + ' and applied.';
+                flash('Saved to slot ' + editing + ' and applied (' + kb(bytes) + ' encrypted).');
                 renderTab(container);
             }).catch(function (e) {
                 status.style.color = 'var(--danger,#ed4245)';
@@ -686,7 +749,9 @@
         clear.addEventListener('click', function () {
             clearSlot(editing).then(function () {
                 localStorage.removeItem('iconDraft_' + editing);
-                if ((_slots && _slots.active_slot) === editing || active === editing) setActive(0);
+                if ((_slots && _slots.active_slot) === editing || active === editing) {
+                    setActive(0).catch(function () {});
+                }
                 _draft = {};
                 resetToBuiltIn();
                 renderTab(container);
@@ -722,8 +787,37 @@
         if (editing === active) applyMap(_draft);
     }
 
+    /**
+     * A message for the status line of the *next* render.
+     *
+     * Needed because every handler here ends by re-rendering the tab, and that
+     * render is asynchronous (`fetchSlots(true)`): writing straight to the status
+     * element after calling `renderTab()` writes into a node that is about to be
+     * thrown away, so a successful save announced itself and then showed the
+     * draft line instead. The message is consumed by the render it belongs to.
+     */
+    var _flash = null;
+    function flash(msg, isError) { _flash = { msg: msg, error: !!isError }; }
+
+    /**
+     * Keep the working map across tab re-renders and reloads.
+     *
+     * localStorage is a 5 MB budget and a picture icon is a whole base64 data
+     * URL, so a big pack (or two of them, one per slot) can genuinely not fit —
+     * and that used to be a silent `catch {}`, which reads exactly like "my icons
+     * disappeared". The failure is now remembered and shown next to the grid,
+     * where "press Save & apply now" is the fix.
+     */
+    var _draftNotStored = false;
     function stashDraft() {
-        try { localStorage.setItem('iconDraft_' + _draftSlot, JSON.stringify(_draft)); } catch (_) {}
+        try {
+            localStorage.setItem('iconDraft_' + _draftSlot, JSON.stringify(_draft));
+            _draftNotStored = false;
+            return true;
+        } catch (_) {
+            _draftNotStored = true;
+            return false;
+        }
     }
 
     // `icon()` lives in index.html and returns markup, not a node; the tab needs

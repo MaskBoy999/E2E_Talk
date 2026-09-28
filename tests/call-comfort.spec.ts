@@ -123,6 +123,90 @@ test.describe('call comfort (6.1 battery prompt, 6.2 keep screen on)', () => {
 });
 
 /**
+ * Audio focus as a setting — FEATURE_PLAN.md 1.4:
+ *   the call used to take transient audio focus unconditionally, which is what
+ *   pauses whatever else the phone is playing. That is now
+ *   Settings → Voice → Other Apps' Audio, and a toggle that does not reach the
+ *   Android service would be decoration: these tests check the setting, the
+ *   payload the service reads, and that the choice survives a reload.
+ */
+test.describe('pausing other audio is the user\'s choice (1.4)', () => {
+    test('defaults to on, drives the start and state payloads, and persists', async ({ page }) => {
+        await mockAndroidBox(page);
+        await register(page, unique('audiofocus'));
+
+        // The control exists, is in the Voice tab, and defaults to ON — the
+        // behaviour the app had before it was a choice.
+        await page.click('#settings-btn');
+        await page.click('.settings-tab[data-tab="voice-settings"]');
+        await expect(page.locator('#voice-pause-other-audio')).toBeChecked();
+
+        const onPayloads = await page.evaluate(async () => {
+            const w = window as any;
+            w.__invokes.length = 0;
+            w.VoiceManager.boxCallService('start');
+            w.VoiceManager.boxCallState();
+            await new Promise((r) => setTimeout(r, 50));
+            const pick = (cmd: string) =>
+                w.__invokes.filter((i: any) => i.cmd === cmd).map((i: any) => i.args.pauseOtherAudio);
+            return {
+                start: pick('plugin:call-service|start'),
+                state: pick('plugin:call-service|updateCallState'),
+                // The privacy invariant from the 1.1 suite still holds: the
+                // payload is booleans and media-type ids only.
+                scalars: w.__invokes
+                    .filter((i: any) => i.cmd === 'plugin:call-service|updateCallState')
+                    .every((i: any) => Object.values(i.args).every((v: any) => typeof v === 'boolean' || Array.isArray(v))),
+            };
+        });
+        expect(onPayloads.start).toEqual([true]);
+        expect(onPayloads.state).toEqual([true]);
+        expect(onPayloads.scalars).toBe(true);
+
+        // Turn it off through the real control (the checkbox itself is hidden —
+        // the visible control is the label), and check both the stored setting
+        // and what the service would be told.
+        await page.evaluate(() => {
+            const el = document.getElementById('voice-pause-other-audio') as HTMLInputElement;
+            el.checked = false;
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        expect(
+            await page.evaluate(() => JSON.parse(localStorage.getItem('voice_settings') || '{}').pauseOtherAudio),
+        ).toBe(false);
+
+        const offPayloads = await page.evaluate(async () => {
+            const w = window as any;
+            w.__invokes.length = 0;
+            w.VoiceManager.boxCallService('start');
+            w.VoiceManager.boxCallState();
+            await new Promise((r) => setTimeout(r, 50));
+            const pick = (cmd: string) =>
+                w.__invokes.filter((i: any) => i.cmd === cmd).map((i: any) => i.args.pauseOtherAudio);
+            return {
+                setting: w.VoiceManager.getState().settings.pauseOtherAudio,
+                start: pick('plugin:call-service|start'),
+                state: pick('plugin:call-service|updateCallState'),
+            };
+        });
+        expect(offPayloads.setting).toBe(false);
+        expect(offPayloads.start).toEqual([false]);
+        // The state update is what releases the audio session when the toggle is
+        // flipped during a call (voice.js sends it immediately while connected).
+        expect(offPayloads.state).toEqual([false]);
+
+        // The choice is remembered, not reset to the default by a reload.
+        await page.reload();
+        await page.click('#settings-btn');
+        await page.click('.settings-tab[data-tab="voice-settings"]');
+        await expect(page.locator('#voice-pause-other-audio')).not.toBeChecked();
+        expect(
+            await page.evaluate(() => JSON.parse(localStorage.getItem('voice_settings') || '{}').pauseOtherAudio),
+        ).toBe(false);
+    });
+});
+
+/**
  * Call notification actions — FEATURE_PLAN.md Sprint S 1.1:
  *   the ongoing-call notification carries Mute/Unmute, Deafen/Undeafen and
  *   Hang up, driven by a new `updateCallState` command whose payload must be

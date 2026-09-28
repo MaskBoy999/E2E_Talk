@@ -121,7 +121,8 @@ async fn security_headers_mw(request: Request, next: Next) -> Response {
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            CSP,
+
         ),
     );
     headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
@@ -133,6 +134,30 @@ async fn security_headers_mw(request: Request, next: Next) -> Response {
     );
     response
 }
+
+/// The app's Content-Security-Policy, in one place so the two responses that
+/// carry it (the middleware above and the static-file handler below) cannot
+/// drift apart.
+///
+/// **No external origin is named.** `script-src` used to include
+/// `https://cdn.jsdelivr.net` for jsQR and qrcode-generator; both now ship with
+/// the app (`static/vendor/jsqr/jsQR.js`; qrcode-generator was already there as
+/// `static/qrcode.js`), so a third-party CDN is no longer in the script path of
+/// an origin that holds decrypted messages and the session token. That is also
+/// why the HTML no longer carries `integrity=` attributes: SRI protects against
+/// a *changed* file, not against the vendor being in the path at all.
+///
+/// The two remaining weakenings are deliberate and documented, because both are
+/// load-bearing today:
+///   * `'unsafe-inline'` — the app's HTML carries inline bootstrap scripts. The
+///     fix (per-response nonce injected by the static handler, then dropping
+///     this) is tracked; until then, treat every injection sink as XSS.
+///   * `'unsafe-eval'` — the vendored speech stack (onnxruntime-web / the
+///     transformers.js bundle) and `libsodium-sumo.js` are large generated
+///     bundles; `wasm-unsafe-eval` covers WebAssembly, and this one is kept for
+///     the JS they generate at load time. It is the next thing to remove, after
+///     checking the ASR path in a real call.
+const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 /// G2 — Per-user + per-IP rate limit on authenticated state-changing /api calls.
 /// Skips the endpoints that have their own limiters (login/register/reauth,
@@ -426,7 +451,7 @@ async fn serve_static(
             headers.insert("pragma", HeaderValue::from_static("no-cache"));
             headers.insert("expires", HeaderValue::from_static("0"));
             headers.insert("content-security-policy", HeaderValue::from_static(
-                "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+                CSP
             ));
             headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
             headers.insert("x-frame-options", HeaderValue::from_static("DENY"));

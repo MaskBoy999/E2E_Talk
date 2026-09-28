@@ -327,5 +327,10 @@
 <!-- Android shell: the bars stay out of the way on the address screen too, and
      Back there has nothing to close, so it leaves the app (box-shell.js). -->
 <script src="box-shell.js?v=5"></script>
+<!-- The always-on "clear all app data" overlay: this is the "no connection yet"
+     screen, and it can hold the leftovers of an old one — including the saved
+     address itself, which is why this page needs the button too. It asks the
+     shell over `box:clear-connection` (app-overlay.js). -->
+<script src="app-overlay.js?v=1"></script>
 </body>
 </html>

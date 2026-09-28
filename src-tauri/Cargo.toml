@@ -1,6 +1,6 @@
 [package]
 name = "e2e-chat-app"
-version = "0.2.34"
+version = "0.2.35"
 description = "E2E Chat — native desktop shell for the encrypted chat app"
 authors = ["E2E Chat"]
 edition = "2021"
@@ -57,6 +57,13 @@ windows-core = "0.61"
 # this adds no compilation beyond naming the interfaces (windows 0.61 is
 # already in the tree via wry/tauri).
 windows = { version = "0.61", features = ["Data_Xml_Dom", "UI_Notifications", "Foundation"] }
+
+# Linux-only: the WebKitGTK certificate hook (src/linux_webview.rs). wry already
+# builds webkit2gtk 2.0 with v2_40 for the same target, so naming it here adds no
+# compilation — it only makes `WebView`/`WebContext` reachable, which is the whole
+# point (wry exposes no TLS API and Tauri hands us the raw view).
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_6"] }
 
 [profile.release]
 codegen-units = 1

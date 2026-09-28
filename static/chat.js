@@ -4978,6 +4978,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // (each device can have its own). Per-section blur/dim tune how the
     // picture looks behind each surface; off by default (no image set).
     var APP_BG_KEY = 'app_bg';
+    // The animation-rate bounds. These are declared here, above
+    // normalizeAppBgSettings, because that runs while the settings are LOADED —
+    // with them declared further down (where the animated wallpaper lives) a
+    // stored rate was clamped against `undefined` and came back NaN, so every
+    // reload silently dropped a 0.5× wallpaper back to 1×.
+    var MIN_ANIM_SPEED = 0.25;
+    var MAX_ANIM_SPEED = 3;
     var appBgSections = [
         { key: 'strip',   label: 'Server Strip',    defaultBlur: 6,  defaultDim: 55 },
         { key: 'sidebar', label: 'Sidebar',         defaultBlur: 8,  defaultDim: 55 },
@@ -4991,10 +4998,28 @@ document.addEventListener('DOMContentLoaded', () => {
     function defaultAppBgSettings() {
         var sections = {};
         appBgSections.forEach(function (s) { sections[s.key] = { on: true, blur: s.defaultBlur, dim: s.defaultDim }; });
-        return { img: '', pos: 'center center', zoom: 100, panX: 0, panY: 0, sections: sections };
+        // `anim` is the KIND of animated wallpaper in use ('', 'gif' or 'video') —
+        // never the bytes; they live in IndexedDB (see the Animated wallpaper
+        // block below). `animName` is only ever shown back to the user, and
+        // `animMime` is what the re-timer needs to decode the frames.
+        //
+        // `speed` is the animation's playback rate (1 = the file's own rate).
+        // It is one number for the whole wallpaper, not one per section: there
+        // is a single decoded animation behind every section (per-section blur
+        // and dim are what vary), so a per-section speed would be seven controls
+        // for one value — and seven video decoders on a phone.
+        return { img: '', anim: '', animName: '', animMime: '', speed: 1, pos: 'center center', zoom: 100, panX: 0, panY: 0, sections: sections };
     }
     function normalizeAppBgSettings(parsed) {
-        if (!parsed || typeof parsed !== 'object' || !parsed.img) return defaultAppBgSettings();
+        // A wallpaper is a still picture, an animation, or neither — the old
+        // `!parsed.img` shortcut would have thrown an animated-only background
+        // away every time the settings were loaded.
+        if (!parsed || typeof parsed !== 'object' || !(parsed.img || parsed.anim)) return defaultAppBgSettings();
+        if (parsed.anim !== 'gif' && parsed.anim !== 'video') parsed.anim = '';
+        if (typeof parsed.animName !== 'string') parsed.animName = '';
+        if (typeof parsed.animMime !== 'string') parsed.animMime = '';
+        if (typeof parsed.speed !== 'number' || !isFinite(parsed.speed) || parsed.speed <= 0) parsed.speed = 1;
+        parsed.speed = Math.min(MAX_ANIM_SPEED, Math.max(MIN_ANIM_SPEED, parsed.speed));
         var d = defaultAppBgSettings();
         parsed.sections = parsed.sections || {};
         appBgSections.forEach(function (s) {
@@ -5032,24 +5057,29 @@ document.addEventListener('DOMContentLoaded', () => {
         var ym = { top: '0%', center: '50%', bottom: '100%' }[y] || '50%';
         return xm + ' ' + ym;
     }
-    function applyAppBg() {
-        var bgEl = document.getElementById('app-bg');
-        if (!bgEl) return;
-        var has = !!appBgSettings.img;
-        document.body.classList.toggle('app-bg-on', has);
-        if (!has) return;
-        bgEl.style.backgroundImage = 'url("' + appBgSettings.img + '")';
+    /** The position/pan string, shared by the still picture and the animated layers. */
+    function appBgPositionCss() {
         // Pixel pan offsets (drag-to-move in edit mode) sit on top of the 9-way
         // position origin. Without pan the plain position string is kept so
         // existing behavior (and tests) see exactly 'left top' etc.
         if (appBgSettings.panX || appBgSettings.panY) {
             var originParts = appBgPosToOrigin(appBgSettings.pos).split(/\s+/);
-            bgEl.style.backgroundPosition =
-                'calc(' + (originParts[0] || '50%') + ' + ' + (appBgSettings.panX || 0) + 'px) ' +
+            return 'calc(' + (originParts[0] || '50%') + ' + ' + (appBgSettings.panX || 0) + 'px) ' +
                 'calc(' + (originParts[1] || '50%') + ' + ' + (appBgSettings.panY || 0) + 'px)';
-        } else {
-            bgEl.style.backgroundPosition = appBgSettings.pos || 'center center';
         }
+        return appBgSettings.pos || 'center center';
+    }
+    function applyAppBg() {
+        var bgEl = document.getElementById('app-bg');
+        if (!bgEl) return;
+        // "On" for either kind of wallpaper: an animation with no still picture
+        // behind it is a complete, valid background.
+        var has = !!(appBgSettings.img || appBgSettings.anim);
+        document.body.classList.toggle('app-bg-on', has);
+        if (!has) { showAnimLayer(); return; }
+        bgEl.style.backgroundImage = appBgSettings.img ? 'url("' + appBgSettings.img + '")' : '';
+        bgEl.style.backgroundPosition = appBgPositionCss();
+        showAnimLayer();
         bgEl.style.transform = 'scale(' + (Math.max(100, appBgSettings.zoom || 100) / 100) + ')';
         bgEl.style.transformOrigin = appBgPosToOrigin(appBgSettings.pos);
         var root = document.documentElement;
@@ -5120,18 +5150,76 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     function updateAppBgUI() {
-        var has = !!appBgSettings.img;
+        // A wallpaper is a still picture OR an animation, so an animation-only
+        // background must show the position/zoom/section controls too — otherwise
+        // "all its settings" would be unreachable for exactly the wallpaper they
+        // were asked for.
+        var has = !!(appBgSettings.img || appBgSettings.anim);
         var uploadBtn = document.getElementById('app-bg-upload-btn');
         var removeBtn = document.getElementById('app-bg-remove-btn');
         var thumb = document.getElementById('app-bg-thumb');
         var controls = document.getElementById('app-bg-controls');
         if (uploadBtn) uploadBtn.innerHTML = has ? icon('image') + ' Change Image' : icon('image') + ' Choose Image';
+        var animBtn = document.getElementById('app-bg-anim-upload-btn');
+        if (animBtn) {
+            animBtn.innerHTML = icon('image') + (appBgSettings.anim ? ' Change Animation' : ' Choose Animation');
+        }
         if (removeBtn) removeBtn.style.display = has ? '' : 'none';
         var editBtn = document.getElementById('app-bg-edit-btn');
         if (editBtn) editBtn.style.display = (has && isAppBgDesktop()) ? '' : 'none';
         if (thumb) {
             thumb.style.display = has ? '' : 'none';
-            if (has) thumb.style.backgroundImage = 'url("' + appBgSettings.img + '")';
+            thumb.style.backgroundImage = appBgSettings.img ? 'url("' + appBgSettings.img + '")' : '';
+            // The preview box plays the animation too — at the chosen rate — so
+            // the settings panel shows what the app actually looks like rather
+            // than a still of it. A re-timed picture needs a canvas here as well
+            // as behind the app, which is why the wanted element is decided
+            // before anything is created or removed.
+            var wantThumbKind = (!appBgSettings.anim || !_animUrl) ? 'none'
+                : (appBgSettings.anim === 'video' ? 'video' : (canRetimePicture() ? 'canvas' : 'img'));
+            var thumbAnim = document.getElementById('app-bg-thumb-anim');
+            var thumbCanvas = document.getElementById('app-bg-thumb-canvas');
+            var thumbTag = thumbAnim ? thumbAnim.tagName.toLowerCase() : '';
+            var thumbWrong = !!thumbAnim && thumbAnim.parentNode && (
+                wantThumbKind === 'none' || wantThumbKind === 'canvas' ||
+                (wantThumbKind === 'video' && thumbTag !== 'video') ||
+                (wantThumbKind === 'img' && thumbTag !== 'img'));
+            if (thumbWrong) {
+                thumbAnim.parentNode.removeChild(thumbAnim);
+                thumbAnim = null;
+            }
+            if (thumbCanvas && wantThumbKind !== 'canvas') {
+                if (_thumbGifPlayer) { try { _thumbGifPlayer.stop(); } catch (_) {} _thumbGifPlayer = null; }
+                if (thumbCanvas.parentNode) thumbCanvas.parentNode.removeChild(thumbCanvas);
+                thumbCanvas = null;
+            }
+            if (wantThumbKind === 'canvas' && !thumbCanvas) {
+                thumbCanvas = document.createElement('canvas');
+                thumbCanvas.id = 'app-bg-thumb-canvas';
+                thumbCanvas.setAttribute('aria-hidden', 'true');
+                thumbCanvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
+                thumb.appendChild(thumbCanvas);
+            }
+            if (wantThumbKind === 'canvas' && !_thumbGifPlayer) _thumbGifPlayer = createGifRetimer(thumbCanvas);
+            if ((wantThumbKind === 'video' || wantThumbKind === 'img') && !thumbAnim) {
+                thumbAnim = document.createElement(wantThumbKind);
+                thumbAnim.id = 'app-bg-thumb-anim';
+                thumbAnim.setAttribute('aria-hidden', 'true');
+                if (wantThumbKind === 'video') {
+                    thumbAnim.muted = true; thumbAnim.loop = true; thumbAnim.autoplay = true;
+                    thumbAnim.setAttribute('playsinline', '');
+                }
+                thumbAnim.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none';
+                thumb.appendChild(thumbAnim);
+            }
+            if (wantThumbKind === 'video' && thumbAnim) {
+                if (thumbAnim.getAttribute('src') !== _animUrl) thumbAnim.setAttribute('src', _animUrl);
+                try { thumbAnim.playbackRate = clampAnimSpeed(animSpeed()); } catch (_) {}
+                var tp = thumbAnim.play();
+                if (tp && tp.catch) tp.catch(function () {});
+            } else if (wantThumbKind === 'img' && thumbAnim) {
+                if (thumbAnim.getAttribute('src') !== _animUrl) thumbAnim.setAttribute('src', _animUrl);
+            }
         }
         if (controls) controls.style.display = has ? '' : 'none';
         var posSel = document.getElementById('app-bg-pos');
@@ -5146,6 +5234,29 @@ document.addEventListener('DOMContentLoaded', () => {
         var editZoomVal = document.getElementById('app-bg-edit-zoom-val');
         if (editZoom) editZoom.value = appBgSettings.zoom || 100;
         if (editZoomVal) editZoomVal.textContent = (appBgSettings.zoom || 100) + '%';
+        // Animation speed: only meaningful with an animation, and honest about
+        // what this webview can actually re-time.
+        var hasAnim = !!appBgSettings.anim;
+        var speedRow = document.getElementById('app-bg-anim-speed-row');
+        var editSpeedWrap = document.getElementById('app-bg-edit-speed-wrap');
+        if (speedRow) speedRow.style.display = hasAnim ? '' : 'none';
+        if (editSpeedWrap) editSpeedWrap.style.display = hasAnim ? 'flex' : 'none';
+        var speedIn = document.getElementById('app-bg-speed');
+        var speedVal = document.getElementById('app-bg-speed-val');
+        var speedHint = document.getElementById('app-bg-speed-hint');
+        if (speedIn) speedIn.value = animSpeed();
+        if (speedVal) speedVal.textContent = animSpeedLabel(animSpeed());
+        if (speedHint) {
+            speedHint.textContent = hasAnim
+                ? (appBgSettings.anim === 'video' || gifRetimerSupported()
+                    ? 'One animation sits behind every section, so its speed is one setting rather than one per section.'
+                    : 'This webview cannot re-time a picture (no WebCodecs ImageDecoder), so a GIF keeps its own rate here — an MP4/WebM wallpaper is the one that takes a speed.')
+                : '';
+        }
+        var editSpeedIn = document.getElementById('app-bg-edit-speed');
+        var editSpeedVal = document.getElementById('app-bg-edit-speed-val');
+        if (editSpeedIn) editSpeedIn.value = animSpeed();
+        if (editSpeedVal) editSpeedVal.textContent = animSpeedLabel(animSpeed());
         var sectionsBox = document.getElementById('app-bg-sections');
         buildAppBgSectionRows(sectionsBox, false);
         syncAppBgSectionValues(sectionsBox);
@@ -5190,6 +5301,380 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         reader.readAsDataURL(file);
     }
+    // ===== Animated wallpaper (GIF / animated WebP/APNG / MP4 / WebM) =====
+    //
+    // The still wallpaper is a JPEG data URL inside localStorage, which is the
+    // one place an animation cannot live: the whole origin gets ~5 MB there, the
+    // bytes would be base64 (+37%) on top of that, and the still path *rasterises*
+    // through a canvas — which flattens an animation to its first frame. That is
+    // exactly why the still path cannot be reused for this.
+    //
+    // So the animation's bytes live in IndexedDB as a Blob (no quota cliff, no
+    // base64) and only the KIND ('gif' | 'video') is part of appBgSettings. The
+    // element is a <video> for a video file and an <img> for a GIF/WebP/APNG —
+    // both are inside #app-bg, so position, zoom, pan and every per-section
+    // blur/dim slider apply to an animation through exactly the same code the
+    // still picture uses. Re-encoding was never an option: a canvas round-trip is
+    // what would kill the animation, and the app is a chat client, not a video
+    // editor.
+    var APP_BG_DB = 'e2e_app_bg';
+    var APP_BG_DB_STORE = 'files';
+    var APP_BG_BLOB_KEY = 'wallpaper';
+    var MAX_ANIM_BYTES = 24 * 1024 * 1024;   // a wallpaper, not a film library
+    var _animUrl = null;                      // object URL for the stored blob
+    var _animBytes = null;                    // ArrayBuffer, only when re-timing
+    var _gifPlayer = null;                    // { stop() } while the canvas is animating
+    var _thumbGifPlayer = null;               // …and the one in the settings preview
+
+    function appBgDb() {
+        return new Promise(function (resolve, reject) {
+            var req;
+            try { req = indexedDB.open(APP_BG_DB, 1); } catch (e) { reject(e); return; }
+            req.onupgradeneeded = function () {
+                try { req.result.createObjectStore(APP_BG_DB_STORE); } catch (_) {}
+            };
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function () { reject(req.error || new Error('indexedDB unavailable')); };
+        });
+    }
+    function appBgBlobPut(blob) {
+        return appBgDb().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction(APP_BG_DB_STORE, 'readwrite');
+                tx.objectStore(APP_BG_DB_STORE).put(blob, APP_BG_BLOB_KEY);
+                tx.oncomplete = function () { resolve(); };
+                tx.onerror = tx.onabort = function () { reject(tx.error || new Error('could not store the file')); };
+            });
+        });
+    }
+    function appBgBlobGet() {
+        return appBgDb().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var req = db.transaction(APP_BG_DB_STORE, 'readonly').objectStore(APP_BG_DB_STORE).get(APP_BG_BLOB_KEY);
+                req.onsuccess = function () { resolve(req.result || null); };
+                req.onerror = function () { reject(req.error || new Error('could not read the file')); };
+            });
+        });
+    }
+    function appBgBlobDelete() {
+        return appBgDb().then(function (db) {
+            return new Promise(function (resolve) {
+                var tx = db.transaction(APP_BG_DB_STORE, 'readwrite');
+                tx.objectStore(APP_BG_DB_STORE).delete(APP_BG_BLOB_KEY);
+                tx.oncomplete = function () { resolve(); };
+                tx.onerror = tx.onabort = function () { resolve(); };
+            });
+        }).catch(function () {});
+    }
+
+    function appBgAnimStatus(msg, isError) {
+        var el = document.getElementById('app-bg-anim-status');
+        if (!el) return;
+        el.style.color = isError ? 'var(--danger,#ed4245)' : 'var(--text-muted,#8a8aa0)';
+        el.textContent = msg || '';
+    }
+
+    /** Stop using the animation and forget its bytes (used by Remove + still upload). */
+    function clearAnimWallpaper() {
+        appBgSettings.anim = '';
+        appBgSettings.animName = '';
+        appBgSettings.animMime = '';
+        stopAnimRetimers();
+        if (_animUrl) {
+            try { URL.revokeObjectURL(_animUrl); } catch (_) {}
+            _animUrl = null;
+        }
+        var thumbAnim = document.getElementById('app-bg-thumb-anim');
+        if (thumbAnim && thumbAnim.parentNode) thumbAnim.parentNode.removeChild(thumbAnim);
+        var thumbCanvas = document.getElementById('app-bg-thumb-canvas');
+        if (thumbCanvas && thumbCanvas.parentNode) thumbCanvas.parentNode.removeChild(thumbCanvas);
+        appBgBlobDelete();
+        appBgAnimStatus('');
+    }
+
+    // ===== Animation speed =====
+    //
+    // A <video> takes a playback rate directly. A GIF/WebP/APNG <img> does not:
+    // the browser animates it at the delays baked into the file and offers no way
+    // to slow it down or speed it up. So when a rate other than 1× is asked for
+    // on a picture animation, its frames are decoded here (WebCodecs'
+    // ImageDecoder) and drawn onto a canvas on a timer this code owns. On a
+    // webview with no ImageDecoder — WebKitGTK, which is what the Linux box runs
+    // — the control says so and video wallpapers are the ones that take a rate;
+    // the picture keeps animating at its own rate rather than freezing on frame
+    // one. Either way the FILE is untouched: at 1× the picture animates natively,
+    // through the <img>.
+    //
+    // The rate is deliberately one setting for the whole wallpaper rather than
+    // one per section. There is a single decoded animation behind every section —
+    // per-section blur and dim are what differ — so per-section speeds would be
+    // seven controls writing one number (and, for a video, seven decoders).
+    function animSpeed() {
+        var s = appBgSettings.speed;
+        return (typeof s === 'number' && isFinite(s) && s > 0) ? s : 1;
+    }
+    function animSpeedLabel(s) { return (Math.round((s || 1) * 100) / 100) + '×'; }
+    function clampAnimSpeed(s) { return Math.min(MAX_ANIM_SPEED, Math.max(MIN_ANIM_SPEED, s)); }
+    function gifRetimerSupported() {
+        try { return typeof window.ImageDecoder === 'function'; } catch (_) { return false; }
+    }
+    /** Can a picture animation be re-timed on this webview right now? */
+    function canRetimePicture() {
+        return !!(appBgSettings.anim === 'gif' && _animUrl && animSpeed() !== 1 && gifRetimerSupported());
+    }
+    function animMime() {
+        if (appBgSettings.animMime) return appBgSettings.animMime;
+        var name = (appBgSettings.animName || '').toLowerCase();
+        if (/\.webp$/.test(name)) return 'image/webp';
+        if (/\.apng$/.test(name)) return 'image/apng';
+        if (/\.png$/.test(name)) return 'image/png';
+        return 'image/gif';
+    }
+    /**
+     * The stored bytes, read once and held only while a rate needs them.
+     *
+     * Read from IndexedDB rather than `fetch()`ed from the object URL: the app's
+     * own CSP is `connect-src 'self' ws: wss:`, which refuses `fetch()` on a
+     * blob: URL, so the object URL cannot be the way the frames are reached
+     * (fetching it throws "Refused to connect because it violates the document's
+     * Content Security Policy"). The blob in IndexedDB is the same file, and
+     * reading it adds nothing to what the page already holds.
+     */
+    function animBytes() {
+        if (_animBytes) return Promise.resolve(_animBytes);
+        return appBgBlobGet().then(function (blob) {
+            if (!blob || !blob.arrayBuffer) return null;
+            return blob.arrayBuffer();
+        }).then(function (buf) {
+            _animBytes = buf || null;
+            return _animBytes;
+        }).catch(function () { return null; });
+    }
+    function stopAnimRetimers() {
+        if (_gifPlayer) { try { _gifPlayer.stop(); } catch (_) {} _gifPlayer = null; }
+        if (_thumbGifPlayer) { try { _thumbGifPlayer.stop(); } catch (_) {} _thumbGifPlayer = null; }
+        _animBytes = null;
+    }
+
+    /**
+     * Decode a stored picture animation and draw it at `animSpeed()`.
+     *
+     * The rate is read on every frame, so dragging the slider changes the
+     * wallpaper as it moves — no restart, no re-decode. Returns a player whose
+     * stop() releases the decoder and the copies of the frames.
+     */
+    function createGifRetimer(canvas) {
+        var ctx = canvas.getContext('2d');
+        var stopped = false, timer = null, decoder = null, frameIndex = 0, frameCount = 1;
+        var player = {
+            stop: function () {
+                stopped = true;
+                if (timer) clearTimeout(timer);
+                timer = null;
+                try { if (decoder && decoder.close) decoder.close(); } catch (_) {}
+                decoder = null;
+            },
+        };
+        if (!ctx) return player;
+
+        function sizeCanvas() {
+            var rect = canvas.getBoundingClientRect();
+            var dpr = Math.min(2, window.devicePixelRatio || 1);
+            var w = Math.max(1, Math.round((rect.width || window.innerWidth) * dpr));
+            var h = Math.max(1, Math.round((rect.height || window.innerHeight) * dpr));
+            if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+        }
+        function draw(frame) {
+            sizeCanvas();
+            var fw = frame.displayWidth || frame.codedWidth || canvas.width;
+            var fh = frame.displayHeight || frame.codedHeight || canvas.height;
+            var scale = Math.max(canvas.width / fw, canvas.height / fh);
+            var w = fw * scale, h = fh * scale;
+            ctx.drawImage(frame, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+        }
+        function step() {
+            if (stopped || !decoder) return;
+            decoder.decode({ frameIndex: frameIndex }).then(function (res) {
+                if (stopped) { try { res.image.close(); } catch (_) {} return; }
+                var frame = res.image;
+                draw(frame);
+                // The file's own frame delay, scaled by the rate in the settings.
+                var micros = frame.duration || 100000;
+                try { frame.close(); } catch (_) {}
+                frameIndex = (frameIndex + 1) % frameCount;
+                timer = setTimeout(step, Math.max(16, micros / 1000 / Math.max(MIN_ANIM_SPEED, animSpeed())));
+            }, function () {
+                // A frame that will not decode leaves the last one up; the
+                // background must not flash blank behind the app.
+            });
+        }
+
+        animBytes().then(function (buf) {
+            if (!buf || stopped) return null;
+            try { decoder = new window.ImageDecoder({ data: buf, type: animMime() }); }
+            catch (_) { decoder = null; return null; }
+            return Promise.all([
+                Promise.resolve(decoder.completed),
+                Promise.resolve(decoder.tracks && decoder.tracks.ready),
+            ]).then(function () {
+                if (stopped || !decoder) return null;
+                var track = decoder.tracks && decoder.tracks.selectedTrack;
+                frameCount = Math.max(1, (track && track.frameCount) || 1);
+                // A picture with one frame is a still, not an animation.
+                if (frameCount < 2) {
+                    decoder.decode({ frameIndex: 0 }).then(function (res) {
+                        if (stopped) { try { res.image.close(); } catch (_) {} return; }
+                        draw(res.image);
+                        try { res.image.close(); } catch (_) {}
+                    }, function () {});
+                    return null;
+                }
+                // The file's own loop count is ignored on purpose: a wallpaper
+                // that stops after one pass is not a wallpaper. (The <img> path
+                // honours it, which is exactly why a one-pass GIF looked frozen
+                // the moment it was re-timed.)
+                step();
+                return null;
+            });
+        }).catch(function () {});
+        return player;
+    }
+
+    /**
+     * Show whichever animated layer the settings call for, and hide both when
+     * they do not. Called from applyAppBg (which every setting change goes
+     * through), so the animation follows the position/zoom/pan and the per-section
+     * sliders exactly like the still picture.
+     */
+    function showAnimLayer() {
+        var img = document.getElementById('app-bg-anim-img');
+        var video = document.getElementById('app-bg-anim-video');
+        var canvas = document.getElementById('app-bg-anim-canvas');
+        if (!img || !video) return;
+        var kind = appBgSettings.anim;
+        var url = _animUrl;
+        // At 1× the picture animates natively and the <img> does the work; a
+        // rate needs the decoded frames, so the canvas takes over for as long as
+        // the slider is off 1.
+        var retiming = canRetimePicture();
+        var wantImg = kind === 'gif' && !!url && !retiming;
+        var wantVideo = kind === 'video' && !!url;
+        img.style.display = wantImg ? 'block' : 'none';
+        video.style.display = wantVideo ? 'block' : 'none';
+        if (canvas) canvas.style.display = retiming ? 'block' : 'none';
+        if (retiming) {
+            if (!_gifPlayer) _gifPlayer = createGifRetimer(canvas);
+        } else if (_gifPlayer) {
+            stopAnimRetimers();
+        }
+        var pos = appBgPositionCss();
+        if (wantImg) {
+            img.style.objectPosition = pos;
+            if (img.getAttribute('src') !== url) img.setAttribute('src', url);
+        }
+        if (wantVideo) {
+            video.style.objectPosition = pos;
+            if (video.getAttribute('src') !== url) video.setAttribute('src', url);
+            // A video takes the rate directly, and it applies to what is already
+            // playing — the slider previews live.
+            try { video.playbackRate = clampAnimSpeed(animSpeed()); } catch (_) {}
+            // A rejected play() (autoplay policy) leaves the first frame on
+            // screen, which is a usable background rather than an error.
+            var playing = video.play();
+            if (playing && playing.catch) playing.catch(function () {});
+        } else if (!video.paused) {
+            try { video.pause(); } catch (_) {}
+        }
+    }
+
+    /** Pull the stored animation out of IndexedDB and paint it (called once on boot). */
+    function loadAnimWallpaper() {
+        if (!appBgSettings.anim) return Promise.resolve();
+        return appBgBlobGet().then(function (blob) {
+            if (!blob) {
+                // The setting survived but the bytes did not (a device that
+                // imported an appearance backup, or storage eviction). Say so
+                // instead of leaving an animation that never animates.
+                clearAnimWallpaper();
+                saveAppBg();
+                updateAppBgUI();
+                appBgAnimStatus('That animated wallpaper is not stored on this device any more — choose the file again.', true);
+                return;
+            }
+            if (_animUrl) { try { URL.revokeObjectURL(_animUrl); } catch (_) {} }
+            _animUrl = URL.createObjectURL(blob);
+            applyAppBg();
+            updateAppBgUI();
+        }).catch(function (e) {
+            appBgAnimStatus('Could not read the stored animation: ' + ((e && e.message) || 'storage error'), true);
+        });
+    }
+
+    var appBgAnimFile = document.getElementById('app-bg-anim-file');
+    var appBgAnimBtn = document.getElementById('app-bg-anim-upload-btn');
+    if (appBgAnimBtn && appBgAnimFile) {
+        appBgAnimBtn.addEventListener('click', function () { appBgAnimFile.value = ''; appBgAnimFile.click(); });
+        appBgAnimFile.addEventListener('change', function () {
+            var f = appBgAnimFile.files && appBgAnimFile.files[0];
+            if (!f) return;
+            var name = f.name || '';
+            var kind = '';
+            if (/^video\//i.test(f.type) || /\.(mp4|webm|m4v|mov)$/i.test(name)) kind = 'video';
+            else if (/^image\/(gif|webp|apng)$/i.test(f.type) || /\.(gif|webp|apng)$/i.test(name)) kind = 'gif';
+            if (!kind) {
+                appBgAnimStatus('Use a GIF, an animated WebP or APNG, or an MP4/WebM video.', true);
+                return;
+            }
+            if (f.size > MAX_ANIM_BYTES) {
+                appBgAnimStatus('That file is ' + Math.round(f.size / 1048576) + ' MB and the limit is ' +
+                    Math.round(MAX_ANIM_BYTES / 1048576) + ' MB — trim it or scale it down first.', true);
+                return;
+            }
+            appBgAnimStatus('Storing ' + name + '…');
+            appBgBlobPut(f).then(function () {
+                if (_animUrl) { try { URL.revokeObjectURL(_animUrl); } catch (_) {} }
+                _animUrl = URL.createObjectURL(f);
+                appBgSettings.anim = kind;
+                appBgSettings.animName = name;
+                appBgSettings.animMime = f.type || (/\.[a-z0-9]+$/i.exec(name) || [''])[0].toLowerCase()
+                    .replace('.gif', 'image/gif').replace('.webp', 'image/webp')
+                    .replace('.apng', 'image/apng').replace('.png', 'image/png')
+                    .replace('.mp4', 'video/mp4').replace('.m4v', 'video/mp4').replace('.mov', 'video/mp4')
+                    .replace('.webm', 'video/webm');
+                appBgSettings.img = '';        // one wallpaper at a time
+                saveAppBg();
+                applyAppBg();
+                updateAppBgUI();
+                appBgAnimStatus('Using ' + name + ' (' + Math.round(f.size / 1024) + ' KB) — position, zoom and every ' +
+                    'section below apply to it. It stays on this device.');
+            }).catch(function (e) {
+                appBgAnimStatus('Could not store that file: ' + ((e && e.message) || 'storage error'), true);
+            });
+        });
+    }
+
+    // A video wallpaper has no business decoding behind a hidden window. The
+    // GIF path needs nothing: the browser already throttles an <img> animation
+    // that is not being painted.
+    document.addEventListener('visibilitychange', function () {
+        var video = document.getElementById('app-bg-anim-video');
+        if (document.hidden) {
+            // Nothing should be decoding behind a hidden window: not a video and
+            // not the re-timer drawing frames nobody can see. Both come back from
+            // the stored file when the window is shown again.
+            stopAnimRetimers();
+            if (video && video.getAttribute('src')) { try { video.pause(); } catch (_) {} }
+            return;
+        }
+        if (appBgSettings.anim === 'video' && video && video.getAttribute('src')) {
+            var p = video.play();
+            if (p && p.catch) p.catch(function () {});
+        } else if (appBgSettings.anim === 'gif' && _animUrl) {
+            showAnimLayer();
+            updateAppBgUI();
+        }
+    });
+
     var appBgFile = document.getElementById('app-bg-file');
     var appBgUploadBtn = document.getElementById('app-bg-upload-btn');
     var appBgRemoveBtn = document.getElementById('app-bg-remove-btn');
@@ -5203,6 +5688,9 @@ document.addEventListener('DOMContentLoaded', () => {
             compressAppBgImage(f, function (dataUrl) {
                 if (!dataUrl) return;
                 appBgSettings.img = dataUrl;
+                // One wallpaper at a time, and the animation's bytes stop being
+                // referenced the moment the still picture replaces it.
+                clearAnimWallpaper();
                 saveAppBg();
                 applyAppBg();
                 updateAppBgUI();
@@ -5212,6 +5700,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (appBgRemoveBtn) {
         appBgRemoveBtn.addEventListener('click', function () {
             appBgSettings.img = '';
+            clearAnimWallpaper();
             saveAppBg();
             applyAppBg();
             updateAppBgUI();
@@ -5233,6 +5722,18 @@ document.addEventListener('DOMContentLoaded', () => {
             if (zoomVal) zoomVal.textContent = appBgSettings.zoom + '%';
         });
     }
+    var appBgSpeed = document.getElementById('app-bg-speed');
+    if (appBgSpeed) {
+        appBgSpeed.addEventListener('input', function () {
+            // applyAppBg is what reads the rate, and the re-timer reads it on
+            // every frame, so this is a live preview with no restart.
+            appBgSettings.speed = clampAnimSpeed(parseFloat(appBgSpeed.value) || 1);
+            saveAppBg();
+            applyAppBg();
+            var speedVal = document.getElementById('app-bg-speed-val');
+            if (speedVal) speedVal.textContent = animSpeedLabel(appBgSettings.speed);
+        });
+    }
 
     // ===== Live background edit mode (desktop) =====
     // Closing the settings modal and floating a compact panel over the REAL app
@@ -5240,7 +5741,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // seeing the picture behind the UI. Phone users keep the settings preview.
     function isAppBgDesktop() { return window.innerWidth > 768; }
     function enterAppBgEdit() {
-        if (!appBgSettings.img) return;
+        if (!appBgSettings.img && !appBgSettings.anim) return;
         hideModal('settings-modal');
         document.body.classList.add('app-bg-edit');
         var panel = document.getElementById('app-bg-edit-panel');
@@ -5275,6 +5776,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (appBgEditZoom) {
         appBgEditZoom.addEventListener('input', function () {
             appBgSettings.zoom = parseInt(appBgEditZoom.value, 10) || 100;
+            saveAppBg(); applyAppBg(); updateAppBgUI();
+        });
+    }
+    var appBgEditSpeed = document.getElementById('app-bg-edit-speed');
+    if (appBgEditSpeed) {
+        appBgEditSpeed.addEventListener('input', function () {
+            appBgSettings.speed = clampAnimSpeed(parseFloat(appBgEditSpeed.value) || 1);
             saveAppBg(); applyAppBg(); updateAppBgUI();
         });
     }
@@ -5413,6 +5921,11 @@ document.addEventListener('DOMContentLoaded', () => {
             saveAppBg();
             applyAppBg();
             updateAppBgUI();
+            // A backup carries the KIND of animation, never its bytes (a video is
+            // far too large to belong in a settings file). On the device it came
+            // from the blob is still in IndexedDB and this re-attaches it; on a
+            // new device it says so and clears the setting.
+            if (appBgSettings.anim) loadAnimWallpaper();
         }
         return true;
     }
@@ -5578,11 +6091,34 @@ document.addEventListener('DOMContentLoaded', () => {
     // if the window is shrunk into the phone layout.
     window.addEventListener('resize', function () {
         var editBtn = document.getElementById('app-bg-edit-btn');
-        if (editBtn) editBtn.style.display = (appBgSettings.img && isAppBgDesktop()) ? '' : 'none';
+        if (editBtn) editBtn.style.display = ((appBgSettings.img || appBgSettings.anim) && isAppBgDesktop()) ? '' : 'none';
         if (!isAppBgDesktop() && document.body.classList.contains('app-bg-edit')) exitAppBgEdit();
     });
+    /**
+     * Read-only diagnostic for devtools and tests: what the background layer is
+     * actually doing, instead of the caller having to infer it from styles.
+     * "Why is my animated wallpaper not animating" has four independent answers
+     * (no animation, the file's own rate, a webview that cannot re-time a
+     * picture, or a decode that failed) and this says which one it is.
+     */
+    window.__appBgDebug = function () {
+        var canvas = document.getElementById('app-bg-anim-canvas');
+        return {
+            img: !!appBgSettings.img,
+            anim: appBgSettings.anim,
+            speed: animSpeed(),
+            hasUrl: !!_animUrl,
+            retiming: canRetimePicture(),
+            retimerSupported: gifRetimerSupported(),
+            retimerRunning: !!_gifPlayer,
+            canvasDisplay: canvas ? canvas.style.display : 'missing',
+        };
+    };
     updateAppBgUI();
     applyAppBg();
+    // The animation is a Blob in IndexedDB, so it arrives after the first paint
+    // (and calls applyAppBg itself when it does).
+    loadAnimWallpaper();
 
     // Friend requests disabled setting
     const disableFrToggle = document.getElementById('disable-friend-requests-toggle');
@@ -6728,6 +7264,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // Clear all client-side data (localStorage, sessionStorage, non-HttpOnly cookies).
     // HttpOnly cookies can only be cleared by the server (see /api/logout GET).
     function clearAllClientData() {
+        // ONE wipe implementation now: app-overlay.js owns it, because the same
+        // wipe has to work on the login and address screens too (where this file
+        // is not loaded) and the always-on overlay button calls it. Delegating
+        // means "Clear All Data" here, the account-deletion path below and the
+        // overlay's "erase everything" can never disagree about what "all" is —
+        // which is exactly how the animated-wallpaper store nearly survived a
+        // wipe. The body underneath stays as the fallback for a page that loaded
+        // before the overlay file.
+        if (window.__appWipe && typeof window.__appWipe.wipe === 'function') {
+            return window.__appWipe.wipe();
+        }
         // Preserve the session-duration preference (Settings → Security): a
         // benign browser preference (a plain number, never keys or identity
         // data) that users shouldn't have to re-enter on every login. All
@@ -18110,6 +18657,10 @@ async function appendMessage(msg) {
         '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
+        // The way into the message menu that needs neither a hover nor a right
+        // button — the only control a phone can reach (see the touch rule in
+        // style.css), and a shortcut on a desktop trackpad.
+        '<button class="msg-action-btn" data-action="more" title="More" aria-label="More actions">&#x22EF;</button>' +
         '</div>';
 
     // E2E reactions: decrypt each reaction row with the server key (or its
@@ -18488,6 +19039,15 @@ function setupMessageActions() {
             togglePinMessage(messageId, false);
         } else if (action === 'thread') {
             openThreadPanel(messageId, currentChannelId);
+        } else if (action === 'more') {
+            // Same menu the right-click opens, anchored under the button.
+            // The click must not reach the document: a document-level handler
+            // dismisses any open menu on click, and it would close this one in
+            // the same breath it was opened (the right-click path already
+            // stops propagation for the same reason).
+            e.stopPropagation();
+            var moreRect = btn.getBoundingClientRect();
+            openMessageContextMenu(msgDiv, moreRect.left, moreRect.bottom);
         }
     });
 
@@ -18527,26 +19087,49 @@ document.getElementById('message-list').addEventListener('click', function(e) {
     }
 });
 
+// ─── What may be selected ────────────────────────────────────────────────────
+// style.css marks the chrome `user-select: none`, but a list of selectors can
+// never be complete — new panels, rows and labels appear all the time — so this
+// is the catch-all: a selection gesture is refused unless it starts on
+// something that is meant to be selected. Those exceptions are the ones asked
+// for in as many words: form fields (you have to be able to select what you
+// typed), the values that exist to be copied (invite code, friend code,
+// identity key), and message text on a machine with a pointer — the very same
+// media query the CSS uses, evaluated live, so the two cannot disagree.
+//
+// `preventDefault()` on `selectstart` is the one hook that stops a mouse drag
+// and a keyboard selection alike, and it is safe to refuse: everything that
+// genuinely needs selecting is allowed below.
+function selectionAllowed(target) {
+    if (!target || typeof target.closest !== 'function') return false;
+    if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return true;
+    if (target.closest('.identity-key-display, .friend-code-display, .identity-key-box .key-value')) return true;
+    // `selectstart` names the block the selection would live in, which for a
+    // message is `.content` (its anchor container), not `.text` — so both are
+    // accepted. The message's own chrome is still refused, by the CSS: a drag
+    // starting on the display name or the timestamp is inside `.header` /
+    // `.time-hover`, which are `user-select: none`.
+    if (target.closest('.message .content, .message .text')) {
+        return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+    }
+    return false;
+}
+
+document.addEventListener('selectstart', function (e) {
+    if (!selectionAllowed(e.target)) e.preventDefault();
+});
+
 // Message Right-Click Context Menu
 
-document.getElementById('message-list').addEventListener('contextmenu', function(e) {
-
-    var msgDiv = e.target.closest('.message');
-
-    if (!msgDiv) return;
-
-    // Attachments / emojis / stickers / GIFs have their own menu (download +
-    // copy to clipboard). This handler stops propagation, so the media menu
-    // MUST be dispatched from here — a document-level listener never sees it.
-    if (handleMediaContextMenu(e)) {
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-    }
-
-    e.preventDefault();
-
-    e.stopPropagation();
+/**
+ * Build and show one message's action menu at a point on screen.
+ *
+ * There is exactly ONE menu: the right-click handler and the ⋯ button on the
+ * message both come through here, so the two cannot drift apart — and a device
+ * with no right button (a phone, or a desktop trackpad) still reaches every
+ * action the context menu offers.
+ */
+function openMessageContextMenu(msgDiv, x, y) {
 
     var msgId = msgDiv.getAttribute('data-message-id');
 
@@ -18639,9 +19222,32 @@ document.getElementById('message-list').addEventListener('contextmenu', function
 
     if (typeof window.showContextMenu === 'function') {
 
-        window.showContextMenu(e.clientX, e.clientY, items);
+        window.showContextMenu(x, y, items);
 
     }
+
+}
+
+document.getElementById('message-list').addEventListener('contextmenu', function(e) {
+
+    var msgDiv = e.target.closest('.message');
+
+    if (!msgDiv) return;
+
+    // Attachments / emojis / stickers / GIFs have their own menu (download +
+    // copy to clipboard). This handler stops propagation, so the media menu
+    // MUST be dispatched from here — a document-level listener never sees it.
+    if (handleMediaContextMenu(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+    }
+
+    e.preventDefault();
+
+    e.stopPropagation();
+
+    openMessageContextMenu(msgDiv, e.clientX, e.clientY);
 
 });
 
@@ -21344,6 +21950,10 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         '<button class="msg-action-btn" data-action="react" title="React">&#x1F642;</button>' +
         (isOwn ? '<button class="msg-action-btn" data-action="edit" title="Edit">&#x270E;</button>' : '') +
         (isOwn ? '<button class="msg-action-btn" data-action="delete" title="Delete">&#x2715;</button>' : '') +
+        // The way into the message menu that needs neither a hover nor a right
+        // button — the only control a phone can reach (see the touch rule in
+        // style.css), and a shortcut on a desktop trackpad.
+        '<button class="msg-action-btn" data-action="more" title="More" aria-label="More actions">&#x22EF;</button>' +
         '</div>';
 
     // E2E reactions: decrypt with the DM key; render the pill row.

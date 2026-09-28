@@ -111,28 +111,43 @@ This is the feature that changed how everything else boots, so test it first.
 
 ---
 
-## 3. On-device captions (1.7) — Android box
+## 3. On-device captions (1.7) — desktop and the Android box
 
 **Do**
 
-1. Settings → *Live captions* → toggle on. A panel appears with a mode badge.
-2. Talk (or play speech near the mic) → interim text becomes one line that is
-   **replaced** by the final version, not stacked.
-3. Confirm the badge says **"this device only"**.
-4. Flip the second, separate *Publish to the call* toggle → badge becomes
-   **"published to the call"**.
-5. Stop captions → the panel closes and the lines are gone.
+1. Settings → *Live captions* → toggle on. A panel appears with a mode badge and
+   a status line that says what the engine is doing (loading, listening, which
+   model, which language, CPU or GPU, how many wasm threads).
+2. Talk (or play speech near the mic) → a line appears within a few seconds, is
+   **replaced** by a better version as more of the sentence arrives, and becomes
+   final when you pause. Nothing is stacked or duplicated across the update.
+3. Confirm the badge says **"this device only"**. There is no publish path any
+   more: nothing derived from a call ever reaches the other participants.
+4. Settings → *Speech model* → **whisper-base**, and say the same sentence
+   again: fewer wrong words, and slower. Switch back to **whisper-tiny**.
+5. *Spoken language* on **Detect automatically** → the badge shows `auto (ro)`
+   (say) once the first decode has worked the language out, and does not flip
+   afterwards. Setting a wrong language by hand turns speech into nonsense.
+6. *Benchmark this machine* → a readout with ms per 30 s window on the CPU and,
+   where this webview has WebGPU, on the GPU, plus the ratio between them. It
+   says which audio it measured and whether it was captured or generated.
+7. Stop captions → the panel closes and the lines are gone.
 
 **Try to break it**
 
-* **Airplane mode** (or a device with no offline recogniser) → the toggle
-  refuses to start and the status line says the engine is offline/unavailable.
-  Captions must **never** silently fall back to a network recogniser. On a
-  desktop browser (no engine at all) this is what you should see.
-* In a call, publish captions, then have the peer look at their own screen with
-  *their* captions off: only your **final** lines arrive, never the interim ones.
+* **Airplane mode** → captions still work. The model is bundled in the app and
+  served by your own server; any request to a third party is a bug, not a
+  fallback.
+* A sentence that straddles the 30-second window boundary must not lose words
+  and must not appear twice: the windows overlap by 5 s and the overlap is
+  de-duplicated against what is already on screen.
+* A speaker who keeps talking while their own window is still decoding must not
+  lose the sentence — the audio is held and decoded when the worker is free.
+* *Use the GPU* on a machine where the benchmark says the GPU is **slower**: the
+  status line must report the engine it actually got, and the readout must not
+  claim a speed-up that is not there.
 * Search your local storage / `adb logcat` for the sentence you just spoke — it
-  must appear in **neither** (captions are display-only).
+  must appear in **neither** (captions live in memory and the DOM only).
 * Pull down the notification shade mid-caption: no caption text anywhere.
 
 ---
@@ -755,3 +770,94 @@ it, because the reset threw an error halfway through.
 `.apk` and the `SHA256SUMS-*.txt` files. The v0.2.33 tag had two release objects
 for the one tag and the *empty* one was what "latest" resolved to, so the page
 listed no downloads at all.
+
+---
+
+## 24. Selecting text, the message menu button, other apps' audio, and a measured accuracy claim (0.2.35)
+
+### Selecting text
+
+**Do (desktop):** drag the mouse across the words of a message.
+**Expect:** the words highlight, and you can copy them. This is the *only*
+place in the app that selects: drag across a channel name, a server rail item, a
+display name, an avatar's initial or a member row and nothing highlights (the
+browser's own copy/select menu must not appear over those).
+
+**Do (desktop):** click the invite code (Invite modal), a friend code, or the
+identity key in Settings → Security.
+**Expect:** the whole value selects in one click (`user-select: all`) — those
+exist to be copied, and they still work.
+
+**Do (phone or a touch screen):** press and hold a message.
+**Expect:** no text selection appears. A phone keeps the app-wide rule; the
+long-press is how the message menu is reached.
+
+**Try to break it:** drag from a message out into the channel list and back —
+the selection should stay inside the message, and dropping on a rail item must
+still reorder it rather than highlight text.
+
+### The ⋯ button on a message
+
+**Do:** hover a message and click **⋯**.
+**Expect:** the same menu a right-click opens — Reply, Reply in Thread,
+Forwards, Pin, Copy Text, Copy Message Link, Block User. Right-click the same
+message and compare: it must be the identical list (one builder draws both).
+
+**Do (touch screen):** look at a message without hovering.
+**Expect:** ⋯ is visible on its own; the react/edit/delete shortcuts are not.
+Tap ⋯ and the full menu still opens — this is the only route on a device with
+no right button.
+
+**Try to break it:** click ⋯, then click a menu item. It should act on *that*
+message and close. Then click ⋯ twice in a row — one menu, not two stacked.
+
+### Other apps' audio (1.4)
+
+**Do (Android):** start music, then join a voice channel with Settings → Voice →
+**Other Apps' Audio** on (the default).
+**Expect:** the music pauses while you are in the call and resumes on hang-up.
+Turn the toggle **off** *during* the call: the music should start again without
+waiting for the next call.
+
+**Try to break it:** leave the toggle off, leave the call, start a call again —
+the music must keep playing throughout.
+
+### Animated wallpaper speed
+
+**Do:** Settings → Display → App Background, choose an animated GIF or a video,
+then move the **Speed** slider away from 1×.
+**Expect:** the wallpaper re-times as you drag, with no restart and no reload —
+including the preview box. At exactly 1× the still `<img>` comes back (no
+decoder running). Reload: the rate is still the one you set.
+
+**Try to break it:** set 0.25×, reload, and set 3× — the number under the slider
+and the animation must agree on both, and a rate must never snap back to 1× on
+its own (that was the bug in the first version: the bounds were declared below
+the settings loader, so everything clamped against `undefined`).
+
+### Captions: the model, the benchmark, and the accuracy number
+
+**Do:** Settings → Live Captions → **Benchmark this machine**.
+**Expect:** a readout with the CPU figure (seconds per 30-second window and how
+far ahead of real time that is) and, on a machine with no WebGPU, an honest
+"not usable here" for the GPU rather than a fast zero. Nothing is uploaded.
+
+**Do:** speak a sentence with the model set to *whisper-tiny*, then switch to
+*whisper-base* and watch the status line.
+**Expect:** the status names the model it actually loaded and the 30-second
+window. Both models must be on disk (`static/vendor/asr/whisper-tiny`,
+`.../whisper-base`) — a release that quietly ships without one shows a model in
+the list that can never load.
+
+**Try to break it:** run with no network at all. Captions must still work: both
+models, the wasm runtime and the QR scanner are served by your own server, and
+the page's CSP names no external origin.
+
+### Release page
+
+**Do:** open the repository's **Releases** and the v0.2.35 entry.
+**Expect:** one release for the tag carrying `.msi`, `.exe` (NSIS), `.AppImage`,
+`.deb`, `.rpm`, the Arch `.pkg.tar.zst`, the Android `.apk` and
+`SHA256SUMS-*.txt`. The Windows installer is noticeably larger than 0.2.34
+(~100 MB): the second speech model is bundled inside it, which is the price of
+captions that work offline.

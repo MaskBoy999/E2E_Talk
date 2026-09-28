@@ -103,6 +103,40 @@ test.describe('1.7 on-device captions', () => {
         expect(await page.evaluate(() => (window as any).__captions.lines().length)).toBe(0);
     });
 
+    test('the GPU switch is honest about what this machine can do, and remembers what you chose', async ({ page }) => {
+        await register(page, unique('cap_gpu'));
+        await openVoiceSettings(page);
+
+        // The row is visible; the checkbox itself is the app's toggle style
+        // (a hidden input with a slider, like every other switch here).
+        await expect(page.locator('label.settings-toggle', { hasText: 'Use the GPU for captions' }))
+            .toBeVisible({ timeout: 10000 });
+
+        // Off by default (the CPU path is the one that always works), and the
+        // switch is only usable where WebGPU actually exists — a webview without
+        // it gets a disabled control and a sentence saying so, never a control
+        // that silently does nothing.
+        const supported = await page.evaluate(() => (window as any).__captions.gpuSupported());
+        const state = () => page.evaluate(() => {
+            const t = document.getElementById('captions-gpu-toggle') as HTMLInputElement;
+            return { checked: t.checked, disabled: t.disabled };
+        });
+        expect((await state()).checked).toBe(false);
+        expect((await state()).disabled).toBe(!supported);
+        const hint = (await page.locator('#captions-gpu-hint').textContent()) || '';
+        if (!supported) expect(hint).toMatch(/no WebGPU support/i);
+
+        // The choice is a stored setting, and the engine that ends up running is
+        // reported back (the worker falls back to the CPU if the GPU refuses the
+        // model, so "on" is a request, not a guarantee).
+        await page.evaluate(() => (window as any).__captions.setUseGpu(true));
+        expect(await page.evaluate(() => localStorage.getItem('captions_gpu'))).toBe('1');
+        expect(await page.evaluate(() => typeof (window as any).__captions.engine())).toBe('string');
+        await page.reload();
+        await openVoiceSettings(page);
+        expect((await state()).checked, 'the switch must survive a reload').toBe(true);
+    });
+
     test('captions never reach disk, the console or notifications', async ({ page }) => {
         await register(page, unique('cap_ui3'));
         await openVoiceSettings(page);
