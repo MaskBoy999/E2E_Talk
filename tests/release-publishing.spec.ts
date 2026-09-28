@@ -101,6 +101,24 @@ test.describe('release publishing', () => {
     expect(creatorJob, 'the creator should name the repository explicitly').toContain('-R "$repo"');
   });
 
+  test('a failed release creation explains itself, and the read-back retries', () => {
+    const [, wf] = WORKFLOWS[0];
+    const creatorJob = wf.slice(wf.indexOf('  create-release:'), wf.indexOf('  build:'));
+
+    // gh's message is the only explanation available: job logs need
+    // authentication even on a public repo, so a bare failure here is
+    // "Process completed with exit code 1" and nothing else. That is all the
+    // v0.2.35 tag produced — while leaving behind a release with no assets,
+    // because `build` needs this job and never started.
+    expect(creatorJob, 'the create must keep gh stderr').toContain('create-release.err');
+    expect(creatorJob, 'the failure must be annotated, not just an exit code').toMatch(/::error::/);
+    // And the release is read back with retries before the legs may upload to
+    // it: a view issued in the same breath as a create can be a moment behind
+    // it, and one un-retried check is what the v0.2.35 failure looks like.
+    expect(creatorJob, 'the read-back must retry').toMatch(/for _ in \$\(seq 1 10\)/);
+    expect(creatorJob, 'the read-back must report its own failure').toContain('read-back.err');
+  });
+
   test('the release is published before the Arch step repacks its .deb', () => {
     const [, wf] = WORKFLOWS[0];
     const publish = wf.indexOf('- name: Publish release assets');

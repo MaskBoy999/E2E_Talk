@@ -118,6 +118,10 @@ were skipped — and that is what was done, rather than shipping a `v0.2.35` wit
 a stray, empty `v0.2.34` behind it. The job checks out now, and the regression
 test asserts it.
 
+**Cut a third time, for the opposite reason: the release creator failed without saying why.** The `v0.2.35` tag created its release object and then exited 1 — with no other information, because job logs need authentication even on a public repo, so the run reported "Process completed with exit code 1" and nothing else. `build` needs `create-release`, so both installer legs were **skipped** and the release sat there with no desktop assets at all (the Android leg does not depend on it and still attached its APK). The read-back is retried now — a `gh release view` issued in the same breath as a create can be a moment behind it, which is the one reading of this failure that fits: the object existed, created the same second — and the create keeps `gh`'s stderr and re-emits it as an `::error::` annotation, the trick the Arch and publish steps already carry, so the next failure names itself instead of being unknowable. `tests/release-publishing.spec.ts` asserts both, and the tag was moved onto the fixed commit: safe by the same test as last time, because the desktop legs had published nothing.
+
+**The second speech model is 76 MB, and GitHub said so.** `whisper-base`'s decoder graph is 51.21 MB, which is over GitHub's recommended 50 MB and under its hard 100 MB limit, so the push warned and went through. It is committed because the app's own server serves the models — the CSP names no external origin, and a release that quietly lacks the second model offers a dropdown entry that can never load. `tests/asr-model-assets.spec.ts` asserts every file of both models is present and served with a byte count that matches disk.
+
 **Path traversal, judged by one rule in one place.** The static handler's check
 split the request path on `/`, which Windows does not honour: `/..\server\.env`
 arrived as a single segment, cleared the check, and served the live

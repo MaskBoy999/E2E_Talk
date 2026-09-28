@@ -110,9 +110,39 @@ jobs:
           To update later, download the new installer from this page again.
           NOTES
           )
-          gh release create "$tag" -R "$repo" --title "E2E Chat $tag" --notes "$notes"
-          # Verify it is really there before the build legs start uploading.
-          gh release view "$tag" -R "$repo" >/dev/null
+          # gh's own message is the only thing that explains a failure here —
+          # job logs need authentication even on a public repo — so the create
+          # keeps its stderr and re-emits it as an annotation instead of dying
+          # with a bare exit code. That is exactly how the v0.2.35 tag failed:
+          # "Process completed with exit code 1" and nothing else, while the
+          # release it had just created sat there with zero assets and both
+          # build legs skipped (the job `needs` this one).
+          set +e
+          gh release create "$tag" -R "$repo" --title "E2E Chat $tag" --notes "$notes" \
+            2>"$RUNNER_TEMP/create-release.err"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            BLOCK="Create release failed for $tag (gh's create exited $rc):%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/create-release.err" | sed ':a;N;$!ba;s/\n/%0A/g')"
+            printf '::error::%s\n' "$BLOCK"
+            exit "$rc"
+          fi
+          # Verify it is really there before the build legs start uploading —
+          # with retries, not one immediate look. A create that has just
+          # returned can be a moment ahead of a view, and a single un-retried
+          # read-back is a plausible reading of the v0.2.35 failure above: the
+          # release DID exist (created the same second) while this check exited
+          # 1, and every step after it was skipped.
+          ready=0
+          for _ in $(seq 1 10); do
+            if gh release view "$tag" -R "$repo" >/dev/null 2>>"$RUNNER_TEMP/read-back.err"; then ready=1; break; fi
+            sleep 3
+          done
+          if [ "$ready" -ne 1 ]; then
+            BLOCK="release $tag could not be read back for 30 s after being created:%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/read-back.err" 2>/dev/null | sed ':a;N;$!ba;s/\n/%0A/g')"
+            printf '::error::%s\n' "$BLOCK"
+            exit 1
+          fi
           echo "release $tag is live"
 
   build:
