@@ -83,23 +83,193 @@
 
     // ── sanitising ───────────────────────────────────────────────────────
     // A pack is markup chosen by the user that ends up inside the app's own DOM,
-    // so it is filtered before it is stored or applied: no scripts, no event
-    // handlers, no foreignObject, no javascript: or remote URLs. Icons are
-    // shapes — anything in that list is either an attack or a mistake.
+    // so it is filtered before it is stored or applied.
+    //
+    // This is an ALLOW-LIST, and that is the point. The blocklist it replaces
+    // deleted <script>, on* handlers and javascript: — and a blocklist cannot be
+    // finished. It missed a SMIL animation rewriting an icon's href to a remote
+    // URL, it missed url(http://…) inside a style attribute, and every naming
+    // trick (an uppercase letter, an entity, a namespace) is another hole to
+    // notice later. Here the default is gone: an element or attribute that is
+    // not named below is removed, along with its whole subtree, so a new SVG
+    // feature cannot become a new hole by being new.
+    //
+    // Parsed as XML rather than HTML on purpose: the HTML parser lowercases
+    // attribute names, and viewBox, gradientTransform and attributeName are
+    // case-sensitive in SVG.
+    var ALLOWED_ELEMENTS = {
+        svg: 1, g: 1, defs: 1, symbol: 1, use: 1, path: 1, rect: 1, circle: 1,
+        ellipse: 1, line: 1, polyline: 1, polygon: 1, image: 1, title: 1,
+        desc: 1, text: 1, tspan: 1, lineargradient: 1, radialgradient: 1,
+        stop: 1, pattern: 1, clippath: 1, mask: 1, marker: 1, mpath: 1,
+        animate: 1, animatetransform: 1, animatemotion: 1, set: 1,
+    };
+
+    // Geometry, paint and layout. href/xlink:href is the one attribute that can
+    // reach outside the app, so its VALUE is decided separately in
+    // attributeAllowed() — but it still has to be listed here, or the name check
+    // removes it before the value is ever looked at (which is how a picture icon
+    // and every `use href="#gradient"` came out empty).
+    var ALLOWED_ATTRS = {
+        id: 1, class: 1, style: 1, transform: 1, d: 1, points: 1, path: 1,
+        href: 1, 'xlink:href': 1,
+        x: 1, y: 1, x1: 1, y1: 1, x2: 1, y2: 1, cx: 1, cy: 1, r: 1, rx: 1,
+        ry: 1, width: 1, height: 1, dx: 1, dy: 1, rotate: 1, offset: 1,
+        viewbox: 1, preserveaspectratio: 1, overflow: 1, version: 1,
+        fill: 1, 'fill-opacity': 1, 'fill-rule': 1, stroke: 1,
+        'stroke-width': 1, 'stroke-opacity': 1, 'stroke-linecap': 1,
+        'stroke-linejoin': 1, 'stroke-miterlimit': 1, 'stroke-dasharray': 1,
+        'stroke-dashoffset': 1, opacity: 1, color: 1, display: 1,
+        visibility: 1, 'clip-path': 1, 'clip-rule': 1,
+        'stop-color': 1, 'stop-opacity': 1, gradientunits: 1,
+        gradienttransform: 1, spreadmethod: 1, patternunits: 1,
+        patterncontentunits: 1, patterntransform: 1, clippathunits: 1,
+        maskunits: 1, maskcontentunits: 1, markerwidth: 1, markerheight: 1,
+        markerunits: 1, orient: 1, refx: 1, refy: 1, startoffset: 1,
+        'text-anchor': 1, 'font-family': 1, 'font-size': 1,
+        'font-weight': 1, 'font-style': 1, 'letter-spacing': 1,
+        'dominant-baseline': 1,
+        // SMIL, which the built-in #icon-live pulse uses.
+        attributename: 1, attributetype: 1, values: 1, from: 1, to: 1, by: 1,
+        dur: 1, begin: 1, end: 1, repeatcount: 1, repeatdur: 1, restart: 1,
+        calcmode: 1, keytimes: 1, keysplines: 1, keypoints: 1, additive: 1,
+        accumulate: 1, min: 1, max: 1, origin: 1,
+    };
+
+    // What an animation is allowed to move. Without this, <animate
+    // attributeName="href" values="//evil.example/x.png"/> changes where an icon
+    // points — a request the app would make on the user's behalf.
+    var ANIMATABLE = {
+        x: 1, y: 1, cx: 1, cy: 1, r: 1, rx: 1, ry: 1, width: 1, height: 1,
+        d: 1, points: 1, offset: 1, transform: 1, fill: 1, stroke: 1,
+        opacity: 1, 'fill-opacity': 1, 'stroke-opacity': 1, 'stroke-width': 1,
+        'stroke-dashoffset': 1, 'stroke-dasharray': 1, 'stop-color': 1,
+        'stop-opacity': 1, 'font-size': 1, 'letter-spacing': 1,
+    };
+
+    // A style attribute may only paint. Everything else CSS can do inside an
+    // icon — position, background-image, filter, animation — either fetches
+    // something or paints over the app, so it is not on this list.
+    var ALLOWED_STYLE = {
+        fill: 1, 'fill-opacity': 1, 'fill-rule': 1, stroke: 1,
+        'stroke-width': 1, 'stroke-opacity': 1, 'stroke-linecap': 1,
+        'stroke-linejoin': 1, 'stroke-miterlimit': 1, 'stroke-dasharray': 1,
+        'stroke-dashoffset': 1, opacity: 1, color: 1, display: 1,
+        visibility: 1, 'stop-color': 1, 'stop-opacity': 1, 'clip-path': 1,
+        'clip-rule': 1, 'font-family': 1, 'font-size': 1, 'font-weight': 1,
+        'font-style': 1, 'text-anchor': 1, 'letter-spacing': 1,
+    };
+
+    /**
+     * Is this value free of anything that leaves the icon? url(...) is the
+     * shape of a remote fetch, so the only survivor is url(#…) — a gradient or
+     * clip path defined in the same icon. Anything with a scheme (http://,
+     * data:, javascript:) or the old IE expression() is refused outright.
+     */
+    function safeValue(value) {
+        var v = String(value);
+        if (/javascript\s*:|vbscript\s*:|expression\s*\(/i.test(v)) return false;
+        if (/:\/\//.test(v)) return false;
+        // "//host/path" is remote without a scheme. Nothing in an attribute tells
+        // an icon's story, and a value that reads as a remote reference must not
+        // survive anywhere — including on an attribute that happens to be inert
+        // today, because the attribute allow-list can change.
+        if (/\/\//.test(v)) return false;
+        if (/data:/i.test(v)) return false;
+        var urls = v.match(/url\s*\([^)]*\)/gi) || [];
+        for (var i = 0; i < urls.length; i++) {
+            if (!/^url\s*\(\s*['"]?#/.test(urls[i])) return false;
+        }
+        return true;
+    }
+
+    /** Paint from a style attribute, with everything else dropped. */
+    function filterStyle(value) {
+        var kept = [];
+        String(value).split(';').forEach(function (decl) {
+            var at = decl.indexOf(':');
+            if (at < 1) return;
+            var prop = decl.slice(0, at).trim().toLowerCase();
+            var val = decl.slice(at + 1).trim();
+            if (!ALLOWED_STYLE[prop] || !val || !safeValue(val)) return;
+            kept.push(prop + ':' + val);
+        });
+        return kept.join(';');
+    }
+
+    function attributeAllowed(name, value) {
+        if (name === 'href' || name === 'xlink:href') {
+            // Two things only: a reference inside this icon, and an inline
+            // raster picture (an icon made from a PNG or an animated GIF).
+            // data:image/svg+xml is refused with them — a picture that is itself
+            // an SVG can name remote sub-resources of its own.
+            return /^#/.test(value) ||
+                /^data:image\/(png|jpe?g|gif|webp|avif|apng|bmp|tiff|ico);base64,/i.test(value);
+        }
+        if (name === 'attributename') return ANIMATABLE[String(value).trim().toLowerCase()] === 1;
+        return safeValue(value);
+    }
+
+    function sanitizeAttributes(el) {
+        Array.prototype.slice.call(el.attributes || []).forEach(function (attr) {
+            var name = attr.name;
+            var lower = String(name).toLowerCase();
+            if (lower.indexOf('on') === 0) { el.removeAttribute(name); return; }
+            if (lower === 'style') {
+                // Rewritten, not merely allowed: keeping the original because
+                // some of it was paint is how `position:fixed` and a url() fetch
+                // rode along with a harmless `fill`.
+                var paint = filterStyle(String(attr.value));
+                if (!paint) el.removeAttribute(name);
+                else if (paint !== attr.value) el.setAttribute(name, paint);
+                return;
+            }
+            var known = ALLOWED_ATTRS[lower] === 1 ||
+                lower.indexOf('data-') === 0 || lower.indexOf('aria-') === 0;
+            if (!known || !attributeAllowed(lower, String(attr.value))) el.removeAttribute(name);
+        });
+    }
+
+    function prune(node) {
+        Array.prototype.slice.call(node.childNodes).forEach(function (child) {
+            if (child.nodeType === 3) return;                                  // text is inert
+            if (child.nodeType !== 1) { node.removeChild(child); return; }     // comments, CDATA, PIs
+            if (ALLOWED_ELEMENTS[String(child.tagName).toLowerCase()] !== 1) {
+                node.removeChild(child);                                       // subtree and all
+                return;
+            }
+            sanitizeAttributes(child);
+            prune(child);
+        });
+    }
+
     function sanitize(markup) {
         if (!markup) return '';
-        var clean = String(markup)
-            .replace(/<\s*script[\s\S]*?<\s*\/\s*script\s*>/gi, '')
-            .replace(/<\s*script[^>]*\/?\s*>/gi, '')
-            .replace(/<\s*foreignObject[\s\S]*?<\s*\/\s*foreignObject\s*>/gi, '')
-            .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
-            .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
-            .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '')
-            // href/xlink:href only survive for inline data: images (a PNG icon).
-            .replace(/(xlink:href|href)\s*=\s*"(?!#|data:)[^"]*"/gi, '')
-            .replace(/(xlink:href|href)\s*=\s*'(?!#|data:)[^']*'/gi, '')
-            .replace(/javascript:/gi, '');
-        return clean.trim();
+        // A DOCTYPE could define entities to expand; icons never need one.
+        var text = String(markup).replace(/<!DOCTYPE[^>]*>/gi, '');
+        var doc;
+        try {
+            doc = new DOMParser().parseFromString(
+                '<svg xmlns="http://www.w3.org/2000/svg" ' +
+                'xmlns:xlink="http://www.w3.org/1999/xlink">' + text + '</svg>',
+                'image/svg+xml');
+        } catch (_) {
+            return '';
+        }
+        // Unparseable markup is dropped, not passed along: guessing at something
+        // whose shape is unknown is exactly how a filter gets bypassed.
+        if (!doc || doc.getElementsByTagName('parsererror').length) return '';
+        var root = doc.documentElement;
+        // The wrapper is the only root there can be. Anything else means the
+        // markup broke out of it (a literal `</svg>`), which is not a shape to
+        // filter but a document to refuse.
+        if (!root || String(root.tagName).toLowerCase() !== 'svg') return '';
+        prune(root);
+        var out = '';
+        Array.prototype.forEach.call(root.childNodes, function (child) {
+            out += new XMLSerializer().serializeToString(child);
+        });
+        return out.trim();
     }
 
     // ── pack parsing ─────────────────────────────────────────────────────
@@ -190,6 +360,15 @@
         reader.onerror = function () { cb(null); };
         reader.onload = function () {
             var href = reader.result;
+            // The bytes are embedded as a data: URL and stored inside the icon,
+            // and the icon filter only keeps RASTER pictures (a picture that is
+            // itself an SVG could name remote sub-resources). Refusing here
+            // means the user is told, instead of ending up with an icon that
+            // silently renders as nothing.
+            if (!/^data:image\/(png|jpe?g|gif|webp|avif|apng|bmp|tiff|ico);base64,/i.test(href)) {
+                cb(null);
+                return;
+            }
             var probe = new Image();
             probe.onerror = function () { cb(null); };
             probe.onload = function () {
