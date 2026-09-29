@@ -1,8 +1,26 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 const BASE = 'https://localhost:3443';
 
 test.describe('Step 8: Message Forwarding', () => {
+
+    /**
+     * Forwarding is no longer on the hover strip: commit 4b31ca2 (2026-08-28)
+     * removed the `[data-action="forward"]` / `forward-dm` buttons, and these
+     * tests kept asserting them for a month — three red tests that said nothing
+     * about the app. Forwarding lives in the message menu, which is what the ⋯
+     * button opens and what a right-click opens, so these tests now drive that
+     * menu (the entry point the touch rule depends on, since a phone has no
+     * right button and no hover).
+     */
+    async function openMessageAction(page: Page, label: string) {
+        const msgEl = page.locator('.message').last();
+        await msgEl.hover();
+        await msgEl.locator('.msg-action-btn[data-action="more"]').click();
+        const item = page.locator('.channel-context-menu .context-menu-label', { hasText: label }).first();
+        await expect(item).toBeVisible({ timeout: 5000 });
+        await item.click();
+    }
 
     async function loginUser(browser, username: string) {
         const page = await browser.newPage();
@@ -155,31 +173,15 @@ test.describe('Step 8: Message Forwarding', () => {
         await page.click('#send-btn');
         await page.waitForTimeout(1500);
 
-        // Hover over the message to reveal actions
-        const msgEl = page.locator('.message').last();
-        await msgEl.hover();
-        await page.waitForTimeout(500);
-
-        // Verify forward-to-channel button
-        const fwdBtn = msgEl.locator('.msg-action-btn[data-action="forward"]');
-        await expect(fwdBtn).toBeVisible({ timeout: 5000 });
-
-        // Verify forward-to-DM button
-        const fwdDmBtn = msgEl.locator('.msg-action-btn[data-action="forward-dm"]');
-        await expect(fwdDmBtn).toBeVisible({ timeout: 5000 });
-
-        // Click forward-to-channel and verify modal
-        await fwdBtn.click();
+        // "Forward to Channel" is in the menu, and it opens the channel modal.
+        await openMessageAction(page, 'Forward to Channel');
         await page.waitForSelector('#forward-modal', { state: 'visible', timeout: 5000 });
         await expect(page.locator('#forward-channel-list')).toBeVisible();
         await page.click('#cancel-forward');
         await page.waitForSelector('#forward-modal', { state: 'hidden', timeout: 3000 });
 
-        // Click forward-to-DM and verify modal
-        await msgEl.hover();
-        await page.waitForTimeout(300);
-        const fwdDmBtn2 = msgEl.locator('.msg-action-btn[data-action="forward-dm"]');
-        await fwdDmBtn2.click();
+        // …and "Forward to DM" opens the DM modal.
+        await openMessageAction(page, 'Forward to DM');
         await page.waitForSelector('#dm-forward-modal', { state: 'visible', timeout: 5000 });
         await page.click('#cancel-dm-forward');
 
@@ -215,12 +217,7 @@ test.describe('Step 8: Message Forwarding', () => {
         await page.click('#send-btn');
         await page.waitForTimeout(1000);
 
-        // Hover and click forward
-        const msgEl = page.locator('.message').last();
-        await msgEl.hover();
-        await page.waitForTimeout(300);
-        const fwdBtn = msgEl.locator('.msg-action-btn[data-action="forward"]');
-        await fwdBtn.click();
+        await openMessageAction(page, 'Forward to Channel');
 
         // Verify forward modal shows channels
         await page.waitForSelector('#forward-modal', { state: 'visible', timeout: 5000 });
@@ -343,30 +340,13 @@ test.describe('Step 8: Message Forwarding', () => {
         expect(sendResult).toBe('sent');
         await page.waitForTimeout(1500);
 
-        // Hover over the DM message to reveal forward buttons
-        const msgEl = page.locator('.message').last();
-        await msgEl.hover();
-        await page.waitForTimeout(500);
-
-        // Verify DM forward-to-channel button
-        const dmFwdChannelBtn = msgEl.locator('.msg-action-btn[data-action="dm-forward"]');
-        await expect(dmFwdChannelBtn).toBeVisible({ timeout: 5000 });
-
-        // Verify DM forward-to-DM button
-        const dmFwdDmBtn = msgEl.locator('.msg-action-btn[data-action="dm-forward-dm"]');
-        await expect(dmFwdDmBtn).toBeVisible({ timeout: 5000 });
-
-        // Click forward-to-channel and verify modal
-        await dmFwdChannelBtn.click();
+        // A DM message offers the same two entries, on the DM paths.
+        await openMessageAction(page, 'Forward to Channel');
         await page.waitForSelector('#forward-modal', { state: 'visible', timeout: 5000 });
         await page.click('#cancel-forward');
         await page.waitForTimeout(500);
 
-        // Click forward-to-DM and verify modal
-        await msgEl.hover();
-        await page.waitForTimeout(300);
-        const dmFwdDmBtn2 = msgEl.locator('.msg-action-btn[data-action="dm-forward-dm"]');
-        await dmFwdDmBtn2.click();
+        await openMessageAction(page, 'Forward to DM');
         await page.waitForSelector('#dm-forward-modal', { state: 'visible', timeout: 5000 });
         await page.click('#cancel-dm-forward');
 
