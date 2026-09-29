@@ -219,6 +219,13 @@ var DocPreview = (function () {
             // in memory until the GC happens to notice. Release them here.
             var content = existing.querySelector('#doc-preview-content');
             if (content) {
+                // Renderers (pptx/zip) register their own release here: disconnect
+                // the scroll observer and drop the big parsed objects (the JSZip
+                // archive, the decoded slide media).
+                if (typeof content._docCleanup === 'function') {
+                    try { content._docCleanup(); } catch (_) {}
+                    content._docCleanup = null;
+                }
                 if (content._pdfObserver) {
                     try { content._pdfObserver.disconnect(); } catch (_) {}
                     content._pdfObserver = null;
@@ -601,9 +608,32 @@ var DocPreview = (function () {
 
         var sheets = workbook.SheetNames;
 
+        // SheetJS renders a cell node for every cell inside the sheet's `!ref`,
+        // so one large sheet is millions of nodes and an out-of-memory crash.
+        // The ref is clamped to a bounded window (first 500 rows × 100 columns)
+        // before the HTML is built, and the truncation is stated, not silent.
+        var XLSX_MAX_ROWS = 500;
+        var XLSX_MAX_COLS = 100;
+
         function renderSheet(sheetName) {
-            var html = XLSX.utils.sheet_to_html(workbook.Sheets[sheetName], { editable: false });
-            contentArea.innerHTML = '<div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Sheet: ' + escapeHtml(sheetName) + '</div>';
+            var sheet = workbook.Sheets[sheetName];
+            var capped = sheet;
+            var truncated = false;
+            try {
+                if (sheet && sheet['!ref']) {
+                    var range = XLSX.utils.decode_range(sheet['!ref']);
+                    var lastRow = Math.min(range.e.r, range.s.r + XLSX_MAX_ROWS - 1);
+                    var lastCol = Math.min(range.e.c, range.s.c + XLSX_MAX_COLS - 1);
+                    truncated = (range.e.r > lastRow) || (range.e.c > lastCol);
+                    if (truncated) {
+                        capped = Object.assign({}, sheet);
+                        capped['!ref'] = XLSX.utils.encode_range({ s: range.s, e: { r: lastRow, c: lastCol } });
+                    }
+                }
+            } catch (_) {}
+            var html = XLSX.utils.sheet_to_html(capped, { editable: false });
+            contentArea.innerHTML = '<div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Sheet: ' + escapeHtml(sheetName) +
+                (truncated ? ' — showing the first ' + XLSX_MAX_ROWS + ' rows × ' + XLSX_MAX_COLS + ' columns' : '') + '</div>';
             var tableWrap = document.createElement('div');
             tableWrap.style.cssText = 'overflow-x:auto';
             tableWrap.innerHTML = html;
@@ -916,7 +946,7 @@ var DocPreview = (function () {
         var list = document.createElement('div');
         list.style.cssText = 'flex:1;overflow-y:auto';
 
-        entries.forEach(function (item) {
+        function buildZipRow(item) {
             var row = document.createElement('div');
             row.style.cssText = 'display:flex;align-items:center;padding:8px 16px;border-bottom:1px solid var(--bg-border,#333);gap:10px;transition:background .1s;cursor:pointer';
             row.onmouseenter = function () { row.style.background = 'rgba(255,255,255,0.03)'; };
@@ -961,8 +991,43 @@ var DocPreview = (function () {
                 }
             });
 
-            list.appendChild(row);
-        });
+            return row;
+        }
+
+        // A DOM row per entry with no bound is hundreds of thousands of nodes for
+        // a large archive. Rows are appended in chunks only as the list is
+        // scrolled, so a full listing cannot be the event that exhausts memory.
+        var renderedCount = 0;
+        var ZIP_CHUNK = 300;
+        function appendZipChunk() {
+            var end = Math.min(renderedCount + ZIP_CHUNK, entries.length);
+            for (; renderedCount < end; renderedCount++) list.appendChild(buildZipRow(entries[renderedCount]));
+        }
+        var moreEl = document.createElement('div');
+        moreEl.style.cssText = 'padding:12px;text-align:center;color:var(--text-muted,#999);font-size:12px';
+        moreEl.setAttribute('data-zip-more', '1');
+        list.setAttribute('data-zip-list', '1');
+        function updateMoreEl() {
+            moreEl.textContent = (renderedCount < entries.length)
+                ? ('Scroll for more — ' + (entries.length - renderedCount) + ' more')
+                : '';
+        }
+        var zipIo = null;
+        appendZipChunk();
+        updateMoreEl();
+        list.appendChild(moreEl);
+        if (typeof IntersectionObserver === 'function' && renderedCount < entries.length) {
+            zipIo = new IntersectionObserver(function (seen) {
+                if (!seen.some(function (e) { return e.isIntersecting; })) return;
+                appendZipChunk();
+                updateMoreEl();
+                if (renderedCount >= entries.length && zipIo) { zipIo.disconnect(); zipIo = null; }
+            }, { root: list, rootMargin: '200px 0px' });
+            zipIo.observe(moreEl);
+        }
+        container._docCleanup = function () {
+            if (zipIo) { try { zipIo.disconnect(); } catch (_) {} zipIo = null; }
+        };
         container.appendChild(list);
 
         // Inline preview pane (appears below when a file is clicked)
@@ -1071,30 +1136,68 @@ var DocPreview = (function () {
         // the slides stay stacked with no gaps and no overlap.
         var avail = container.clientWidth || Math.round(container.getBoundingClientRect().width) || 0;
 
-        // Render each slide
+        // Every slide is a canvas of absolutely-positioned nodes and decoded
+        // images, and the old loop built all of them up front — a 200-slide deck
+        // is hundreds of thousands of nodes and an instant out-of-memory. Like
+        // the PDF preview, a slide is built only as it scrolls into view, in a
+        // placeholder that already carries the right height so the scroll
+        // geometry does not jump.
+        var PX_W_CONST = 960; // renderPptxSlide lays every slide out at 10in @ 96dpi
+        var PX_H_CONST = 720;
+        var slideScale = (avail > 0 && PX_W_CONST > avail) ? Math.max(avail / PX_W_CONST, 0.2) : 1;
+
+        var slideJobs = [];
         for (var si = 0; si < slideFiles.length; si++) {
-            var xmlStr = await slideFiles[si].entry.async('string');
-            var slideDiv = await renderPptxSlide(xmlStr, si + 1, mediaCache, zip);
-            // The canvas size is written on the element by the renderer.
-            var PX_W = parseFloat(slideDiv.style.width) || 0;
-            var slideScale = (avail > 0 && PX_W > avail) ? Math.max(avail / PX_W, 0.2) : 1;
-            if (slideScale < 1) {
-                var fitWrap = document.createElement('div');
-                fitWrap.className = 'doc-view-slide';
-                // `overflow:hidden`: a transform does not change the *layout*
-                // box, so the unscaled width would still push a horizontal
-                // scrollbar across the modal even though nothing visible
-                // overflows it.
-                fitWrap.style.cssText = 'width:100%;display:flex;justify-content:center;flex-shrink:0;overflow:hidden';
-                slideDiv.style.transform = 'scale(' + slideScale + ')';
-                slideDiv.style.transformOrigin = 'top center';
-                var PX_H = parseFloat(slideDiv.style.height) || 0;
-                slideDiv.style.marginBottom = Math.round(PX_H * (slideScale - 1)) + 'px';
-                fitWrap.appendChild(slideDiv);
-                container.appendChild(fitWrap);
-            } else {
-                container.appendChild(slideDiv);
-            }
+            var holder = document.createElement('div');
+            holder.className = 'doc-view-slide';
+            // `overflow:hidden`: a transform does not change the *layout* box, so
+            // the unscaled width would still push a horizontal scrollbar across
+            // the modal even though nothing visible overflows it.
+            holder.style.cssText = 'width:100%;display:flex;justify-content:center;flex-shrink:0;overflow:hidden;min-height:' +
+                Math.round(PX_H_CONST * slideScale) + 'px';
+            container.appendChild(holder);
+            slideJobs.push({ holder: holder, entry: slideFiles[si].entry, num: si + 1 });
+        }
+
+        var renderedSlides = {};
+        var slideQueue = Promise.resolve();
+        function renderSlide(job) {
+            if (renderedSlides[job.num]) return;
+            renderedSlides[job.num] = true;
+            slideQueue = slideQueue.then(async function () {
+                if (!job.holder.isConnected) return;
+                var xmlStr = await job.entry.async('string');
+                var slideDiv = await renderPptxSlide(xmlStr, job.num, mediaCache, zip);
+                if (!job.holder.isConnected) return;
+                if (slideScale < 1) {
+                    slideDiv.style.transform = 'scale(' + slideScale + ')';
+                    slideDiv.style.transformOrigin = 'top center';
+                    var PX_H = parseFloat(slideDiv.style.height) || 0;
+                    slideDiv.style.marginBottom = Math.round(PX_H * (slideScale - 1)) + 'px';
+                }
+                job.holder.innerHTML = '';
+                job.holder.appendChild(slideDiv);
+            });
+        }
+
+        var slideIo = null;
+        if (typeof IntersectionObserver === 'function') {
+            slideIo = new IntersectionObserver(function (seen) {
+                seen.forEach(function (e) {
+                    if (!e.isIntersecting) return;
+                    slideIo.unobserve(e.target);
+                    renderSlide(e.target.__slideJob);
+                });
+            }, { root: container, rootMargin: '400px 0px' });
+            container._docCleanup = function () {
+                if (slideIo) { try { slideIo.disconnect(); } catch (_) {} slideIo = null; }
+                mediaCache = {};
+            };
+            slideJobs.forEach(function (job) { job.holder.__slideJob = job; slideIo.observe(job.holder); });
+        } else {
+            // No observer (old WebView): draw only the first few, rather than
+            // allocating the whole deck.
+            slideJobs.slice(0, 3).forEach(renderSlide);
         }
     }
 

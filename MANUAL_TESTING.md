@@ -1001,3 +1001,54 @@ download, still no per-chunk GETs, and avatars/profile pictures keep rendering
 message whose file key is missing, with the DevTools console open.
 **Expect:** the warnings name the failure and nothing else — **no decrypted
 filename** appears in the console.
+
+## 26. Big spreadsheets, big archives, big decks (0.2.39)
+
+The PDF work in §25 bounded one renderer; the other three that turn a file into
+DOM nodes had the same unbounded shape. These checks confirm each is bounded and
+that closing the view releases what it allocated.
+
+### A spreadsheet with thousands of rows
+
+**Do:** in a text channel, post an `.xlsx` whose first sheet has well over 500
+rows and open its **Preview**.
+**Expect:** the table shows the first 500 rows and the sheet label says so (`—
+showing the first 500 rows × 100 columns`). The modal opens quickly and the tab
+stays responsive. Switch to a second sheet and back — the label and the range
+are correct for each sheet, and the untouched sheets are not truncated in the
+workbook (exporting/opening the original elsewhere still has every row).
+
+**Try to break it:** open a workbook with a single very wide sheet (>100
+columns). It must render, not hang, and say it truncated the columns too.
+
+### An archive with tens of thousands of entries
+
+**Do:** post a `.zip` with tens of thousands of entries and open **Preview**.
+**Expect:** the header shows the true file count and total size, and only the
+first 300 rows are in the list, with **Scroll for more — N more** at the bottom.
+Scrolling adds rows in chunks (the counter counts down). Clicking a small text
+file inside still opens its inline preview.
+
+**Try to break it:** scroll to the very bottom of a huge archive as fast as you
+can — the list must keep filling without the window blanking or closing. Close
+the modal; reopening the same archive must start from a low memory mark again
+(nothing accumulates across opens).
+
+### A presentation with many slides
+
+**Do:** post a `.pptx` with a few dozen slides and open **Preview**.
+**Expect:** every slide has its slot reserved immediately (the scrollbar is the
+right length from the start), and only the slides near the viewport are actually
+drawn — scroll and the rest fill in, in order. The counter shows the true slide
+count.
+
+**Try to break it:** scroll to the bottom fast, then close while it is still
+filling. The modal closes at once and nothing keeps loading in the background
+(reopen and the memory mark is not higher than the first open).
+
+### Closing any of these releases its observers
+
+**Do:** open the spreadsheet, the archive and the deck in turn, each time
+closing with **Esc** and with the **backdrop click**.
+**Expect:** every close is immediate, and repeating open → scroll → close ten
+times leaves the process's memory roughly flat rather than growing each cycle.
