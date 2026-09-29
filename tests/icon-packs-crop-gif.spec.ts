@@ -4,15 +4,17 @@ import { join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 
 /**
- * The Icons settings tab, three things the user asked for:
+ * The Icons settings tab, with the autosave model:
  *
- *  1. The Direct Messages button in the far-left strip is now a real sprite
- *     symbol (`#icon-dm`), not a hard-coded inline <svg>, so it appears in the
- *     Icons tab and can be replaced like every other icon.
- *  2. Replacing one icon with a picture opens a moveable 1:1 crop (like the
- *     sticker crop) instead of dropping the picture into the sprite as-is.
- *  3. An animated GIF used as an icon keeps animating: the crop is expressed as
- *     a viewBox over the ORIGINAL bytes, never rasterised through a canvas.
+ *  - replacing one icon with a picture opens a moveable 1:1 crop (like the
+ *    sticker crop) instead of dropping the picture in as-is;
+ *  - an animated GIF used as an icon keeps animating (the crop is a viewBox over
+ *    the ORIGINAL bytes, never a canvas re-encode);
+ *  - every change is PUT to the encrypted server slot on its own — there is no
+ *    "Save & apply", and no draft is kept on the device (that device draft is
+ *    what produced "this draft is too large to keep on this device"). The live
+ *    sprite is the source of truth for "what is applied", so these tests read it
+ *    instead of a localStorage draft.
  */
 
 const BASE = process.env.E2E_TEST_BASE_URL || 'https://localhost:3443';
@@ -76,7 +78,6 @@ async function registerAndOpenIcons(page: Page) {
     await expect(page.locator('#settings-modal')).toBeVisible();
     await page.click('#icon-settings-tab');
     await expect(page.locator('#icon-settings-container .settings-tab, #icon-settings-container')).toBeTruthy();
-    // The grid is rendered from the server response; wait for it.
     await expect(page.locator('#icon-settings-container [title*="click to upload"]').first()).toBeVisible({ timeout: 20000 });
 }
 
@@ -90,11 +91,14 @@ async function replaceIconWith(page: Page, name: string, file: { name: string; m
     await page.locator('#icon-settings-container input[type="file"]').nth(1).setInputFiles(file);
 }
 
-function draftEntry(page: Page, name: string) {
+/** The live sprite's override for `name`, or null when it is still built-in. */
+function spriteEntry(page: Page, name: string) {
     return page.evaluate((iconName: string) => {
-        const raw = localStorage.getItem('iconDraft_1') || localStorage.getItem('iconDraft_2') || '{}';
-        const map = JSON.parse(raw);
-        return map[iconName] || null;
+        const applied = (window as any).IconPacks.applied() as string[];
+        if (applied.indexOf(iconName) === -1) return null;
+        const sym = document.getElementById('icon-' + iconName);
+        if (!sym) return null;
+        return { inner: sym.innerHTML, viewBox: sym.getAttribute('viewBox') };
     }, name);
 }
 
@@ -103,8 +107,6 @@ test.describe('icons: customizable DM button, 1:1 crop, animated GIFs', () => {
         await page.addInitScript(TAURI_STUB);
         await registerAndOpenIcons(page);
 
-        // It is drawn through the sprite, which is what makes it visible to the
-        // Icons tab and replaceable by a pack.
         await expect(page.locator('#dm-strip-btn use[href="#icon-dm"]')).toHaveCount(1);
         const names = await page.evaluate(() => (window as any).IconPacks.iconNames());
         expect(names, 'the DM icon must be offered in the Icons tab').toContain('dm');
@@ -136,19 +138,19 @@ test.describe('icons: customizable DM button, 1:1 crop, animated GIFs', () => {
 
         // …and cancelling changes nothing.
         await page.click('[data-icon-crop-cancel]');
-        expect(await draftEntry(page, 'dm')).toBeNull();
+        expect(await spriteEntry(page, 'dm')).toBeNull();
 
         // Doing it again and accepting stores a SQUARE viewBox over the picture.
         await replaceIconWith(page, 'dm', { name: 'wide.png', mimeType: 'image/png', buffer: makePng(64, 32) });
         await expect(page.getByText('Crop this icon to a square')).toBeVisible({ timeout: 10000 });
         await page.click('[data-icon-crop-apply]');
 
-        const entry = await draftEntry(page, 'dm');
-        expect(entry, 'the accepted crop is stored in the draft').toBeTruthy();
-        expect(entry.inner).toContain('<image');
-        expect(entry.inner).toContain('width="64"');
-        expect(entry.inner).toContain('height="32"');
-        const [x, y, w, h] = String(entry.viewBox).trim().split(/\s+/).map(Number);
+        const entry = await spriteEntry(page, 'dm');
+        expect(entry, 'the accepted crop is applied to the live sprite').toBeTruthy();
+        expect(entry!.inner).toContain('<image');
+        expect(entry!.inner).toContain('width="64"');
+        expect(entry!.inner).toContain('height="32"');
+        const [x, y, w, h] = String(entry!.viewBox).trim().split(/\s+/).map(Number);
         expect(w, 'the icon viewBox must be square').toBe(h);
         expect(w).toBeLessThanOrEqual(32);           // never wider than the picture allows
         expect(x).toBeGreaterThanOrEqual(0);
@@ -164,20 +166,13 @@ test.describe('icons: customizable DM button, 1:1 crop, animated GIFs', () => {
         await expect(page.getByText('Crop this icon to a square')).toBeVisible({ timeout: 10000 });
         await page.click('[data-icon-crop-apply]');
 
-        const entry = await draftEntry(page, 'dm');
-        expect(entry, 'the accepted crop is stored').toBeTruthy();
+        const entry = await spriteEntry(page, 'dm');
+        expect(entry, 'the accepted crop is applied').toBeTruthy();
         // The original GIF bytes survive: no canvas re-encode to a static PNG.
-        expect(entry.inner).toContain('data:image/gif;base64,');
-        expect(entry.inner).not.toContain('data:image/png');
-        const [, , w, h] = String(entry.viewBox).trim().split(/\s+/).map(Number);
+        expect(entry!.inner).toContain('data:image/gif;base64,');
+        expect(entry!.inner).not.toContain('data:image/png');
+        const [, , w, h] = String(entry!.viewBox).trim().split(/\s+/).map(Number);
         expect(w).toBe(h);
-
-        // Apply the draft to the live sprite and watch the actual DM button.
-        await page.evaluate(() => {
-            const raw = localStorage.getItem('iconDraft_1') || localStorage.getItem('iconDraft_2') || '{}';
-            (window as any).IconPacks.applyMap(JSON.parse(raw));
-        });
-        expect(await page.evaluate(() => (window as any).IconPacks.applied())).toContain('dm');
 
         const seen: string[] = [];
         for (let i = 0; i < 14; i++) {
@@ -189,22 +184,12 @@ test.describe('icons: customizable DM button, 1:1 crop, animated GIFs', () => {
 });
 
 /**
- * The slot half of the same feature, and the bug the user hit: an animated icon
- * looked like it saved, and was gone after switching slots (or reloading) until
- * the file was uploaded again.
- *
- * Why it happened, so this cannot come back unnoticed: the page measured the
- * pack as JSON (480 KiB) while the server measured the *encrypted* string
- * (512 KiB), and base64 inflation means the first limit sits above the second.
- * A picture icon is a whole base64 data URL, so a 300 KB GIF blew the server's
- * cap, the PUT came back 413 — and nothing in the save path looked at the
- * response. The page said "Saved to slot 1 and applied", dropped the local
- * draft, and the icon vanished at the next render. These two tests pin both
- * halves of the fix: the slot really holds the icon through a switch and a
- * reload, and a refusal is reported instead of swallowed.
+ * The slot half of the same feature, now under autosave: a change is on the
+ * server without any Save click, and a slot the server refuses is reported while
+ * you are still editing.
  */
-test.describe('icons: a saved picture icon survives the slot it lives in', () => {
-    test('a GIF saved to slot 1 is still there after switching slots and after a reload', async ({ page }) => {
+test.describe('icons: an edit reaches the slot on its own', () => {
+    test('a GIF applied to slot 1 is still there after switching slots and after a reload', async ({ page }) => {
         await page.addInitScript(TAURI_STUB);
         await registerAndOpenIcons(page);
 
@@ -213,11 +198,11 @@ test.describe('icons: a saved picture icon survives the slot it lives in', () =>
         await expect(page.getByText('Crop this icon to a square')).toBeVisible({ timeout: 10000 });
         await page.click('[data-icon-crop-apply]');
 
-        await page.locator('#icon-settings-container button', { hasText: 'Save & apply' }).click();
+        // No Save button anywhere; the change saves itself.
+        expect(await page.locator('#icon-settings-container button', { hasText: 'Save & apply' }).count()).toBe(0);
         await expect(page.locator('#icon-pack-status')).toContainText('Saved to slot 1', { timeout: 30000 });
 
-        // The point of the fix: the server really has it (the old code never
-        // asked, so a refused PUT looked exactly like this and was not).
+        // The server really holds it.
         const stored = await page.evaluate(async () => {
             const r = await (window as any).authFetch('/api/user-icons/slots');
             const j = await r.json();
@@ -226,10 +211,9 @@ test.describe('icons: a saved picture icon survives the slot it lives in', () =>
         expect(stored.slot1, 'the server must hold the icon pack').toBeGreaterThan(100);
         expect(stored.active).toBe(1);
 
-        // Switch to the empty slot: the picture icon is gone from the sprite
-        // (that is what a different slot means), and nothing is lost server-side.
+        // Switch to the empty slot: the picture icon is gone from the sprite…
         await page.getByText('Slot 2', { exact: true }).click();
-        await expect(page.locator('#icon-pack-status')).toContainText('Slot 2 draft', { timeout: 20000 });
+        await expect(page.locator('#icon-pack-status')).toContainText('Slot 2:', { timeout: 20000 });
         await expect.poll(() => page.evaluate(() => (window as any).IconPacks.applied()), { timeout: 15000 })
             .not.toContain('dm');
 
@@ -243,18 +227,17 @@ test.describe('icons: a saved picture icon survives the slot it lives in', () =>
         });
         expect(inner, 'the slot must still be the animated GIF, not a re-encode').toContain('data:image/gif;base64,');
 
-        // A reload reads it back from the server, which is what the user means by
-        // "the switching works".
+        // A reload reads it back from the server.
         await page.reload();
         await page.waitForSelector('#dm-strip-btn', { timeout: 60000 });
         await expect.poll(() => page.evaluate(() => (window as any).IconPacks && (window as any).IconPacks.applied()), { timeout: 40000 })
             .toContain('dm');
     });
 
-    test('a slot the server refuses is reported, and the draft is kept', async ({ page }) => {
+    test('a slot the server refuses is reported and the edit is kept on screen', async ({ page }) => {
         await page.addInitScript(TAURI_STUB);
-        // Stand in for the one response the page used to ignore: a 413, with the
-        // server's own wording (server/src/handlers.rs, MAX_ICON_SLOT_B64).
+        // Stand in for the response the old code ignored: a 413 with the server's
+        // own wording (server/src/handlers.rs, MAX_ICON_SLOT_B64).
         await page.route('**/api/user-icons/slot/*', (route) => route.fulfill({
             status: 413,
             contentType: 'application/json',
@@ -266,14 +249,11 @@ test.describe('icons: a saved picture icon survives the slot it lives in', () =>
         await expect(page.getByText('Crop this icon to a square')).toBeVisible({ timeout: 10000 });
         await page.click('[data-icon-crop-apply]');
 
-        await page.locator('#icon-settings-container button', { hasText: 'Save & apply' }).click();
         const status = page.locator('#icon-pack-status');
-        await expect(status).toContainText('Save failed', { timeout: 20000 });
+        await expect(status).toContainText('Auto-save failed', { timeout: 20000 });
         await expect(status).toContainText('the limit is 4096 KiB');
-        // Never claim success, never throw the draft away — the whole point.
+        // Never claim success, and the edit stays applied so it can be fixed.
         await expect(status).not.toContainText('Saved to slot');
-        expect(await draftEntry(page, 'dm'), 'the draft must survive a refused save').toBeTruthy();
-        await expect(page.locator('#icon-settings-container button', { hasText: 'Save & apply' }))
-            .toBeEnabled({ timeout: 10000 });
+        expect(await spriteEntry(page, 'dm'), 'the edit must stay on screen after a refused save').toBeTruthy();
     });
 });

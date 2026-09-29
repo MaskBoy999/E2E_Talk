@@ -204,6 +204,15 @@ var mutedServers = [];
 var mutedChannels = [];
 var mutedFolders = [];
 var blockedUsers = [];
+// The signed-in user's id, read live from the stored session. Several
+// top-level helpers (the ⋯ menu, blockUser) used to guess at a `myUserId` that
+// only exists as a LOCAL inside the message renderers, so `typeof myUserId`
+// was always `undefined` there: the ⋯ menu computed isOwn=false for every
+// message and stopped offering Edit/Delete, and "Block User" was offered on
+// your own messages. This is the one accessor they should share.
+function signedInUserId() {
+    try { return (JSON.parse(localStorage.getItem('user') || '{}') || {}).id || ''; } catch (_) { return ''; }
+}
 async function loadBlockedUsers() {
     try {
         const res = await authFetch('/api/blocks');
@@ -213,8 +222,21 @@ async function loadBlockedUsers() {
 }
 function isUserBlocked(userId) { return blockedUsers.indexOf(userId) !== -1; }
 async function blockUser(userId) {
-    await authFetch('/api/blocks/' + userId, { method: 'PUT' });
-    blockedUsers.push(userId);
+    // Never block yourself. The server refuses it, but the local list used to be
+    // updated no matter what came back — so an empty failure still pushed our own
+    // id into `blockedUsers` and the app hid our own messages as "blocked".
+    if (!userId || userId === signedInUserId()) {
+        showToast('You cannot block yourself');
+        return;
+    }
+    try {
+        const res = await authFetch('/api/blocks/' + userId, { method: 'PUT' });
+        if (res && !res.ok) { showToast('Could not block that user'); return; }
+    } catch (_) {
+        showToast('Could not block that user');
+        return;
+    }
+    if (blockedUsers.indexOf(userId) === -1) blockedUsers.push(userId);
     showToast('User blocked');
 }
 async function unblockUser(userId) {
@@ -3695,7 +3717,10 @@ function showVaultLockScreen() {
         '<div class="vault-lock-card">' +
             '<div class="vault-lock-title">Unlock your key vault</div>' +
             '<p class="vault-lock-hint">Your storage key is sealed with your password on this device — it is no longer kept in a form that can be read from disk. Enter your password to open it.</p>' +
-            '<input type="password" id="vault-lock-password" class="modal-input auth-code-input" placeholder="Password" autocomplete="current-password" style="width:100%;margin-top:10px" />' +
+            '<div class="vault-lock-pw-row" style="position:relative;margin-top:10px">' +
+                '<input type="password" id="vault-lock-password" class="modal-input auth-code-input" placeholder="Password" autocomplete="current-password" style="width:100%;padding-right:38px" />' +
+                '<button type="button" class="toggle-visibility-btn" id="toggle-vault-lock-pw" title="Show/Hide" aria-label="Show or hide password" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:#aaa;cursor:pointer;padding:4px;display:flex;align-items:center"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>' +
+            '</div>' +
             '<div class="vault-lock-error" id="vault-lock-error" style="display:none"></div>' +
             '<button type="button" class="btn btn-primary" id="vault-lock-submit" style="width:100%;margin-top:10px">Unlock</button>' +
             '<button type="button" class="vault-lock-forget" id="vault-lock-forget">Forget this device and sign in again</button>' +
@@ -3711,6 +3736,18 @@ function showVaultLockScreen() {
     var input = document.getElementById('vault-lock-password');
     var btn = document.getElementById('vault-lock-submit');
     var err = document.getElementById('vault-lock-error');
+
+    // The same show/hide control every other password field in the app has —
+    // entering a long password on a phone without a peek is misery.
+    var pwToggle = document.getElementById('toggle-vault-lock-pw');
+    if (pwToggle) {
+        pwToggle.addEventListener('click', function () {
+            var shown = input.type === 'text';
+            input.type = shown ? 'password' : 'text';
+            this.innerHTML = '<svg class="ui-icon" width="14" height="14"><use href="#icon-' +
+                (shown ? 'eye' : 'eye-off') + '"/></svg>';
+        });
+    }
 
     function fail(msg) {
         err.textContent = msg;
@@ -4765,6 +4802,34 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     applyShowMsgStatus();
+
+    // Message-actions row display mode: 'hover' (default), 'always' or 'off'.
+    // Mirrors the timestamp/status modes via body classes. The row holds pin,
+    // react, edit, delete AND the ⋯ menu button, and it is the SAME row on a
+    // pointer device and on touch (the old rule that showed only ⋯ on touch is
+    // gone — a phone simply has no hover, so 'Always on' is the touch-friendly
+    // choice while hover stays the default everywhere).
+    function getMsgActionsMode() {
+        var stored = localStorage.getItem('show_msg_actions');
+        var mode = stored || 'hover';
+        if (['always', 'hover', 'off'].indexOf(mode) === -1) mode = 'hover';
+        return mode;
+    }
+    function applyShowMsgActions() {
+        var mode = getMsgActionsMode();
+        document.body.classList.toggle('show-msg-actions-always', mode === 'always');
+        document.body.classList.toggle('show-msg-actions-hover', mode === 'hover');
+        document.body.classList.toggle('show-msg-actions-off', mode === 'off');
+    }
+    const showMsgActionsSelect = document.getElementById('show-msg-actions');
+    if (showMsgActionsSelect) {
+        showMsgActionsSelect.value = getMsgActionsMode();
+        showMsgActionsSelect.addEventListener('change', () => {
+            localStorage.setItem('show_msg_actions', showMsgActionsSelect.value);
+            applyShowMsgActions();
+        });
+    }
+    applyShowMsgActions();
 
     // Composer (chat-input bar: + attach, emoji/sticker/gif, text box, send)
     // must only appear when a server TEXT channel or DM conversation is open.
@@ -19110,7 +19175,11 @@ function selectionAllowed(target) {
     // starting on the display name or the timestamp is inside `.header` /
     // `.time-hover`, which are `user-select: none`.
     if (target.closest('.message .content, .message .text')) {
-        return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+        // Gated on a fine pointer, not on hover: a touch-screen laptop still
+        // has a mouse/trackpad as its primary pointer and MUST be able to
+        // select, while a phone (coarse pointer) must not. This matches the
+        // CSS media query below for the same reason.
+        return window.matchMedia('(pointer: fine)').matches;
     }
     return false;
 }
@@ -19133,9 +19202,12 @@ function openMessageContextMenu(msgDiv, x, y) {
 
     var msgId = msgDiv.getAttribute('data-message-id');
 
-    var senderId = msgDiv.getAttribute('data-sender-id');
+    // `data-sender-id` is the HMAC'd sender hash; `data-sender-user-id` is the
+    // raw UUID. isOwn and the block call both need the raw id — comparing a
+    // hash to your own id is why Edit/Delete never appeared in this menu.
+    var senderId = msgDiv.getAttribute('data-sender-user-id') || msgDiv.getAttribute('data-sender-id');
 
-    var isOwn = senderId === (typeof myUserId !== 'undefined' ? myUserId : '');
+    var isOwn = senderId === signedInUserId();
 
     var msgText = '';
 
@@ -19211,7 +19283,7 @@ function openMessageContextMenu(msgDiv, x, y) {
     }});
 
     // Block/Unblock
-    if (senderId && senderId !== (typeof myUserId !== 'undefined' ? myUserId : '')) {
+    if (senderId && senderId !== signedInUserId()) {
         items.push('---');
         if (isUserBlocked(senderId)) {
             items.push({ label: 'Unblock User', icon: 'unlock', action: function() { unblockUser(senderId); }});

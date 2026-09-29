@@ -2463,49 +2463,17 @@ impl Database {
         Ok(members)
     }
 
-    pub fn kick_member(&self, server_id: &str, target_user_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM server_members WHERE server_id = ?1 AND user_id = ?2 AND role != 'owner'",
-            params![server_id, target_user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM server_keys WHERE server_id = ?1 AND user_id = ?2",
-            params![server_id, target_user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn leave_server(&self, server_id: &str, user_id: &str) -> Result<bool, String> {
-        // The owner check needs the lock, but the deletion below takes it again,
-        // so it runs in its own scope (see delete_server_inner).
-        let is_owner = {
-            let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            Self::is_server_owner_c(&conn, user_id, server_id)?
-        };
-
-        if is_owner {
-            // Owner leaving: delete the entire server and everything in it —
-            // one shared path with the admin delete and account deletion, so a
-            // server can never be half-deleted again. Messages cascade their
-            // reactions/votes/acks/pins/search tokens via message_id FKs; the
-            // tables with NO FK to servers (files on disk, voice state,
-            // per-conversation profiles, pending events) are handled there.
-            self.delete_server_inner(server_id)?;
-            return Ok(true); // true = server was deleted
-        }
-
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        // Non-owner leaving: delete their messages in the server, then remove
-        // membership. Message rows cascade their OWN reactions/votes/acks/pins
-        // via message_id FKs, but the leaver's rows on OTHER members' messages
-        // (and every other user-scoped row in this server) must be wiped too so
-        // no member can still see any trace of them: reactions, poll votes, read
-        // acks, pins, per-server profile snapshots, voice state + sanctions, and
-        // pending events about them.
+    /// Delete every server-scoped trace of a member: their messages (which
+    /// cascade their OWN reactions/votes/acks/pins via message_id FKs), their
+    /// rows on OTHER members' messages, per-server profile snapshots, voice
+    /// state and sanctions, pending events about them, and finally the
+    /// membership and key rows.
+    ///
+    /// Shared by leave, kick and ban so all three leave the same clean slate —
+    /// a kicked or banned member must not linger in a server's history any more
+    /// than one who left. (Before this, only leave purged; kick and ban left the
+    /// messages, reactions and votes behind.)
+    fn purge_server_member_data(conn: &Connection, server_id: &str, user_id: &str) -> Result<(), String> {
         conn.execute(
             "DELETE FROM messages WHERE sender_id = ?1 AND channel_id IN (SELECT id FROM channels WHERE server_id = ?2)",
             params![user_id, server_id],
@@ -2552,7 +2520,7 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
-            "DELETE FROM server_members WHERE server_id = ?1 AND user_id = ?2",
+            "DELETE FROM server_members WHERE server_id = ?1 AND user_id = ?2 AND role != 'owner'",
             params![server_id, user_id],
         )
         .map_err(|e| e.to_string())?;
@@ -2561,23 +2529,49 @@ impl Database {
             params![server_id, user_id],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn kick_member(&self, server_id: &str, target_user_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Kick == leave minus the choice: wipe everything the member left in the
+        // server, then drop the membership (the shared helper does both).
+        Self::purge_server_member_data(&conn, server_id, target_user_id)
+    }
+
+    pub fn leave_server(&self, server_id: &str, user_id: &str) -> Result<bool, String> {
+        // The owner check needs the lock, but the deletion below takes it again,
+        // so it runs in its own scope (see delete_server_inner).
+        let is_owner = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            Self::is_server_owner_c(&conn, user_id, server_id)?
+        };
+
+        if is_owner {
+            // Owner leaving: delete the entire server and everything in it —
+            // one shared path with the admin delete and account deletion, so a
+            // server can never be half-deleted again. Messages cascade their
+            // reactions/votes/acks/pins/search tokens via message_id FKs; the
+            // tables with NO FK to servers (files on disk, voice state,
+            // per-conversation profiles, pending events) are handled there.
+            self.delete_server_inner(server_id)?;
+            return Ok(true); // true = server was deleted
+        }
+
+        // Non-owner leaving: wipe every server-scoped trace of them, exactly as
+        // kick and ban now do, then drop the membership (the shared helper does
+        // all of it).
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::purge_server_member_data(&conn, server_id, user_id)?;
         Ok(false) // false = only member removed
     }
 
     pub fn ban_member(&self, server_id: &str, target_user_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        // Remove from server_keys
-        conn.execute(
-            "DELETE FROM server_keys WHERE server_id = ?1 AND user_id = ?2",
-            params![server_id, target_user_id],
-        )
-        .map_err(|e| e.to_string())?;
-        // Remove from server_members
-        conn.execute(
-            "DELETE FROM server_members WHERE server_id = ?1 AND user_id = ?2 AND role != 'owner'",
-            params![server_id, target_user_id],
-        )
-        .map_err(|e| e.to_string())?;
+        // Ban purges exactly like leave/kick (messages, reactions, votes, pins,
+        // profile snapshots, voice state, pending events, membership + keys),
+        // then records the ban so they cannot rejoin.
+        Self::purge_server_member_data(&conn, server_id, target_user_id)?;
         // Add to server_bans (INSERT OR IGNORE if already banned)
         conn.execute(
             "INSERT OR IGNORE INTO server_bans (server_id, user_id) VALUES (?1, ?2)",

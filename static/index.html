@@ -809,6 +809,15 @@
                     <p class="settings-hint">Controls the ✓ / ✓✓ sent-delivered-read indicator on your own messages. “Show on hover” (default) reveals it when you hover the message; “Always on” shows it at the end of each message; “Off” hides it. Hovering the ✓✓ itself shows who it was delivered to / read by.</p>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>Message Actions</h4>
+                    <select id="show-msg-actions" class="settings-select" style="max-width:260px">
+                        <option value="hover">Show on hover</option>
+                        <option value="always">Always on</option>
+                        <option value="off">Off</option>
+                    </select>
+                    <p class="settings-hint">Controls the row of per-message buttons (pin, react, edit, delete and the ⋯ menu) — the same row on desktop and touch. “Show on hover” (default) reveals it when you hover a message. “Always on” keeps it visible all the time, which is the practical choice on a touch screen (no hover). “Off” hides the row everywhere; the right-click menu on desktop and the ⋯ button on touch still carry every action.</p>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>Streamer Mode</h4>
                     <label class="settings-toggle">
                         <input type="checkbox" id="streamer-mode-toggle">

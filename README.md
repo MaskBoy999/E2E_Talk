@@ -91,9 +91,9 @@ not a missing feature:
 - **Panic wipe / auto-lock** — `Alt+Shift+W` wipes *everything* instantly (no
   confirmation); an idle timer (default OFF) does the same past your chosen
   minutes — keys, logins, settings, caches **and the local search index**. The
-  hand-operated routes are that chord and **Clear All Data & Sign Out**; there
-  is no separate "wipe now" button, so there is nothing to be talked into
-  clicking in a hurry.
+  hand-operated routes are that chord and **Clear All Data & Sign Out**, plus a
+  floating control that only the native app draws (a browser shows none, so it
+  cannot be mistaken for website chrome).
 - **Devices panel** — see every signed-in session; force-sign-out any of them,
   kicked everywhere immediately including voice calls.
 - **Session & security log** — a record of account events in Settings.
@@ -193,6 +193,10 @@ not a missing feature:
   counts them (channels); Display setting switches always / hover (default) /
   off; non-member acks are dropped server-side
 - **Message timestamps** — always / hover (default, no layout shift) / off
+- **Message actions** — the hover row (pin, react, edit, delete and the ⋯
+  menu button) is the **same row on desktop and touch**; a Display setting
+  switches it always on / on hover (default) / off, so a phone can keep it up
+  without needing a hover
 - **Unread badges and mention badges**, cleared on open; muted servers and
   channels don't update badges
 - **Infinite scroll** (`loadOlderMessages`) and jump-to-message around any id
@@ -215,7 +219,9 @@ not a missing feature:
 - **Roles & permission tiers** — role creation, permission matrix UI, drag
   ordering, role colors on the rail/avatars, a *grant all permissions* toggle;
   owner checks are enforced **server-side**, never trusted from the client
-- **Moderation** — bans, kicks, channel deletion, **voice sanctions** (server
+- **Moderation** — bans, kicks (both **purge everything the member left in the
+  server** — messages, reactions, poll votes, pins, profile snapshots, voice
+  state — exactly as leaving does), channel deletion, **voice sanctions** (server
   force-mute/deafen that the relay enforces — a force-muted member's frames
   aren't forwarded), *disable new joins* server toggle, per-member soundboard
   disable (owner only)
@@ -433,7 +439,8 @@ not a missing feature:
 - **Streamer Mode** — hides all message content behind a *Reveal* button,
   disables DM sidebar previews and stops media auto-loading — for screenshares
   and streams
-- **Display settings** — media previews, timestamp mode, message-status mode
+- **Display settings** — media previews, timestamp mode, message-status mode,
+  message-actions mode
 - **A settings panel that matches itself** — the top tabs are spaced apart and
   scroll instead of squashing their labels into one word, and every checkbox
   and field in a panel comes from one shared style built on the theme tokens
@@ -463,7 +470,9 @@ not a missing feature:
 - **Kill switch**, **self-destruct**, **panic wipe / auto-lock** (see Security)
 - **Export my data** (with or without a passphrase) + JSON data export (see
   Security)
-- **Clear all local data** (keys, logins, settings, cookies) from Settings
+- **Clear all local data** (keys, logins, settings, cookies) from Settings —
+  the same total wipe is also a floating button, but **only inside the native
+  app**: a browser draws no page-level wipe control
 
 ### Desktop app — the "box"
 
@@ -539,7 +548,7 @@ not a missing feature:
 - **CI/CD** — two GitHub workflows (*Build Desktop Box*, *Build Android APK*)
   produce installers, APK/AAB, and SHA256SUMS on every tag; APK signature is
   verified before publishing
-- **293 Playwright spec files** — the feature suite is the proof: encryption,
+- **318 Playwright spec files** — the feature suite is the proof: encryption,
   notifications, voice, soundboard, vault, search, admin, box and more
 
 ---
@@ -626,7 +635,7 @@ npm run tauri -- android build        # universal release APK + AAB
 Run the end-to-end test suite (starts the server itself on :3443):
 
 ```bash
-npx playwright test                          # everything (293 spec files)
+npx playwright test                          # everything (318 spec files)
 npx playwright test tests/key-vault.spec.ts  # or a single suite
 ```
 
@@ -638,7 +647,7 @@ npx playwright test tests/key-vault.spec.ts  # or a single suite
 server/     Rust backend (Axum + SQLite): auth, sessions, relay, encrypted storage
 static/     Frontend: chat, voice, crypto, secure-storage, captions, keyvault (the app itself)
 src-tauri/  Native desktop + Android shell (Tauri 2) and the call-service/box-shell plugins
-tests/      Playwright end-to-end suite (293 specs)
+tests/      Playwright end-to-end suite (318 specs)
 tools/      Small build helpers (icon generation, etc.)
 packaging/  AUR and other packaging bits
 ```

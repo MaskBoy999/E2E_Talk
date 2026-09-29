@@ -425,7 +425,9 @@ input[type="password"]::-ms-clear {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: clamp(6px, 1vw, 10px) 0;
+    /* Notch / rounded-corner protection: viewport-fit=cover is set, so the
+       camera cutout overlays the page — keep the rail's top row below it. */
+    padding: calc(clamp(6px, 1vw, 10px) + env(safe-area-inset-top, 0px)) 0 clamp(6px, 1vw, 10px);
     gap: clamp(4px, 0.8vw, 8px);
     overflow-y: auto;
     flex-shrink: 0;
@@ -594,7 +596,8 @@ input[type="password"]::-ms-clear {
 }
 
 .sidebar-header {
-    padding: clamp(10px, 2.5vw, 16px);
+    /* Keep the server name clear of a camera notch (viewport-fit=cover). */
+    padding: calc(clamp(10px, 2.5vw, 16px) + env(safe-area-inset-top, 0px)) clamp(10px, 2.5vw, 16px) clamp(10px, 2.5vw, 16px);
     border-bottom: 1px solid var(--bg-border);
     display: flex;
     justify-content: space-between;
@@ -844,7 +847,8 @@ input[type="password"]::-ms-clear {
 }
 
 .chat-header {
-    padding: clamp(8px, 2vw, 12px) clamp(10px, 3vw, 16px);
+    /* Keep the channel name and header buttons below a camera notch. */
+    padding: calc(clamp(8px, 2vw, 12px) + env(safe-area-inset-top, 0px)) clamp(10px, 3vw, 16px) clamp(8px, 2vw, 12px);
     border-bottom: 1px solid var(--bg-border);
     display: flex;
     align-items: center;
@@ -1658,13 +1662,13 @@ body.show-msg-times-hover .message:hover .file-card .time-hover {
    text cursor to place, and a press on a message has to stay a tap or a
    long-press. Both branches are explicit (rather than inheriting a default)
    so the rule can be read off the element in either profile. */
-@media (hover: hover) and (pointer: fine) {
+@media (pointer: fine) {
     .message .text {
         -webkit-user-select: text;
         user-select: text;
     }
 }
-@media (hover: none), (pointer: coarse) {
+@media (pointer: coarse) {
     .message .text {
         -webkit-user-select: none;
         user-select: none;
@@ -6648,14 +6652,13 @@ select.settings-field { cursor: pointer; }
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
 .message:hover .message-actions { display: flex; }
-/* Touch has neither hover nor a right button, so the hover row is unreachable
-   on a phone. There the ⋯ control IS the menu and is always visible, while the
-   hover-only shortcuts (react/edit/delete) stay out of the way — they are all
-   in the menu the ⋯ opens. */
-@media (hover: none) {
-    .message-actions { display: flex; }
-    .message-actions .msg-action-btn:not([data-action="more"]) { display: none; }
-}
+/* Settings → Display → Message Actions: 'always' keeps the row up (the
+   touch-friendly choice, since a phone has no hover), 'off' hides it
+   everywhere. The row is identical on desktop and touch — pin, react, edit,
+   delete and the ⋯ menu button all together, which is what a desktop already
+   showed and a phone now does too. */
+body.show-msg-actions-always .message-actions { display: flex; }
+body.show-msg-actions-off .message-actions { display: none !important; }
 .msg-action-btn {
     background: none;
     border: none;

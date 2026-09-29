@@ -7,17 +7,20 @@
 //     channel name, a server row, a display name, an avatar's initial — and
 //     the browser then threw its own copy/select menu over the same gestures
 //     that reorder rows and open menus. So the app is non-selectable by
-//     default (`body { user-select: none }`), with three exceptions: form
-//     fields, the codes that exist to be copied (invite code, friend code,
-//     identity key — they keep `user-select: all`, so one click takes the
-//     whole value), and **message text on a pointer device**. That last one is
-//     the deliberate asymmetry: reading a conversation means quoting a line of
-//     it, while a phone has no text cursor to place and a press on a message
-//     must stay a tap.
+//     default, with three exceptions: form fields, the codes that exist to be
+//     copied (invite code, friend code, identity key — they keep
+//     `user-select: all`, so one click takes the whole value), and **message
+//     text on a device with a fine pointer**. That last one is the deliberate
+//     asymmetry: reading a conversation means quoting a line of it, while a
+//     phone has no text cursor to place and a press on a message must stay a
+//     tap. A touch-screen laptop has a mouse as its primary pointer, so it
+//     selects even though it also has a touchscreen.
 //
 //  2. Messages carry a ⋯ button that opens exactly the menu the right-click
-//     opens. On a phone there is no right button and no hover — which is also
-//     why the hover-only shortcuts are hidden there and ⋯ is always visible.
+//     opens, sitting alongside the pin/react/edit/delete shortcuts in one row.
+//     That row is the SAME on desktop and touch; the Display → Message Actions
+//     setting is what a phone changes (there is no hover there), not a
+//     different row.
 //
 // Selection is checked by *doing it*: a real mouse drag across the text, then
 // reading `window.getSelection()`. `getComputedStyle(...).userSelect` cannot
@@ -226,29 +229,39 @@ test.describe('desktop: message text is selectable, everything else is not', () 
     });
 });
 
-test.describe('touch: the app-wide rule applies to messages too', () => {
+test.describe('touch: text stays unselectable, but the action row matches desktop', () => {
     // A phone profile: coarse pointer, no hover — the same media query the
     // desktop exception is gated on.
     test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
 
-    test('a drag does not select message text, and ⋯ is always reachable', async ({ page }) => {
+    test('a drag does not select message text, and the full action row can be kept up', async ({ page }) => {
         test.setTimeout(180000);
         const body = await registerUser(page, 'selt_' + Date.now());
         await createServerAndKey(page, body.token, body.user.id);
         await openChannelAndSend(page, 'unselectable on a phone');
 
-        expect(await page.evaluate(() => window.matchMedia('(hover: hover) and (pointer: fine)').matches)).toBe(false);
+        expect(await page.evaluate(() => window.matchMedia('(pointer: fine)').matches)).toBe(false);
 
-        // The button is visible with no hover…
-        const more = page.locator('.message .msg-action-btn[data-action="more"]').last();
-        await expect(more).toBeVisible();
-        // …while the hover-only shortcuts are not.
-        await expect(page.locator('.message .msg-action-btn[data-action="react"]').last()).toBeHidden();
+        // Default 'hover' mode: a phone has no hover, so the row is hidden at
+        // rest — and it is the WHOLE row, not ⋯ on its own.
+        await expect(page.locator('.message .msg-action-btn[data-action="more"]').last()).toBeHidden();
 
-        // …and it still opens the real menu.
-        await more.click();
+        // Switch the Display setting to 'Always on' — the touch-friendly mode —
+        // the way the select itself does.
+        await page.evaluate(() => {
+            const sel = document.getElementById('show-msg-actions') as HTMLSelectElement;
+            sel.value = 'always';
+            sel.dispatchEvent(new Event('change'));
+        });
+        // ⋯ sits ALONGSIDE react/edit/delete, exactly like desktop.
+        await expect(page.locator('.message .msg-action-btn[data-action="more"]').last()).toBeVisible();
+        await expect(page.locator('.message .msg-action-btn[data-action="react"]').last()).toBeVisible();
+
+        // …and ⋯ still opens the real menu, Edit included (we own the message).
+        await page.locator('.message .msg-action-btn[data-action="more"]').last().click();
         const labels = await menuLabels(page);
         expect(labels).toContain('Copy Text');
+        expect(labels).toContain('Edit');
         await dismissMenu(page);
 
         // Dragging the message does not highlight it here (the desktop

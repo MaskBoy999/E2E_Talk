@@ -683,12 +683,14 @@
         var count2 = Object.keys(slotMap(2)).length;
         var editing = parseInt(localStorage.getItem('iconEditingSlot') || '0', 10);
         if (editing !== 1 && editing !== 2) editing = active === 1 || active === 2 ? active : 1;
+        // The draft is the in-memory working map. It is re-read from the server
+        // only when the slot being edited actually changes — not on every
+        // re-render — so an in-flight autosave can never be rolled back by a
+        // refresh that raced it. Every change autosaves (scheduleAutosave).
+        if (editing !== _draftSlot || _draft === null) {
+            _draft = slotMap(editing);
+        }
         _draftSlot = editing;
-        // The draft is what the grid edits; it starts from the slot's saved map.
-        try {
-            _draft = JSON.parse(localStorage.getItem('iconDraft_' + editing) || 'null') || null;
-        } catch (_) { _draft = null; }
-        if (!_draft) _draft = slotMap(editing);
         var names = iconNames();
 
         container.innerHTML = '';
@@ -719,10 +721,9 @@
             card.title = isActive ? 'Active — click to keep editing' : 'Click to activate and edit';
             card.addEventListener('click', function () {
                 if (c.id === 0) {
-                    // Built-in: activate it and drop any draft for the old slot.
+                    // Built-in: activate it. There is no device-side draft to drop
+                    // any more — drafts live in memory and autosave to the server.
                     localStorage.removeItem('iconEditingSlot');
-                    localStorage.removeItem('iconDraft_1');
-                    localStorage.removeItem('iconDraft_2');
                     resetToBuiltIn();
                     setActive(0).then(function () { renderTab(container); })
                         .catch(function (e) { note('Using the built-in icons here, but the server was not told: ' + e.message, true); });
@@ -751,14 +752,11 @@
             icon('upload') + ' Upload icon pack (.svg)');
         var download = el('button', BTN + 'border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff',
             icon('download') + ' Download pack');
-        var save = el('button', BTN + 'border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff',
-            icon('check') + ' Save &amp; apply to Slot ' + editing);
         var clear = el('button', BTN + 'border:2px solid #f44336;background:rgba(244,67,54,0.1);color:#f44336',
             icon('trash') + ' Clear Slot ' + editing);
         var reset = el('button', BTN + 'border:2px solid #888;background:rgba(255,255,255,0.05);color:#ccc',
-            icon('reverse') + ' Discard changes');
+            icon('reverse') + ' Revert to saved');
         actions.appendChild(upload);
-        actions.appendChild(save);
         actions.appendChild(download);
         actions.appendChild(clear);
         actions.appendChild(reset);
@@ -788,14 +786,9 @@
         container.appendChild(hint);
 
         var customCount = Object.keys(_draft).length;
-        status.textContent = 'Slot ' + editing + ' draft: ' + customCount + ' of ' + names.length +
-            ' icons customised' + (active === editing ? ' (live)' : ' (not active yet)') +
-            '. Click an icon below to replace just that one.';
-        if (_draftNotStored) {
-            status.style.color = 'var(--danger,#ed4245)';
-            status.textContent += ' This draft is too large to keep on this device between reloads —' +
-                ' press "Save & apply" now to store it on the server.';
-        }
+        status.textContent = 'Slot ' + editing + ': ' + customCount + ' of ' + names.length +
+            ' icons customised' + (active === editing ? ' (live)' : '') +
+            '. Every change saves to your server automatically — nothing is kept on this device.';
         if (_flash) {
             status.style.color = _flash.error ? 'var(--danger,#ed4245)' : 'var(--accent,#4fc3f7)';
             status.textContent = _flash.msg;
@@ -824,18 +817,23 @@
                 window.escapeHtml(name) + '</div>' +
                 (entry ? '<div style="font-size:9px;color:#4fc3f7">custom</div>'
                        : '<div style="font-size:9px;color:#555">built-in</div>');
-            if (entry) {
-                var x = el('button', 'margin-top:2px;font-size:9px;padding:0 4px;border-radius:4px;border:1px solid #555;' +
-                    'background:transparent;color:#aaa;cursor:pointer', 'reset');
-                x.title = 'Remove this override (back to the built-in icon)';
-                x.addEventListener('click', function (ev) {
-                    ev.stopPropagation();
-                    delete _draft[name];
-                    stashDraft();
-                    renderTab(container);
-                });
-                cell.appendChild(x);
-            }
+            // Per-icon reset: present on EVERY icon (a built-in one gets a
+            // disabled control), so resetting a single override is one click and
+            // never touches the rest of the pack.
+            var x = el('button', 'margin-top:2px;font-size:9px;padding:0 4px;border-radius:4px;border:1px solid #555;' +
+                'background:transparent;color:#aaa;cursor:' + (entry ? 'pointer' : 'default') + ';opacity:' + (entry ? '1' : '.4'), 'reset');
+            x.title = entry ? 'Reset just this icon to the built-in artwork' : 'Already using the built-in icon';
+            x.disabled = !entry;
+            x.setAttribute('data-icon-reset', name);
+            x.addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                if (!_draft[name]) return;
+                delete _draft[name];
+                applyMap(_draft);
+                scheduleAutosave();
+                renderTab(container);
+            });
+            cell.appendChild(x);
             cell.addEventListener('click', function () {
                 singleInput.dataset.iconName = name;
                 singleInput.value = '';
@@ -862,11 +860,11 @@
                     _draft[name] = parsed.icons[name];
                     added++;
                 });
-                stashDraft();
-                var msg = 'Pack loaded: ' + added + ' icon(s) will be replaced.';
+                applyMap(_draft);
+                scheduleAutosave();
+                var msg = 'Pack loaded: ' + added + ' icon(s) replaced and saving to your server.';
                 if (unknown.length) msg += ' Ignored (no such icon in this app): ' + unknown.slice(0, 6).join(', ') +
                     (unknown.length > 6 ? '…' : '') + '.';
-                msg += ' Press "Save & apply" to store it.';
                 flash(msg, !added);
                 renderTab(container);
             };
@@ -885,7 +883,8 @@
                 openIconImageCrop(file, name, function (entry) {
                     if (!entry) { status.textContent = 'Could not read that image.'; return; }
                     _draft[name] = entry;
-                    stashDraft();
+                    applyMap(_draft);
+                    scheduleAutosave();
                     renderTab(container);
                 });
                 return;
@@ -899,35 +898,15 @@
                 var entry = parsed.icons[name] || parsed.icons[Object.keys(parsed.icons)[0]];
                 if (!entry) { status.style.color = 'var(--danger,#ed4245)'; status.textContent = 'That SVG has no drawable content.'; return; }
                 _draft[name] = entry;
-                stashDraft();
+                applyMap(_draft);
+                scheduleAutosave();
                 renderTab(container);
             };
             reader.readAsText(file);
         });
 
-        save.addEventListener('click', function () {
-            save.textContent = 'Saving…';
-            save.disabled = true;
-            // The draft is only discarded once the SERVER took it (the promise
-            // resolves after `setActive` succeeded) — a failure keeps it in memory
-            // and in localStorage so the icons are still there to fix and retry.
-            saveSlot(editing, _draft).then(function (bytes) {
-                localStorage.removeItem('iconDraft_' + editing);
-                localStorage.setItem('iconEditingSlot', String(editing));
-                applyMap(_draft);
-                flash('Saved to slot ' + editing + ' and applied (' + kb(bytes) + ' encrypted).');
-                renderTab(container);
-            }).catch(function (e) {
-                status.style.color = 'var(--danger,#ed4245)';
-                status.textContent = 'Save failed: ' + (e && e.message ? e.message : 'unknown error');
-                save.disabled = false;
-                save.textContent = 'Save & apply to Slot ' + editing;
-            });
-        });
-
         clear.addEventListener('click', function () {
             clearSlot(editing).then(function () {
-                localStorage.removeItem('iconDraft_' + editing);
                 if ((_slots && _slots.active_slot) === editing || active === editing) {
                     setActive(0).catch(function () {});
                 }
@@ -938,8 +917,12 @@
         });
 
         reset.addEventListener('click', function () {
-            localStorage.removeItem('iconDraft_' + editing);
+            // Back to what the server holds for this slot (there is no device
+            // cache to fall back to any more).
+            localStorage.setItem('iconEditingSlot', String(editing));
             _draft = slotMap(editing);
+            applyMap(_draft);
+            flash('Reverted to the saved slot ' + editing + '.');
             renderTab(container);
         });
 
@@ -979,24 +962,37 @@
     function flash(msg, isError) { _flash = { msg: msg, error: !!isError }; }
 
     /**
-     * Keep the working map across tab re-renders and reloads.
+     * Autosave: every change to the draft is pushed to the server (encrypted)
+     * after a short debounce, so there is no Save & apply step and no draft kept
+     * on the device at all.
      *
-     * localStorage is a 5 MB budget and a picture icon is a whole base64 data
-     * URL, so a big pack (or two of them, one per slot) can genuinely not fit —
-     * and that used to be a silent `catch {}`, which reads exactly like "my icons
-     * disappeared". The failure is now remembered and shown next to the grid,
-     * where "press Save & apply now" is the fix.
+     * That removes the failure the device cache caused: localStorage is a 5 MB
+     * budget and a picture icon is a whole base64 data URL, so a big pack could
+     * genuinely not fit, and the icons then looked like they vanished between
+     * reloads. The server slot is the real store (up to 4 MB of ciphertext), so
+     * a pack that is too big is now named while you are editing it.
      */
-    var _draftNotStored = false;
-    function stashDraft() {
-        try {
-            localStorage.setItem('iconDraft_' + _draftSlot, JSON.stringify(_draft));
-            _draftNotStored = false;
-            return true;
-        } catch (_) {
-            _draftNotStored = true;
-            return false;
-        }
+    var _autosaveTimer = null;
+    function scheduleAutosave() {
+        if (_autosaveTimer) clearTimeout(_autosaveTimer);
+        noteAutosave('Saving to your server…', false);
+        _autosaveTimer = setTimeout(function () {
+            _autosaveTimer = null;
+            var slot = _draftSlot;
+            saveSlot(slot, _draft).then(function (bytes) {
+                noteAutosave('Saved to slot ' + slot + ' (' + kb(bytes) + ' encrypted).', false);
+            }).catch(function (e) {
+                noteAutosave('Auto-save failed: ' + (e && e.message ? e.message : 'unknown error'), true);
+            });
+        }, 400);
+    }
+
+    /** Write an autosave message into the status line of the current render. */
+    function noteAutosave(msg, isError) {
+        var st = document.getElementById('icon-pack-status');
+        if (!st) return;
+        st.style.color = isError ? 'var(--danger,#ed4245)' : 'var(--accent,#4fc3f7)';
+        st.textContent = msg;
     }
 
     // `icon()` lives in index.html and returns markup, not a node; the tab needs

@@ -116,7 +116,10 @@ test.describe('reply notification redirect + load scroll', () => {
         const origMsg = page2.locator('.message', { hasText: 'ORIGINAL-msg-' + ts }).first();
         await origMsg.hover();
         await page2.waitForTimeout(400);
-        await origMsg.locator('.msg-action-btn[data-action="reply"]').first().click();
+        // Reply lives in the ⋯ menu (the hover row carries pin/react/edit/delete,
+        // never reply) — the same menu the right-click opens.
+        await origMsg.locator('.msg-action-btn[data-action="more"]').click();
+        await page2.locator('.channel-context-menu .context-menu-item', { hasText: 'Reply' }).first().click();
         await page2.fill('#message-input', 'REPLY-msg-' + ts);
         await page2.click('#send-btn');
         await page2.waitForFunction((t) => {

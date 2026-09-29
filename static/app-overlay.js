@@ -1,11 +1,19 @@
 /**
  * The always-on "clear all app data" overlay.
  *
- * A single floating button that is present on every page of the app — the chat,
- * the login screen and the box's address screen — whether or not a connection
- * exists, and which erases **everything local** and then makes the user enter
- * the server address again. It exists so there is one deliberate control that
- * takes the device back to a clean slate without navigating a settings tree.
+ * A single floating button that is present on every page of the **native shell**
+ * (desktop app / Android app) — the chat, the login screen and the box's address
+ * screen — whether or not a connection exists, and which erases **everything
+ * local** and then makes the user enter the server address again. It exists so
+ * there is one deliberate control that takes the device back to a clean slate
+ * without navigating a settings tree.
+ *
+ * It is deliberately NOT drawn in an ordinary browser: the page cannot tell the
+ * two apart by itself, so `boot()` gates on `window.__TAURI__`. Showing the same
+ * button on the website was the tell that it was page chrome rather than part of
+ * the app, and it also vanished under the vault lock screen. In a browser the
+ * in-app Settings route (Clear All Local Data & Sign Out) and the panic chord do
+ * the same job.
  *
  * What it erases, and why each one is here:
  *
@@ -355,6 +363,15 @@
     }
 
     function boot() {
+        // Native shell ONLY. The page is the same whether it is opened in the
+        // app or in an ordinary browser, so a floating button drawn by the page
+        // shows up in the browser too — which is exactly the giveaway that the
+        // control is website chrome rather than the app. `window.__TAURI__` is
+        // present only inside the desktop/Android shell, so gating on it keeps
+        // the wipe control in the app and out of the browser entirely. In a
+        // browser the same job is still covered by Settings → Clear All Local
+        // Data and the Alt+Shift+W panic chord.
+        if (!tauri()) return;
         // The mini call-controls window is a 320x170 strip of buttons with no
         // chat, no storage of its own and no business offering a wipe.
         try {

@@ -804,9 +804,11 @@ Forwards, Pin, Copy Text, Copy Message Link, Block User. Right-click the same
 message and compare: it must be the identical list (one builder draws both).
 
 **Do (touch screen):** look at a message without hovering.
-**Expect:** ⋯ is visible on its own; the react/edit/delete shortcuts are not.
-Tap ⋯ and the full menu still opens — this is the only route on a device with
-no right button.
+**Expect:** with the default **Display → Message Actions = Show on hover**, the
+whole row (pin, react, edit, delete, ⋯) is hidden until you hover (a tap usually
+counts as a hover on a phone). Switch it to **Always on** and the row stays up
+on every message — ⋯ *alongside* pin/react/edit/delete, not ⋯ alone — exactly
+like desktop.
 
 **Try to break it:** click ⋯, then click a menu item. It should act on *that*
 message and close. Then click ⋯ twice in a row — one menu, not two stacked.
@@ -861,3 +863,74 @@ the page's CSP names no external origin.
 `SHA256SUMS-*.txt`. The Windows installer is noticeably larger than 0.2.34
 (~100 MB): the second speech model is bundled inside it, which is the price of
 captions that work offline.
+
+---
+
+## 23. Message-action modes, live icon packs, kick/ban purge, notch (0.2.37)
+
+What changed: the per-message action row is one row on desktop and touch with a
+Display setting; icon packs save to the server as you edit them (no Save &
+apply) and every icon has its own reset; kick and ban wipe the member's data
+like leaving does; the browser no longer draws the wipe button; the vault lock
+screen has a show/hide password control; message text is selectable on a
+fine-pointer device again; the top chrome clears a camera notch; and you can no
+longer block yourself.
+
+### Message action modes
+
+**Do:** Settings → Display → **Message Actions**, choose **Always on**.
+**Expect:** every message shows the full row — pin, react, edit, delete, ⋯ —
+with no hover on desktop, and the same on a phone. Choose **On hover** and the
+row only appears when you hover a message. **Off** hides it everywhere; the
+right-click menu (desktop) and the ⋯ menu still carry every action.
+**Try to break it:** with the row off, right-click a message and confirm Reply,
+Edit, Delete, Pin and Block are all still there.
+
+### Icon packs save as you edit
+
+**Do:** Settings → Icons → pick **Slot 1**, click an icon, upload a picture and
+crop it, or upload an .svg pack.
+**Expect:** the change appears at once and the status line says it is saving to
+your server, then confirms the encrypted size. There is **no Save & apply**
+button. Reload the app: the pack is still there (it lives encrypted on the
+server, not in localStorage).
+**Do:** click the small **reset** control under a customized icon.
+**Expect:** only that icon returns to the built-in artwork; the rest of the pack
+is untouched, and the change saves automatically. A built-in icon's reset
+control is dimmed and does nothing.
+**Try to break it:** upload a pack big enough to exceed 4 MB once encrypted.
+**Expect:** an honest "Auto-save failed: … the limit is 4096 KiB" message while
+you are still editing — not a silent loss on reload.
+
+### Kick and ban purge the member's data
+
+**Do:** as the owner, have another account post messages and react to a few in
+your server, then **Kick** (or **Ban**) them.
+**Expect:** their messages disappear for everyone, their reactions/votes/pins on
+other people's messages go, and their per-server profile snapshot and voice
+state are gone — the same clean slate **Leave** produces. Reload a second
+account to confirm nothing of theirs is left.
+**Try to break it:** ban a user, unban them, and have them rejoin — the old
+messages must not come back (the rows were deleted, not hidden).
+
+### The wipe button and the vault password
+
+**Do:** open the server's address in an ordinary **browser**.
+**Expect:** no floating "clear all app data" button anywhere — that control is
+native-app only. Settings → Clear All Local Data and `Alt+Shift+W` still work.
+**Do:** open the **desktop or Android app** and look at the same page.
+**Expect:** the floating button is there.
+**Do:** restart into the locked **Unlock your key vault** screen and type a
+password.
+**Expect:** the same show/hide (eye) control every other password field has lets
+you check what you typed before unlocking.
+
+### Notch and blocking yourself
+
+**Do (phone with a camera notch):** open the app in portrait.
+**Expect:** the server name, channel name and rail icons sit **below** the notch,
+not under it.
+**Do:** open your own message's context menu (right-click) and your own profile.
+**Expect:** no **Block User** entry for yourself, and blocking your own id by
+hand does nothing (the server refuses it and the app no longer hides your own
+messages as "blocked").
