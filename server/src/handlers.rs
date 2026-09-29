@@ -4951,7 +4951,7 @@ pub async fn admin_login(
 ) -> impl IntoResponse {
     // Per-IP rate limiting: 10 attempts per 5 minutes. Env-overridable for test
     // suites (ADMIN_LOGIN_IP_MAX / ADMIN_LOGIN_IP_WINDOW_SECS), same pattern as
-    // the login/friend-request limiters.
+    // the login/friend-request limiters; ADMIN_LOGIN_IP_MAX=0 disables it.
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("admin_login_ip:{}", ip);
     let admin_ip_max: u32 = std::env::var("ADMIN_LOGIN_IP_MAX")
@@ -4962,7 +4962,7 @@ pub async fn admin_login(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(300);
-    if !ADMIN_LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, admin_ip_max, Duration::from_secs(admin_ip_window)) {
+    if admin_ip_max > 0 && !ADMIN_LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, admin_ip_max, Duration::from_secs(admin_ip_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many admin login attempts. Try again in 5 minutes."})),

@@ -52,9 +52,14 @@ export default defineConfig({
             // E2E message search + token-index backfill share a per-IP budget;
             // raise it so the search suite's queries never 429 mid-suite.
             SEARCH_IP_MAX: '100000',
-            // Admin-login attempts share a per-IP budget; raise it for the suite
-            // (admin tests + probes log in repeatedly from one machine).
-            ADMIN_LOGIN_IP_MAX: '100000',
+            // Admin-login attempts share a per-IP budget; the suites log in
+            // repeatedly from one machine, and ADMIN_LOGIN_IP_MAX=0 disables
+            // the limiter outright (non-zero still enforces it).
+            ADMIN_LOGIN_IP_MAX: '0',
+            // Reauth (password re-entry for sensitive actions) is capped per IP
+            // AND per user; 0 turns both off for the suite, matching the rest.
+            REAUTH_IP_MAX: '0',
+            REAUTH_USER_MAX: '0',
             // G2: the suite makes many authed mutations per user/IP from one
             // machine — raise the per-user + per-IP budgets and storage quota.
             MUTATION_USER_MAX: '100000',
