@@ -489,28 +489,22 @@ var E2ECrypto = (() => {
         const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24;
         const encBytes = encryptedData instanceof Uint8Array ? encryptedData : new Uint8Array(encryptedData);
         const totalChunks = Math.ceil(encBytes.length / CHUNK_ENCRYPTED_FULL);
-        const decryptedChunks = [];
+        // Decrypt into one output buffer rather than holding every decrypted
+        // chunk in an array and then copying them into a second allocation —
+        // that doubled peak memory for no benefit on a weak device.
+        const result = new Uint8Array(encBytes.length);
+        let offset = 0;
         for (let i = 0; i < totalChunks; i++) {
             const start = i * CHUNK_ENCRYPTED_FULL;
-            let chunkData;
-            if (i < totalChunks - 1) {
-                chunkData = encBytes.slice(start, start + CHUNK_ENCRYPTED_FULL);
-            } else {
-                chunkData = encBytes.slice(start);
-            }
+            const chunkData = (i < totalChunks - 1)
+                ? encBytes.subarray(start, start + CHUNK_ENCRYPTED_FULL)
+                : encBytes.subarray(start);
             if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
             const decrypted = decryptFileChunk(fileKey, chunkData, i);
-            decryptedChunks.push(decrypted);
+            result.set(decrypted, offset);
+            offset += decrypted.length;
         }
-        let totalLength = 0;
-        for (const c of decryptedChunks) totalLength += c.length;
-        const result = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const c of decryptedChunks) {
-            result.set(c, offset);
-            offset += c.length;
-        }
-        return result;
+        return result.subarray(0, offset);
     }
 
     // ---- Key storage in localStorage ----

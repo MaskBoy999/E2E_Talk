@@ -934,3 +934,70 @@ not under it.
 **Expect:** no **Block User** entry for yourself, and blocking your own id by
 hand does nothing (the server refuses it and the app no longer hides your own
 messages as "blocked").
+
+---
+
+## 25. Large PDFs, touch drag, the GPU toggle, and whole-blob media (0.2.38)
+
+### A 10 MB PDF must not take the app down
+
+**Do:** in a text channel, post a PDF with a lot of pages (a 10 MB scan is the
+real case) and click it to open.
+**Expect:** the editor opens; the thumbnail strip fills in as you scroll it; the
+window never blanks, freezes or closes. Scroll to the last page and back — every
+page still renders (released pages re-render when they come back into view).
+**Do:** press Undo fifteen times.
+**Expect:** it stays responsive; the app never grows to hold fifteen copies of
+the file (the undo stack is capped by bytes as well as by count).
+**Do (the plain preview, e.g. from a file card's Preview):** open the same PDF.
+**Expect:** the page count is shown and only the pages near the viewport are
+drawn; scrolling fills the rest in.
+
+**Try to break it:** open the PDF, scroll to the bottom fast, close the editor,
+and reopen it. Memory should come back down, not climb with each open.
+
+### Long-press a little too shaky
+
+**Do:** Settings → Display → **Touch Drag** → *Very loose* (28 px). On a touch
+screen, long-press a server icon (or a channel, DM or role) and let your finger
+wobble a few pixels before the pick-up fires.
+**Expect:** it still picks up and reorders. Now set it to *Tight* (6 px) and make
+the same small movement — the list scrolls instead, which is the intent.
+
+**Try to break it:** with *Tight*, hold perfectly still for the full press; it
+must still pick up (the threshold is about movement, not the press length).
+
+### Turning the GPU off on a machine that needs it
+
+**Do (desktop app):** Settings → Display → **Hardware Acceleration** → turn it
+off, then fully close and reopen the app.
+**Expect:** the toggle is remembered (the shell persists it, not just the
+browser profile), the window opens and renders normally — with software
+rendering. Turn it back on and reopen to confirm the GPU returns.
+**Do (plain browser):** open the settings.
+**Expect:** the Hardware Acceleration section is not shown at all (it is a shell
+launch flag; a browser tab has no such thing).
+
+**Try to break it:** flip the toggle on, close the app *without* restarting, and
+reopen — the setting must reflect the last choice, and the app must still open.
+
+### An image downloads in one piece, not chunk-by-chunk
+
+**Do:** with **auto-load previews** on, open a channel containing an image or GIF
+and watch the Network tab.
+**Expect:** exactly one `/api/files/…/download` request, and **no**
+`/api/files/…/chunk/…` GETs. The blob is fetched whole and then decrypted.
+**Do:** turn auto-load previews off, reopen the channel. Click **Load preview**.
+**Expect:** nothing is downloaded until the click, and the click makes the same
+single full download.
+
+**Try to break it:** load a gallery of several images at once — each is one
+download, still no per-chunk GETs, and avatars/profile pictures keep rendering
+(they take the same rewritten decrypt path).
+
+### No plaintext in the console
+
+**Do:** make an audio preview fail (a stale key) and run **Download all** over a
+message whose file key is missing, with the DevTools console open.
+**Expect:** the warnings name the failure and nothing else — **no decrypted
+filename** appears in the console.

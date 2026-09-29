@@ -101,6 +101,27 @@ const PTT_SHORTCUT_EVENT: &str = "box:ptt-shortcut";
 #[cfg(desktop)]
 const DEFAULT_PTT_SHORTCUT: &str = "Ctrl+Shift+Space";
 
+/// Settings → Display → Hardware Acceleration. The page raises
+/// [`SET_HW_ACCEL_EVENT`] with `{enabled}`; the shell persists it for the next
+/// launch (an already-running WebView cannot be switched to software
+/// rendering) and answers with [`HW_ACCEL_EVENT`]. [`GET_HW_ACCEL_EVENT`] asks
+/// for the persisted value so the toggle reflects what the shell will do, not
+/// only what this browser profile remembers. Events, not commands, for the same
+/// remote-origin reason as [`CHANGE_SERVER_EVENT`].
+#[cfg(desktop)]
+const SET_HW_ACCEL_EVENT: &str = "box:set-hardware-acceleration";
+#[cfg(desktop)]
+const GET_HW_ACCEL_EVENT: &str = "box:get-hardware-acceleration";
+#[cfg(desktop)]
+const HW_ACCEL_EVENT: &str = "box:hardware-acceleration";
+
+/// Payload of [`SET_HW_ACCEL_EVENT`] and [`HW_ACCEL_EVENT`].
+#[cfg(desktop)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct HwAccelPayload {
+    enabled: bool,
+}
+
 /// Payload of [`PTT_EVENT`].
 #[cfg(desktop)]
 #[derive(Clone, serde::Serialize)]
@@ -499,6 +520,36 @@ mod tests {
             assert!(!is_app_page(&url), "{bad} must not count as a bundled page");
         }
     }
+
+    /// Settings → Display → Hardware Acceleration maps to the WebView launch
+    /// flags the way it claims: off adds `--disable-gpu` while keeping wry's
+    /// default feature list, and the debug port still composes with it.
+    #[test]
+    fn hardware_acceleration_off_is_a_disable_gpu_flag() {
+        // Default-on with no debug port is "no override at all".
+        assert!(browser_args_string(None, false).is_none());
+
+        // Off always disables the GPU, and repeats wry's defaults — setting any
+        // args replaces wry's own, so dropping them would bring the Office/PDF
+        // overlay and SmartScreen back.
+        let off = browser_args_string(None, true).expect("off must produce args");
+        assert!(off.contains("--disable-gpu"), "{off}");
+        assert!(
+            off.contains("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"),
+            "{off}"
+        );
+        assert!(!off.contains("--remote-debugging-port"), "{off}");
+
+        // On with a debug port is the debug-only string, and never disables GPU.
+        let debug = browser_args_string(Some("9333"), false).expect("debug port must produce args");
+        assert!(debug.contains("--remote-debugging-port=9333"), "{debug}");
+        assert!(!debug.contains("--disable-gpu"), "{debug}");
+
+        // Both at once.
+        let both = browser_args_string(Some("9333"), true).expect("both must produce args");
+        assert!(both.contains("--remote-debugging-port=9333"), "{both}");
+        assert!(both.contains("--disable-gpu"), "{both}");
+    }
 }
 
 // ── Windows ──────────────────────────────────────────────────────────────
@@ -691,19 +742,60 @@ fn ensure_pin_blocking(app: &tauri::AppHandle, server_url: &str) -> bool {
 /// *replaces* them rather than appending — without them the Office/PDF overlay
 /// UI and SmartScreen would quietly come back and make a debug run behave
 /// differently from a normal one.
-fn webview_browser_args() -> Option<String> {
-    let port = std::env::var("E2E_BOX_DEBUG_PORT").ok()?;
-    let port = port.trim().to_string();
-    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
-        eprintln!("E2E_BOX_DEBUG_PORT={port:?} is not a port number; ignoring it");
+fn webview_browser_args(disable_gpu: bool) -> Option<String> {
+    // Only the debug port is not a plain flag, so read it first and hand the
+    // pure builder a validated value.
+    let debug_port = match std::env::var("E2E_BOX_DEBUG_PORT") {
+        Ok(raw) => {
+            let port = raw.trim().to_string();
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+                eprintln!("E2E_BOX_DEBUG_PORT={port:?} is not a port number; ignoring it");
+                None
+            } else {
+                Some(port)
+            }
+        }
+        Err(_) => None,
+    };
+    browser_args_string(debug_port.as_deref(), disable_gpu)
+}
+
+/// The pure half of [`webview_browser_args`], split out so the flag composition
+/// is unit-testable without touching the process environment.
+///
+/// `--disable-features` is repeated wry's defaults rather than appended to them,
+/// because setting `additional_browser_args` *replaces* wry's args — without it
+/// the Office/PDF overlay UI and SmartScreen quietly come back. That is why the
+/// base string is emitted whenever any argument is returned at all.
+fn browser_args_string(debug_port: Option<&str>, disable_gpu: bool) -> Option<String> {
+    if debug_port.is_none() && !disable_gpu {
         return None;
     }
-    // `--remote-allow-origins=*`: recent Chromium refuses a DevTools client whose
-    // Origin is not allowlisted, which is how a CDP attach presents itself.
-    Some(format!(
-        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-         --remote-debugging-port={port} --remote-allow-origins=*"
-    ))
+    let mut args = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
+    if let Some(port) = debug_port {
+        // `--remote-allow-origins=*`: recent Chromium refuses a DevTools client
+        // whose Origin is not allowlisted, which is how a CDP attach presents
+        // itself.
+        args.push_str(&format!(
+            " --remote-debugging-port={port} --remote-allow-origins=*"
+        ));
+    }
+    if disable_gpu {
+        // WebView2/Chromium: render in software. The user-facing switch is
+        // Settings → Display → Hardware Acceleration.
+        args.push_str(" --disable-gpu");
+    }
+    Some(args)
+}
+
+/// Whether the persisted setting asks for software rendering. Read live so a
+/// change made in the running app is applied by the next window that is built.
+fn gpu_disabled(app: &tauri::AppHandle) -> bool {
+    app.state::<AppState>()
+        .cfg
+        .lock()
+        .map(|c| !c.hardware_acceleration)
+        .unwrap_or(false)
 }
 
 /// The main window's navigation allowlist: the window may only ever show the
@@ -809,7 +901,7 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
         .disable_drag_drop_handler()
         // Navigation allowlist — see `nav_allowlist`.
         .on_navigation(nav_allowlist(app));
-    if let Some(args) = webview_browser_args() {
+    if let Some(args) = webview_browser_args(gpu_disabled(app)) {
         builder = builder.additional_browser_args(&args);
     }
     let window = builder.build().map_err(|e| e.to_string())?;
@@ -888,7 +980,7 @@ fn open_setup_in_main(app: &tauri::AppHandle) -> Result<(), String> {
         .title("E2E Chat — Setup")
         .inner_size(560.0, 660.0)
         .on_navigation(nav_allowlist(app));
-    if let Some(args) = webview_browser_args() {
+    if let Some(args) = webview_browser_args(gpu_disabled(app)) {
         builder = builder.additional_browser_args(&args);
     }
     builder.build().map_err(|e| e.to_string())?;
@@ -917,7 +1009,7 @@ fn open_setup(app: &tauri::AppHandle) -> Result<(), String> {
                 .title("E2E Chat — Setup")
                 .inner_size(560.0, 660.0)
                 .resizable(false);
-        if let Some(args) = webview_browser_args() {
+        if let Some(args) = webview_browser_args(gpu_disabled(app)) {
             setup_builder = setup_builder.additional_browser_args(&args);
         }
         match setup_builder.build()
@@ -1502,6 +1594,46 @@ pub fn run() {
                 let for_wipe = handle.clone();
                 handle.listen(CLEAR_CONNECTION_EVENT, move |_| {
                     forget_connection(&for_wipe);
+                });
+            }
+
+            // Hardware acceleration (Settings → Display). Desktop only: the flag
+            // is a WebView2/Chromium launch argument, and the page offers the
+            // switch only where that shell exists.
+            #[cfg(desktop)]
+            {
+                let for_set = handle.clone();
+                handle.listen(SET_HW_ACCEL_EVENT, move |event| {
+                    let enabled = serde_json::from_str::<HwAccelPayload>(event.payload())
+                        .map(|p| p.enabled)
+                        .unwrap_or(true);
+                    {
+                        let state = for_set.state::<AppState>();
+                        if let Ok(mut cfg) = state.cfg.lock() {
+                            cfg.hardware_acceleration = enabled;
+                            if let Err(e) = config::save(&for_set, &cfg) {
+                                eprintln!("{SET_HW_ACCEL_EVENT}: could not persist: {e}");
+                            }
+                        };
+                    }
+                    if let Err(e) = for_set.emit(HW_ACCEL_EVENT, HwAccelPayload { enabled }) {
+                        eprintln!("{HW_ACCEL_EVENT}: could not reach the page: {e}");
+                    }
+                });
+            }
+            #[cfg(desktop)]
+            {
+                let for_get = handle.clone();
+                handle.listen(GET_HW_ACCEL_EVENT, move |_| {
+                    let enabled = for_get
+                        .state::<AppState>()
+                        .cfg
+                        .lock()
+                        .map(|c| c.hardware_acceleration)
+                        .unwrap_or(true);
+                    if let Err(e) = for_get.emit(HW_ACCEL_EVENT, HwAccelPayload { enabled }) {
+                        eprintln!("{HW_ACCEL_EVENT}: could not reach the page: {e}");
+                    }
                 });
             }
 

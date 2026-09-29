@@ -213,7 +213,23 @@ var DocPreview = (function () {
 
     function closeDocModal() {
         var existing = document.getElementById('doc-preview-overlay');
-        if (existing) existing.remove();
+        if (existing) {
+            // The preview owns a live pdf.js document and an IntersectionObserver;
+            // dropping the element alone leaves the worker and every decoded page
+            // in memory until the GC happens to notice. Release them here.
+            var content = existing.querySelector('#doc-preview-content');
+            if (content) {
+                if (content._pdfObserver) {
+                    try { content._pdfObserver.disconnect(); } catch (_) {}
+                    content._pdfObserver = null;
+                }
+                if (content._pdfDoc) {
+                    try { content._pdfDoc.destroy(); } catch (_) {}
+                    content._pdfDoc = null;
+                }
+            }
+            existing.remove();
+        }
         document.removeEventListener('keydown', _docEscHandler);
     }
 
@@ -222,6 +238,26 @@ var DocPreview = (function () {
     }
 
     // ── PDF Preview ────────────────────────────────────────────────────
+
+    // A rendered page is a full RGBA bitmap: one A3/scan page at scale 1.5 is
+    // several thousand pixels on a side (~30 MB), and the old loop rendered up
+    // to 50 of them into the DOM at once — which is the "10 MB PDF crash". A
+    // page is now kept only while it is near the viewport, a page that would
+    // exceed the canvas ceiling is drawn smaller instead of failing, and the
+    // decoded document is destroyed when the modal closes.
+    var PDF_PREVIEW_SCALE = 1.5;
+    var PDF_CANVAS_MAX_PIXELS = 4 * 1024 * 1024; // ~16 MB at 4 bytes/px
+    var PDF_CANVAS_MAX_DIM = 8192;
+
+    // The largest scale <= `wanted` that keeps the canvas within the ceilings.
+    function pdfBoundedScale(naturalWidth, naturalHeight, wanted) {
+        var w = naturalWidth * wanted, h = naturalHeight * wanted;
+        if (!(w > 0) || !(h > 0)) return wanted;
+        var overPixels = Math.sqrt((w * h) / PDF_CANVAS_MAX_PIXELS);
+        var overDim = Math.max(w / PDF_CANVAS_MAX_DIM, h / PDF_CANVAS_MAX_DIM);
+        var shrink = Math.max(1, overPixels, overDim);
+        return shrink > 1 ? wanted / shrink : wanted;
+    }
 
     async function renderPdf(blob, container) {
         await loadPdfJs();
@@ -232,23 +268,102 @@ var DocPreview = (function () {
 
         var arrayBuffer = await blob.arrayBuffer();
         var pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        // Owned by the modal element so `closeDocModal` destroys it — worker and
+        // decoded page cache included — instead of leaving it to the GC.
+        container._pdfDoc = pdf;
 
+        container.innerHTML = '';
         container.style.cssText += ';background:#525659;display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px;overflow-y:auto';
-        container.innerHTML = '<div style="color:#ccc;font-size:13px;margin-bottom:8px">' + pdf.numPages + ' page' + (pdf.numPages > 1 ? 's' : '') + '</div>';
 
-        var MAX_PAGES = Math.min(pdf.numPages, 50); // safety limit
+        var count = pdf.numPages;
+        var MAX_PAGES = Math.min(count, 50); // safety limit
+        var label = document.createElement('div');
+        label.style.cssText = 'color:#ccc;font-size:13px;margin-bottom:8px';
+        label.textContent = count + ' page' + (count > 1 ? 's' : '') +
+            (count > MAX_PAGES ? ' (showing the first ' + MAX_PAGES + ')' : '');
+        container.appendChild(label);
+
+        // Every placeholder is given the first page's height so the scroll
+        // geometry is real *before* anything renders. Without this, all 40 slots
+        // have zero height, sit stacked at the top, and the observer "sees" the
+        // whole document at once — which is exactly the eager render this guard
+        // exists to avoid.
+        var placeholderH = 0;
+        try {
+            var firstPage = await pdf.getPage(1);
+            var firstNatural = firstPage.getViewport({ scale: 1 });
+            placeholderH = Math.round(firstPage.getViewport({
+                scale: pdfBoundedScale(firstNatural.width, firstNatural.height, PDF_PREVIEW_SCALE)
+            }).height);
+            firstPage.cleanup();
+        } catch (_) {}
+
+        // One placeholder per page keeps the scroll geometry stable; the bitmap
+        // is filled only while the page is near the viewport.
+        var slots = [];
         for (var i = 1; i <= MAX_PAGES; i++) {
-            var page = await pdf.getPage(i);
-            var scale = 1.5;
-            var viewport = page.getViewport({ scale: scale });
-            var canvas = document.createElement('canvas');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            canvas.style.cssText = 'max-width:100%;height:auto;box-shadow:0 2px 8px rgba(0,0,0,0.3);border-radius:4px;margin-bottom:8px';
-            var ctx = canvas.getContext('2d');
-            await page.render({ canvasContext: ctx, viewport: viewport }).promise;
-            container.appendChild(canvas);
+            var slot = document.createElement('div');
+            slot.dataset.page = String(i);
+            slot.style.cssText = 'width:100%;display:flex;justify-content:center;min-height:' + (placeholderH ? placeholderH + 'px' : '0px');
+            container.appendChild(slot);
+            slots.push(slot);
         }
+
+        var rendered = {};
+        var queue = Promise.resolve();
+
+        function renderOne(slot) {
+            var n = slot.dataset.page;
+            if (rendered[n]) return;
+            rendered[n] = true;
+            queue = queue.then(async function () {
+                if (!slot.isConnected) return;
+                var page;
+                try { page = await pdf.getPage(parseInt(n, 10)); } catch (_) { return; }
+                try {
+                    var natural = page.getViewport({ scale: 1 });
+                    var viewport = page.getViewport({ scale: pdfBoundedScale(natural.width, natural.height, PDF_PREVIEW_SCALE) });
+                    var canvas = document.createElement('canvas');
+                    canvas.width = Math.max(1, Math.round(viewport.width));
+                    canvas.height = Math.max(1, Math.round(viewport.height));
+                    canvas.style.cssText = 'max-width:100%;height:auto;box-shadow:0 2px 8px rgba(0,0,0,0.3);border-radius:4px;margin-bottom:8px';
+                    var ctx = canvas.getContext('2d');
+                    if (!ctx) return;
+                    await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+                    if (!slot.isConnected) return;
+                    slot.innerHTML = '';
+                    slot.appendChild(canvas);
+                } finally {
+                    try { page.cleanup(); } catch (_) {}
+                }
+            });
+        }
+
+        function releaseOne(slot) {
+            var n = slot.dataset.page;
+            if (!rendered[n]) return;
+            rendered[n] = false;
+            var canvas = slot.querySelector('canvas');
+            if (canvas) { canvas.width = 1; canvas.height = 1; } // free the bitmap
+            slot.innerHTML = '';
+        }
+
+        if (typeof IntersectionObserver === 'function') {
+            // Only pages within 600px of the viewport hold a bitmap at any time.
+            var io = new IntersectionObserver(function (entries) {
+                entries.forEach(function (entry) {
+                    if (entry.isIntersecting) renderOne(entry.target);
+                    else releaseOne(entry.target);
+                });
+            }, { root: container, rootMargin: '600px 0px' });
+            container._pdfObserver = io;
+            slots.forEach(function (s) { io.observe(s); });
+        } else {
+            // No observer (old WebView): draw the first two only — still bounded,
+            // rather than allocating the whole document.
+            slots.slice(0, 2).forEach(renderOne);
+        }
+        return queue;
     }
 
     // ── Legacy Office: Word/PowerPoint 97-2003, and RTF ────────────────
@@ -1323,6 +1438,19 @@ var DocPreview = (function () {
         pdfEditorSaveState();
     }
 
+    // The undo stack keeps page metadata AND the file bytes, and the old rule
+    // stopped at 30 *states* — so a 10 MB PDF could pin ~300 MB of snapshots (a
+    // second copy of the document for every edit). The cap is now by bytes as
+    // well, so the stack can never grow to a multiple of the file it is editing.
+    var PDF_HISTORY_MAX_STATES = 12;
+    var PDF_HISTORY_MAX_BYTES = 24 * 1024 * 1024;
+
+    function pdfEditorHistoryBytes() {
+        var total = 0;
+        _pdfEditor.history.forEach(function (s) { if (s && s.pdfBytes) total += s.pdfBytes.length; });
+        return total;
+    }
+
     function pdfEditorSaveState() {
         // Save both page metadata AND the actual PDF bytes for undo/redo
         _pdfEditor.history = _pdfEditor.history.slice(0, _pdfEditor.historyIdx + 1);
@@ -1331,10 +1459,13 @@ var DocPreview = (function () {
             pdfBytes: _pdfEditor.pdfBytes ? _pdfEditor.pdfBytes.slice() : null
         });
         _pdfEditor.historyIdx = _pdfEditor.history.length - 1;
-        if (_pdfEditor.history.length > 30) {
+        while (_pdfEditor.history.length > 1 &&
+               (_pdfEditor.history.length > PDF_HISTORY_MAX_STATES ||
+                pdfEditorHistoryBytes() > PDF_HISTORY_MAX_BYTES)) {
             _pdfEditor.history.shift();
             _pdfEditor.historyIdx--;
         }
+        if (_pdfEditor.historyIdx < 0) _pdfEditor.historyIdx = 0;
     }
 
     async function pdfEditorUndo() {
@@ -1528,6 +1659,14 @@ var DocPreview = (function () {
         var el = document.getElementById('pdf-editor-overlay');
         if (el) el.remove();
         document.removeEventListener('keydown', _pdfEditorEscHandler);
+        // Release the decoded document and every byte snapshot the editor held —
+        // these are the largest allocations in the app for a big PDF.
+        pdfEditorDisposeThumbStrip();
+        _pdfEditor.pdfDoc = null;
+        _pdfEditor.pdfBytes = null;
+        _pdfEditor.pages = [];
+        _pdfEditor.history = [];
+        _pdfEditor.historyIdx = -1;
     }
 
     function pdfEditorBtn(iconId, title, onclick) {
@@ -1550,10 +1689,72 @@ var DocPreview = (function () {
         return btn;
     }
 
+    // Thumbnail strip: ONE pdf.js document for the whole strip, from the current
+    // bytes, rendered a page at a time as it scrolls into view. The old code
+    // built a fresh pdf-lib document (copyPages + save) AND a fresh pdf.js
+    // document *per thumbnail*, so a 50-page file ran 50 save+parse cycles at
+    // once — the memory spike behind the large-PDF crash.
+    var _thumbStrip = { doc: null, observer: null, seq: 0, jobs: [], docsCreated: 0 };
+
+    function pdfEditorDisposeThumbStrip() {
+        _thumbStrip.seq++;
+        if (_thumbStrip.observer) { try { _thumbStrip.observer.disconnect(); } catch (_) {} }
+        if (_thumbStrip.doc) { try { _thumbStrip.doc.destroy(); } catch (_) {} }
+        _thumbStrip.doc = null;
+        _thumbStrip.observer = null;
+        _thumbStrip.jobs = [];
+        _thumbStrip.docsCreated = 0;
+    }
+
+    function pdfEditorStartThumbStrip(panel) {
+        var jobs = _thumbStrip.jobs;
+        var seq = _thumbStrip.seq;
+        if (!panel || !jobs.length || !_pdfEditor.pdfBytes || !window.pdfjsLib) return;
+        window.pdfjsLib.getDocument({ data: _pdfEditor.pdfBytes.slice() }).promise.then(function (doc) {
+            if (seq !== _thumbStrip.seq) { try { doc.destroy(); } catch (_) {} return; }
+            _thumbStrip.doc = doc;
+            _thumbStrip.docsCreated++;
+            var queue = Promise.resolve();
+            function draw(job) {
+                queue = queue.then(function () {
+                    if (seq !== _thumbStrip.seq || !job.canvas.isConnected) return;
+                    return doc.getPage(job.filePage).then(function (page) {
+                        try {
+                            var opts = { scale: 0.2 };
+                            if (job.rotation) opts.rotation = job.rotation;
+                            var viewport = page.getViewport(opts);
+                            job.canvas.width = Math.max(1, Math.round(viewport.width));
+                            job.canvas.height = Math.max(1, Math.round(viewport.height));
+                            var ctx = job.canvas.getContext('2d');
+                            if (!ctx) return;
+                            return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function () {
+                                try { page.cleanup(); } catch (_) {}
+                            });
+                        } catch (_) {}
+                    }).catch(function () {});
+                });
+            }
+            if (typeof IntersectionObserver === 'function') {
+                var io = new IntersectionObserver(function (entries) {
+                    entries.forEach(function (entry) {
+                        if (!entry.isIntersecting) return;
+                        io.unobserve(entry.target);
+                        draw(entry.target.__thumbJob);
+                    });
+                }, { root: panel, rootMargin: '300px 0px' });
+                _thumbStrip.observer = io;
+                jobs.forEach(function (job) { job.canvas.__thumbJob = job; io.observe(job.canvas); });
+            } else {
+                jobs.slice(0, 8).forEach(draw);
+            }
+        }).catch(function () {});
+    }
+
     // Render thumbnail strip
     function pdfEditorRenderThumbnails() {
         var panel = document.getElementById('pdf-thumb-panel');
         if (!panel) return;
+        pdfEditorDisposeThumbStrip();
         panel.innerHTML = '';
 
         var visibleIdx = 0;
@@ -1616,27 +1817,14 @@ var DocPreview = (function () {
 
             panel.appendChild(thumb);
 
-            // Render thumbnail asynchronously
-            (async function (c, pgIdx, rot) {
-                try {
-                    var tempDoc = await PDFLib.PDFDocument.create();
-                    var copiedPages = await tempDoc.copyPages(_pdfEditor.pdfDoc, [pgIdx]);
-                    var copied = copiedPages[0];
-                    if (rot) copied.setRotation(PDFLib.degrees(rot));
-                    tempDoc.addPage(copied);
-                    var pdfBytes = await tempDoc.save();
-                    var pdfDoc2 = await window.pdfjsLib.getDocument({ data: pdfBytes }).promise;
-                    var page2 = await pdfDoc2.getPage(1);
-                    var viewport = page2.getViewport({ scale: 0.2 });
-                    c.width = viewport.width;
-                    c.height = viewport.height;
-                    var ctx = c.getContext('2d');
-                    await page2.render({ canvasContext: ctx, viewport: viewport }).promise;
-                } catch (_) {}
-            })(canvas, page.index, page.rotation);
+            // Rendered from the shared strip document once it is in view (see
+            // `pdfEditorStartThumbStrip`), not from a per-thumbnail temp PDF.
+            _thumbStrip.jobs.push({ canvas: canvas, filePage: page.index, rotation: page.rotation });
 
             visibleIdx++;
         });
+
+        pdfEditorStartThumbStrip(panel);
     }
 
     // Render current page preview
@@ -2078,6 +2266,13 @@ var DocPreview = (function () {
         _isNarrowView: isNarrowView,
         _loadPdfLibForTest: _loadPdfLibForTest,
         _getEditorState: function () { return JSON.parse(JSON.stringify(_pdfEditor.pages)); },
+        // Test helpers: the memory guardrails, readable from the page.
+        _pdfHistoryBytes: function () { return pdfEditorHistoryBytes(); },
+        _pdfHistoryStates: function () { return _pdfEditor.history.length; },
+        _pdfBoundedScale: pdfBoundedScale,
+        // How many pdf.js documents the thumbnail strip built for the current
+        // render. One per strip; the old code built one per thumbnail.
+        _pdfThumbDocsCreated: function () { return _thumbStrip.docsCreated; },
         // Test helper: the edited file as it stands (a copy — the editor keeps
         // its own bytes so Undo/Redo can swap them). It is what "Save & Download"
         // writes, so a test can load it back and check what a tool really did.

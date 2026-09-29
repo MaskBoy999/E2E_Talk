@@ -544,8 +544,10 @@
             var t = e.touches[0];
             if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
             if (st.timer) {
-                // Any real movement means the user is scrolling — abort.
-                if (t && (Math.abs(t.clientX - st.startX) > 10 || Math.abs(t.clientY - st.startY) > 10)) {
+                // Any real movement means the user is scrolling — abort. The
+                // limit is the shared Touch Drag setting (default 10px).
+                var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
+                if (t && (Math.abs(t.clientX - st.startX) > movePx || Math.abs(t.clientY - st.startY) > movePx)) {
                     clearTimeout(st.timer);
                     st.timer = null;
                 }

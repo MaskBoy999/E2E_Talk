@@ -818,6 +818,25 @@
                     <p class="settings-hint">Controls the row of per-message buttons (pin, react, edit, delete and the ⋯ menu) — the same row on desktop and touch. “Show on hover” (default) reveals it when you hover a message. “Always on” keeps it visible all the time, which is the practical choice on a touch screen (no hover). “Off” hides the row everywhere; the right-click menu on desktop and the ⋯ button on touch still carry every action.</p>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>Touch Drag</h4>
+                    <select id="touch-drag-threshold" class="settings-select" style="max-width:260px">
+                        <option value="tight">Tight — 6 px</option>
+                        <option value="normal">Normal — 10 px (default)</option>
+                        <option value="loose">Loose — 18 px</option>
+                        <option value="very-loose">Very loose — 28 px</option>
+                    </select>
+                    <p class="settings-hint">How far a finger may drift before a long-press drag is treated as a scroll instead. A phone with a shaky or very responsive screen can raise this so picking up a server, channel or role does not cancel on the first wobble; a steady hand can lower it so a scroll takes over sooner. Applies wherever you long-press to reorder: the server rail and folders, channels, categories, DMs and roles.</p>
+                </div>
+                <div class="settings-group" id="hardware-acceleration-group" style="display:none;padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>Hardware Acceleration</h4>
+                    <label class="settings-toggle">
+                        <input type="checkbox" id="hardware-acceleration-toggle">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label">Use GPU acceleration</span>
+                    </label>
+                    <p class="settings-hint">On by default. Turn it off if the window flickers, shows blank or black areas, or crashes on this machine — the app then renders with the CPU instead. This is a launch setting, so it applies the next time you open E2E Chat. Desktop app only.</p>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>Streamer Mode</h4>
                     <label class="settings-toggle">
                         <input type="checkbox" id="streamer-mode-toggle">

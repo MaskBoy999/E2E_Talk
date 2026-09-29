@@ -22,6 +22,11 @@ pub struct Config {
     /// The server uses a self-signed cert, so pinning the fingerprint is what
     /// lets us reject a swapped/MITM certificate instead of trusting anything.
     pub pinned_cert_sha256: Option<String>,
+    /// Settings → Display → Hardware Acceleration. On by default; off builds the
+    /// WebView with `--disable-gpu`, which is the lever for a machine whose GPU
+    /// driver makes the window flicker or crash. Applied at window creation, so
+    /// a change takes effect on the next launch (the page says so).
+    pub hardware_acceleration: bool,
 }
 
 impl Default for Config {
@@ -31,6 +36,7 @@ impl Default for Config {
             auto_start: false,
             minimize_to_tray: true,
             pinned_cert_sha256: None,
+            hardware_acceleration: true,
         }
     }
 }

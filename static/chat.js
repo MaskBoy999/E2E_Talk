@@ -4577,6 +4577,58 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     })();
 
+    // Box app only: Settings → Display → Hardware Acceleration. The shell owns
+    // the value (it is a WebView launch flag applied when the window is built),
+    // so the page asks for it over the event channel and mirrors it into
+    // localStorage for the toggle. Turning it off cannot re-create a running
+    // WebView, so it applies on the next launch — the hint says so.
+    (function initHardwareAcceleration() {
+        const group = document.getElementById('hardware-acceleration-group');
+        const toggle = document.getElementById('hardware-acceleration-toggle');
+        const tauri = window.__TAURI__;
+        // Desktop box only: Android has no `--disable-gpu` flag to set and a
+        // plain browser has no shell to persist the choice in.
+        if (!group || !toggle || !tauri || !tauri.core || !tauri.core.invoke) return;
+        if (/Android/i.test(navigator.userAgent || '')) return;
+
+        const KEY = 'hardware_acceleration';
+        group.style.display = '';
+
+        function emit(event, payload) {
+            const sent = (tauri.event && tauri.event.emit)
+                ? tauri.event.emit(event, payload)
+                : tauri.core.invoke('plugin:event|emit', { event: event, payload: payload });
+            return Promise.resolve(sent).catch(function (e) {
+                console.warn('[box] ' + event + ' failed:', e);
+            });
+        }
+
+        function paint(enabled) {
+            toggle.checked = !!enabled;
+            try { localStorage.setItem(KEY, enabled ? '1' : '0'); } catch (_) {}
+        }
+
+        // Show what this device last saw, then reconcile with what the shell
+        // will actually do at the next launch.
+        let stored = true;
+        try { stored = localStorage.getItem(KEY) !== '0'; } catch (_) {}
+        paint(stored);
+
+        if (tauri.event && tauri.event.listen) {
+            tauri.event.listen('box:hardware-acceleration', function (event) {
+                if (event && event.payload && typeof event.payload.enabled === 'boolean') {
+                    paint(event.payload.enabled);
+                }
+            });
+        }
+        emit('box:get-hardware-acceleration');
+
+        toggle.addEventListener('change', function () {
+            paint(toggle.checked);
+            emit('box:set-hardware-acceleration', { enabled: toggle.checked });
+        });
+    })();
+
     // Prime `Notification.permission` inside the box — through the *shim's own*
     // API, which is the whole point.
     //
@@ -4830,6 +4882,31 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     applyShowMsgActions();
+
+    // Touch-drag sensitivity: how far a finger may drift before a pending
+    // long-press drag is abandoned in favour of a scroll. Every touch-drag
+    // implementation (server rail and folders, DMs here; channels/categories in
+    // thread_categories_shortcuts.js; roles in roles.js) reads this shared
+    // threshold, so one setting governs every reorder gesture. It is defined on
+    // `window` because those files load before this one and read it lazily, at
+    // gesture time, rather than capturing it at load.
+    var TOUCH_DRAG_THRESHOLDS = { tight: 6, normal: 10, loose: 18, 'very-loose': 28 };
+    window.touchDragMoveThreshold = function () {
+        var stored = null;
+        try { stored = localStorage.getItem('touch_drag_threshold'); } catch (_) {}
+        if (stored && TOUCH_DRAG_THRESHOLDS[stored] != null) return TOUCH_DRAG_THRESHOLDS[stored];
+        return 10;
+    };
+    (function initTouchDragThreshold() {
+        var sel = document.getElementById('touch-drag-threshold');
+        if (!sel) return;
+        var stored = null;
+        try { stored = localStorage.getItem('touch_drag_threshold'); } catch (_) {}
+        sel.value = (stored && TOUCH_DRAG_THRESHOLDS[stored] != null) ? stored : 'normal';
+        sel.addEventListener('change', function () {
+            try { localStorage.setItem('touch_drag_threshold', sel.value); } catch (_) {}
+        });
+    })();
 
     // Composer (chat-input bar: + attach, emoji/sticker/gif, text box, send)
     // must only appear when a server TEXT channel or DM conversation is open.
@@ -16806,8 +16883,10 @@ function renderServerList() {
             if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
             if (st.timer) {
                 // Any real movement means the user is scrolling — abort the
-                // pending long-press instead of hijacking the scroll.
-                if (t && (Math.abs(t.clientX - st.startX) > 10 || Math.abs(t.clientY - st.startY) > 10)) {
+                // pending long-press instead of hijacking the scroll. "Real
+                // movement" is the user's Touch Drag setting (default 10px).
+                var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
+                if (t && (Math.abs(t.clientX - st.startX) > movePx || Math.abs(t.clientY - st.startY) > movePx)) {
                     clearTimeout(st.timer);
                     st.timer = null;
                 }
@@ -21044,7 +21123,8 @@ function renderDmSidebar() {
                 if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
 
                 if (st.timer) {
-                    if (t && (Math.abs(t.clientX - st.startX) > 10 || Math.abs(t.clientY - st.startY) > 10)) {
+                    var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
+                    if (t && (Math.abs(t.clientX - st.startX) > movePx || Math.abs(t.clientY - st.startY) > movePx)) {
                         clearTimeout(st.timer); st.timer = null;
                         _dmDragTimerPending = false;
                     }
@@ -28828,7 +28908,9 @@ async function loadMediaPreview(container, fileData) {
             audio.src = url;
             audio.style.width = '100%';
             audio.onerror = () => {
-                console.warn('Audio preview failed:', blob.type, blob.size, 'file:', fileData.filename);
+                // No filename: it is decrypted user content, and the console is
+                // a surface the project's own R3 rule keeps plaintext out of.
+                console.warn('Audio preview failed:', blob.type, blob.size);
                 container.innerHTML = '<span style="font-size:24px"><svg class="ui-icon" width="24" height="24"><use href="#icon-music"/></svg></span><span style="color:var(--text-muted);font-size:13px">Audio preview unavailable</span>';
             };
             // Custom loop toggle next to the native player.
@@ -28936,31 +29018,26 @@ async function downloadAndDecryptFile(fileId, fileKeyB64, mimeType, fileSize) {
     const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24; // 65576
     const totalChunks = fileSize ? Math.ceil(fileSize / CHUNK_PLAINTEXT) : Math.ceil(data.length / CHUNK_ENCRYPTED_FULL);
 
-    const decryptedChunks = [];
+    // The whole encrypted body is already in `data` before any decryption: one
+    // request, then decrypt. Decrypting straight into one output buffer (instead
+    // of an array holding every chunk AND a second concatenated copy) keeps peak
+    // memory near "ciphertext + one plaintext" rather than double the plaintext —
+    // which is what a weak device feels on a large image or GIF.
+    const result = new Uint8Array(data.length);
+    let offset = 0;
     for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_ENCRYPTED_FULL;
-        let chunkData;
-        if (i < totalChunks - 1) {
-            chunkData = data.slice(start, start + CHUNK_ENCRYPTED_FULL);
-        } else {
-            chunkData = data.slice(start);
-        }
+        const chunkData = (i < totalChunks - 1)
+            ? data.subarray(start, start + CHUNK_ENCRYPTED_FULL)
+            : data.subarray(start);
         if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
         const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData, i);
-        decryptedChunks.push(decrypted);
-    }
-
-    let totalLength = 0;
-    for (const c of decryptedChunks) totalLength += c.length;
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const c of decryptedChunks) {
-        result.set(c, offset);
-        offset += c.length;
+        result.set(decrypted, offset);
+        offset += decrypted.length;
     }
 
     const normalizedMime = mimeType && mimeType.startsWith('audio/') ? normalizeAudioMimeType(mimeType) : (mimeType || 'application/octet-stream');
-    return new Blob([result], { type: normalizedMime });
+    return new Blob([result.subarray(0, offset)], { type: normalizedMime });
 }
 
 // Same multi-chunk decryption as downloadAndDecryptFile, but accepts Uint8Array key directly
@@ -28975,30 +29052,21 @@ async function downloadAndDecryptStickerData(fileId, fileKey, mimeType) {
     const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24; // 65576
     const totalChunks = Math.ceil(data.length / CHUNK_ENCRYPTED_FULL);
 
-    const decryptedChunks = [];
+    // One output buffer, as in `downloadAndDecryptFile` (see the note there).
+    const result = new Uint8Array(data.length);
+    let offset = 0;
     for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_ENCRYPTED_FULL;
-        let chunkData;
-        if (i < totalChunks - 1) {
-            chunkData = data.slice(start, start + CHUNK_ENCRYPTED_FULL);
-        } else {
-            chunkData = data.slice(start);
-        }
+        const chunkData = (i < totalChunks - 1)
+            ? data.subarray(start, start + CHUNK_ENCRYPTED_FULL)
+            : data.subarray(start);
         if (chunkData.length < 40) throw new Error('Encrypted chunk too short');
         const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData, i);
-        decryptedChunks.push(decrypted);
+        result.set(decrypted, offset);
+        offset += decrypted.length;
     }
 
-    let totalLength = 0;
-    for (const c of decryptedChunks) totalLength += c.length;
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const c of decryptedChunks) {
-        result.set(c, offset);
-        offset += c.length;
-    }
-
-    return new Blob([result], { type: mimeType || 'image/png' });
+    return new Blob([result.subarray(0, offset)], { type: mimeType || 'image/png' });
 }
 
 async function downloadFileById(fileId, fileKeyB64, filename, mimeType, fileSize) {
@@ -29097,12 +29165,12 @@ async function downloadAllGalleryFiles(gallery, btn) {
             const fsize = parseInt(card.getAttribute('data-file-size'), 10) || 0;
             let key = card.getAttribute('data-file-key') || '';
             if (!key) { try { key = await recoverAttachmentFileKey(fid, card); } catch (_) {} }
-            if (!key) { console.warn('Download all: no key for', fname); continue; }
+            if (!key) { console.warn('Download all: skipped one attachment (no key)'); continue; }
             try {
                 const blob = await downloadAndDecryptFile(fid, key, fmime, fsize);
                 files.push({ name: uniqueZipEntryName(used, fname), blob: blob });
             } catch (err) {
-                console.warn('Download all: skipped', fname, err);
+                console.warn('Download all: skipped one attachment:', (err && err.message) || err);
             }
         }
         if (files.length === 0) { showToast('Could not download those files'); return; }
@@ -32330,36 +32398,28 @@ async function decryptProfilePicData(fileKey, data) {
     const CHUNK_ENCRYPTED_FULL = CHUNK_PLAINTEXT + 16 + 24; // 65576
     const totalChunks = Math.ceil(data.length / CHUNK_ENCRYPTED_FULL);
 
-    const decryptedChunks = [];
+    // One output buffer, decrypted in place as each chunk arrives, so an avatar
+    // never needs the ciphertext plus two copies of the plaintext at once.
+    const result = new Uint8Array(data.length);
+    let offset = 0;
     for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_ENCRYPTED_FULL;
-        let chunkData;
-        if (i < totalChunks - 1) {
-            chunkData = data.slice(start, start + CHUNK_ENCRYPTED_FULL);
-        } else {
-            chunkData = data.slice(start);
-        }
+        const chunkData = (i < totalChunks - 1)
+            ? data.subarray(start, start + CHUNK_ENCRYPTED_FULL)
+            : data.subarray(start);
         if (chunkData.length < 40) {
             // Too small to be an encrypted chunk - probably not encrypted data
             return null;
         }
         try {
             const decrypted = E2ECrypto.decryptFileChunk(fileKey, chunkData, i);
-            decryptedChunks.push(decrypted);
+            result.set(decrypted, offset);
+            offset += decrypted.length;
         } catch (e) {
             return null; // Decryption failed - not encrypted or wrong key
         }
     }
-
-    let totalLength = 0;
-    for (const c of decryptedChunks) totalLength += c.length;
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const c of decryptedChunks) {
-        result.set(c, offset);
-        offset += c.length;
-    }
-    return result;
+    return result.subarray(0, offset);
 }
 
 function getProfilePicUrl(fileId, userId) {

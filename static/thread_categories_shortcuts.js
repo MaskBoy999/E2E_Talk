@@ -112,7 +112,10 @@
             var t = e.touches[0]; if (!t) return;
             s.lx = t.clientX; s.ly = t.clientY;
             if (s.timer) {
-                if (Math.abs(t.clientX - s.sx) > 10 || Math.abs(t.clientY - s.sy) > 10) {
+                // Shared Touch Drag setting (default 10px): how far a finger may
+                // drift before the pending pick-up becomes a scroll instead.
+                var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
+                if (Math.abs(t.clientX - s.sx) > movePx || Math.abs(t.clientY - s.sy) > movePx) {
                     clearTimeout(s.timer); s.timer = null;
                     _chDragTimerPending = false;
                 }
