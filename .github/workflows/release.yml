@@ -117,13 +117,26 @@ jobs:
           # "Process completed with exit code 1" and nothing else, while the
           # release it had just created sat there with zero assets and both
           # build legs skipped (the job `needs` this one).
-          set +e
-          gh release create "$tag" -R "$repo" --title "E2E Chat $tag" --notes "$notes" \
-            2>"$RUNNER_TEMP/create-release.err"
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ]; then
-            BLOCK="Create release failed for $tag (gh's create exited $rc):%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/create-release.err" | sed ':a;N;$!ba;s/\n/%0A/g')"
+          # ...and it is RETRIED, because that first exit code was a 502:
+          # GitHub answered the POST with "We had issues producing the
+          # response" (2026-09-28) while creating the release anyway. A
+          # transient 5xx must not decide whether a tag publishes, and a
+          # retry must never make a second release object — the view first.
+          created=0
+          rc=1
+          for attempt in $(seq 1 5); do
+            if gh release view "$tag" -R "$repo" >/dev/null 2>&1; then created=1; break; fi
+            set +e
+            gh release create "$tag" -R "$repo" --title "E2E Chat $tag" --notes "$notes" \
+              2>"$RUNNER_TEMP/create-release.err"
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then created=1; break; fi
+            echo "::warning::gh release create for $tag failed on attempt $attempt (exit $rc): $(tr -d '\r' < "$RUNNER_TEMP/create-release.err" | tr '\n' ' ')"
+            sleep $((attempt * 5))
+          done
+          if [ "$created" -ne 1 ]; then
+            BLOCK="Create release failed for $tag after 5 attempts (last gh create exited $rc):%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/create-release.err" | sed ':a;N;$!ba;s/\n/%0A/g')"
             printf '::error::%s\n' "$BLOCK"
             exit "$rc"
           fi
@@ -140,6 +153,43 @@ jobs:
           done
           if [ "$ready" -ne 1 ]; then
             BLOCK="release $tag could not be read back for 30 s after being created:%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/read-back.err" 2>/dev/null | sed ':a;N;$!ba;s/\n/%0A/g')"
+            printf '::error::%s\n' "$BLOCK"
+            exit 1
+          fi
+
+          # Then make sure it is PUBLISHED, not merely present. This is the
+          # v0.2.35 failure in full: GitHub processes a deleted tag
+          # ASYNCHRONOUSLY and forces that tag's release back to DRAFT — even
+          # one created (or whose tag was re-pushed) afterwards. It is a known
+          # platform quirk, filed as cli/cli#8458 and labelled a problem on
+          # GitHub's side rather than the CLI's. A draft is invisible:
+          # /releases/latest skips it, the download page lists nothing, and —
+          # the failure that actually broke that run — makepkg cannot fetch the
+          # .deb from releases/download/$tag/ (404), so the Linux leg died after
+          # uploading its installers and the release ended up with no Arch
+          # package and no SHA256SUMS-linux-x64.txt while the Windows leg still
+          # reported success. Moving a tag is this repo's normal recovery after
+          # a failed release job, so the workflow has to publish the draft
+          # itself.
+          published=0
+          pub_rc=0
+          for attempt in $(seq 1 6); do
+            is_draft=$(gh release view "$tag" -R "$repo" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != "true" ]; then published=1; break; fi
+            echo "release $tag came back as a DRAFT (attempt $attempt) — publishing it"
+            set +e
+            gh release edit "$tag" -R "$repo" --draft=false 2>"$RUNNER_TEMP/publish-draft.err"
+            pub_rc=$?
+            set -e
+            if [ "$pub_rc" -ne 0 ]; then
+              echo "::warning::gh release edit --draft=false exited $pub_rc: $(tr -d '\r' < "$RUNNER_TEMP/publish-draft.err" | tr '\n' ' ')"
+            fi
+            # The forced-draft event can land just AFTER a successful publish,
+            # so re-read instead of trusting the exit code.
+            sleep 5
+          done
+          if [ "$published" -ne 1 ]; then
+            BLOCK="Release $tag is still a DRAFT, so nothing is downloadable and the Arch step cannot fetch its own .deb (404). gh release edit --draft=false exited $pub_rc:%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/publish-draft.err" 2>/dev/null | sed ':a;N;$!ba;s/\n/%0A/g')%0APublish it from https://github.com/$repo/releases and re-run this workflow. (GitHub forces the release of a just-deleted tag back to draft — see cli/cli#8458.)"
             printf '::error::%s\n' "$BLOCK"
             exit 1
           fi
@@ -320,6 +370,38 @@ jobs:
           done
           # Loud when it genuinely never appeared — no silent orphan upload.
           gh release view "$tag" >/dev/null
+
+          # Then re-assert that it is PUBLISHED, here, minutes after it was
+          # created and immediately before the Arch step downloads from it.
+          # A gate in the create job alone cannot cover this: GitHub processes
+          # a deleted (or re-pushed) tag asynchronously and forces that tag's
+          # release back to DRAFT whenever the queue gets to it, which is
+          # *later* — cli/cli#8458, a documented platform quirk. A draft 404s
+          # for anonymous readers, and that is precisely how the v0.2.35 Linux
+          # leg died: this step uploaded the .deb, makepkg then failed to fetch
+          # it ("curl: (22) The requested URL returned error: 404"), and the
+          # Arch package and SHA256SUMS-linux-x64.txt never appeared while the
+          # Windows leg still reported success.
+          published=0
+          pub_rc=0
+          for attempt in $(seq 1 6); do
+            is_draft=$(gh release view "$tag" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != "true" ]; then published=1; break; fi
+            echo "::warning::release $tag is a DRAFT before the Arch step — publishing it (attempt $attempt)"
+            set +e
+            gh release edit "$tag" --draft=false 2>"$RUNNER_TEMP/publish-draft.err"
+            pub_rc=$?
+            set -e
+            if [ "$pub_rc" -ne 0 ]; then
+              echo "::warning::gh release edit --draft=false exited $pub_rc: $(tr -d '\r' < "$RUNNER_TEMP/publish-draft.err" | tr '\n' ' ')"
+            fi
+            sleep 5
+          done
+          if [ "$published" -ne 1 ]; then
+            BLOCK="release $tag is a DRAFT, so every asset on it 404s for anonymous readers — including the .deb the Arch step is about to download from this very release. gh release edit --draft=false exited $pub_rc:%0A$(sed -e 's/%/%25/g' -e 's/\r$//' "$RUNNER_TEMP/publish-draft.err" 2>/dev/null | sed ':a;N;$!ba;s/\n/%0A/g')%0APublish it from https://github.com/$GITHUB_REPOSITORY/releases and re-run this tag. (GitHub forces the release of a just-deleted tag back to draft — see cli/cli#8458.)"
+            printf '::error::%s\n' "$BLOCK"
+            exit 1
+          fi
 
           # Exactly the bundles this leg produced. On Windows the AppImage/deb
           # globs simply match nothing (nullglob drops them); the legs never

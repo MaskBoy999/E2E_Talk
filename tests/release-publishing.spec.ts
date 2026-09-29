@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Publishing is the part of a release that fails QUIETLY, and it did, three
@@ -21,6 +23,10 @@ import { join } from 'node:path';
 // are text assertions on purpose — no YAML dependency, readable on any OS.
 
 const root = process.cwd();
+// The extracted run blocks are checked with bash itself, so make sure bash is
+// there (Linux CI and Git Bash on Windows; skipped rather than failed on a
+// host without it).
+const hasBash = spawnSync('bash', ['-c', 'true']).status === 0;
 const read = (f: string) => readFileSync(join(root, '.github', 'workflows', f), 'utf8');
 // Comments in these files explain what USED to run (that history is worth
 // keeping), so assertions about what runs today ignore comment lines — which
@@ -50,12 +56,11 @@ test.describe('release publishing', () => {
       // ...and it needs write access, or it fails as silently as before.
       expect(wf, name).toContain('contents: write');
       expect(wf, name).toContain('GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}');
-      // Creating a release and uploading to it work with this token; PATCHing
-      // one (gh release edit, or softprops updating) does not — it comes back
-      // "Resource not accessible by integration" and would fail the step that
-      // carries the APK / installers, so it must never be attempted.
-      expect(wf, name).not.toContain('gh release edit');
       expect(wf, name).toContain('gh release view');
+      // `gh release edit` is no longer banned outright, but android.yml still
+      // has no business editing a release — see the draft tests below for the
+      // one thing release.yml may do with it, and why.
+      if (name === 'android.yml') expect(wf, name).not.toContain('gh release edit');
     }
   });
 
@@ -70,7 +75,11 @@ test.describe('release publishing', () => {
   test('exactly one actor creates the release object', () => {
     for (const [name, raw] of WORKFLOWS) {
       const wf = code(raw);
-      const creates = wf.match(/gh release create/g) ?? [];
+      // Count INVOCATIONS, not mentions: the step also echoes gh's own message
+      // back as a warning, and "gh release create for v... failed" inside a
+      // quoted string is not a second creator. A real call is a line that
+      // begins with the command.
+      const creates = wf.match(/^\s*gh release create\b/gm) ?? [];
       // tauri-action's own create is not a `gh release create` line, so the
       // keys that switch it on are asserted separately below.
       expect(creates.length, `${name} must have ${name === 'release.yml' ? 1 : 0} release creator(s)`).toBe(
@@ -99,6 +108,60 @@ test.describe('release publishing', () => {
     // Belt and braces: the repo is named outright, so the call is correct even
     // without a checkout to resolve it from.
     expect(creatorJob, 'the creator should name the repository explicitly').toContain('-R "$repo"');
+  });
+
+  // v0.2.35's release object was created and immediately became a DRAFT, and a
+  // draft is invisible to anonymous readers: /releases/latest skips it, the
+  // download page lists nothing, and its own assets 404 — which is how the
+  // Linux leg died, with makepkg unable to fetch the .deb that leg had just
+  // uploaded ("curl: (22) The requested URL returned error: 404"). GitHub does
+  // that to the release of a just-deleted tag, ASYNCHRONOUSLY and by design
+  // (cli/cli#8458) — and moving a tag is this repo's normal recovery after a
+  // failed release run, so it is not a one-off. The workflow therefore has to
+  // publish the draft itself.
+  //
+  // Note what the `gh release edit` here is and is not. It is `--draft=false`
+  // and nothing else: that call was PROVEN against this repository when the
+  // stuck v0.2.35 release was published by hand. Rewriting notes/title/target is
+  // still the thing that came back "Resource not accessible by integration",
+  // so the assertion below pins the only form allowed.
+  test('a draft release is published, at both ends of the window before the Arch download', () => {
+    const [, raw] = WORKFLOWS[0];
+    const createJob = raw.slice(raw.indexOf('  create-release:'), raw.indexOf('  build:'));
+    const publishAt = raw.indexOf('- name: Publish release assets');
+    const archAt = raw.indexOf('- name: Build Arch package (pacman)');
+    expect(publishAt, 'the publisher is missing from release.yml').toBeGreaterThan(-1);
+    expect(archAt).toBeGreaterThan(publishAt);
+    const publish = raw.slice(publishAt, archAt);
+
+    // Both ends, because they are minutes apart: a gate in the create job
+    // cannot see a forced-draft that lands while the installers are building,
+    // and that is exactly the window the Arch step downloads in.
+    for (const [where, block] of [
+      ['create-release', createJob],
+      ['Publish release assets', publish],
+    ] as const) {
+      expect(block, `${where} must ask whether the release is a draft`).toContain(
+        '--json isDraft --jq .isDraft',
+      );
+      // Retried with a re-read: forcing a draft is asynchronous, so one check
+      // can race the very event it is looking for.
+      expect(block, `${where} must retry publishing the draft`).toMatch(/for attempt in \$\(seq 1 6\)/);
+      // Loud when it cannot: a release nobody can download must not look green.
+      expect(block, `${where} must annotate a release left as a draft`).toContain('::error::');
+      expect(block, `${where} must name the root cause`).toContain('cli/cli#8458');
+      // ...and never a moment before the step that downloads from the release.
+      if (where === 'Publish release assets') expect(publishAt).toBeLessThan(archAt);
+    }
+
+    const edits = code(raw).match(/gh release edit[^\n]*/g) ?? [];
+    expect(edits.length, 'both gates should publish the draft').toBeGreaterThanOrEqual(2);
+    for (const line of edits) {
+      expect(line, 'publishing a draft is the only edit allowed').toContain('--draft=false');
+      for (const forbidden of ['--notes', '--title', '--target', '--draft=true']) {
+        expect(line, `renaming or annotating the release is not allowed: ${line}`).not.toContain(forbidden);
+      }
+    }
   });
 
   test('a failed release creation explains itself, and the read-back retries', () => {
@@ -168,5 +231,64 @@ test.describe('release publishing', () => {
     const verify = code(raw.slice(verifyStart, verifyEnd));
     expect(verify).toContain('src-tauri/target/release/bundle');
     expect(verify).not.toContain('find src-tauri/target -type f');
+  });
+
+  // These steps do not run until a tag is pushed, and a shell syntax error in
+  // one of them fails the job with a bare exit code (job logs need
+  // authentication even on this public repo) at the exact moment a release is
+  // half-published. Parsing every run block with bash beforehand turns that
+  // into a red test on the commit that introduced it.
+  test('every run block parses as bash before a tag ever executes it', () => {
+    const out = mkdtempSync(join(tmpdir(), 'wf-steps-'));
+    try {
+      const res = spawnSync(
+        'node',
+        ['tools/extract-workflow-steps.mjs', '.github/workflows/release.yml', out],
+        { cwd: root, encoding: 'utf8' },
+      );
+      expect(res.status, `the extractor failed: ${res.stderr}`).toBe(0);
+      const scripts = readdirSync(out).filter((f) => f.endsWith('.sh'));
+      // The two pwsh steps are skipped by the extractor, so this is the count
+      // of BASH steps — and it must not silently collapse to zero if the
+      // extractor stops recognising them.
+      expect(scripts.length, 'release.yml should have bash steps').toBeGreaterThan(3);
+      expect(res.stdout).toContain('skipping Import Windows code signing certificate');
+
+      if (!hasBash) {
+        test.skip(true, 'bash is not available on this host');
+        return;
+      }
+      for (const name of scripts) {
+        const scriptPath = join(out, name);
+        // GitHub expands `${{ ... }}` before bash sees it; a literal one here
+        // is not something bash can be expected to parse.
+        const script = readFileSync(scriptPath, 'utf8').replace(/\$\{\{[^}]*\}\}/g, 'EXPR');
+        writeFileSync(scriptPath, script);
+        const check = spawnSync('bash', ['-n', scriptPath], { encoding: 'utf8' });
+        expect(check.status, `bash -n rejected ${name}:\n${check.stderr}`).toBe(0);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  // Reading the YAML cannot tell you what these two steps DO when gh
+  // misbehaves, and every release failure so far has been gh misbehaving: a 502
+  // on a create that had already succeeded, and a release forced back to draft
+  // afterwards. tools/release-workflow-sim.sh executes both scripts against a
+  // fake gh and asserts the retry, the single-create rule and the
+  // publish-the-draft gate — including the loud failure when a draft cannot be
+  // published.
+  test('the create and publish scripts survive gh failing under them', () => {
+    if (!hasBash) {
+      test.skip(true, 'bash is not available on this host');
+      return;
+    }
+    const res = spawnSync('bash', ['tools/release-workflow-sim.sh'], { cwd: root, encoding: 'utf8' });
+    const report = `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
+    expect(res.status, report).toBe(0);
+    const passed = Number(/passed=(\d+)/.exec(report)?.[1] ?? 0);
+    expect(passed, `the simulation ran too few checks:\n${report}`).toBeGreaterThanOrEqual(15);
+    expect(report).toContain('failed=0');
   });
 });

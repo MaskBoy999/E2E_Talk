@@ -6,3 +6,10 @@
 # `set -euo pipefail` becomes an invalid option name), and it cannot be caught
 # by the YAML parser the way an inline run: block is.
 packaging/aur/build-in-container.sh text eol=lf
+
+# Same rule for the release-workflow simulation: it writes its fake `gh` through
+# a heredoc, so a CR at the end of every line would be baked into that generated
+# script (`exit 0\r` is not a valid exit code) and the simulation would fail in
+# a way that has nothing to do with the workflow it is checking. This repo is
+# checked out with core.autocrlf=true on Windows, hence the explicit pin.
+tools/release-workflow-sim.sh text eol=lf
