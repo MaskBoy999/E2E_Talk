@@ -331,6 +331,79 @@ fn watch_unconfirmed_host(app: tauri::AppHandle, url: String) {
     });
 }
 
+/// Desktop twin of [`watch_unconfirmed_host`].
+///
+/// Desktop launches straight into the app window pointed at the saved address
+/// (deliberately: the tray can always get you back to the address screen, and
+/// probing up front would delay every launch by the connect timeout). The one
+/// hole in that is an address that is **refused** — a closed server — because
+/// then nothing ever paints except the WebView's own error page, and that page
+/// runs no script whatsoever. `static/app-overlay.js` never executes, so the
+/// "erase everything" control — which is supposed to be in the app in every
+/// state — is the first thing to disappear, exactly when a wipe is most likely
+/// to be wanted.
+///
+/// So the window still opens immediately, and this watcher runs behind it, off
+/// the main thread:
+///
+/// * a closed port is detected on the first pass (TCP refuses instantly) and the
+///   main window is put on the bundled address screen, which is a local page and
+///   therefore has the overlay;
+/// * a host that is merely slow (it may still be starting) gets ~20 s of grace
+///   and is then routed the same way;
+/// * a host that answers is left alone — the page loads and this returns.
+///
+/// It gives up as soon as the user has taken over, exactly like the mobile
+/// version: the saved address changed, or the window is already on one of the
+/// app's own pages.
+#[cfg(desktop)]
+fn watch_closed_host(app: tauri::AppHandle, url: String) {
+    std::thread::spawn(move || {
+        for attempt in 0..9 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+            }
+
+            let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+                return; // closed, or the app is shutting down
+            };
+            // The user has moved on: another address was saved, or they opened
+            // the address screen themselves.
+            let saved = app
+                .state::<AppState>()
+                .cfg
+                .lock()
+                .ok()
+                .and_then(|c| c.server_url.clone());
+            if saved.as_deref() != Some(url.as_str()) {
+                return;
+            }
+            if window.url().map(|u| is_app_page(&u)).unwrap_or(false) {
+                return;
+            }
+
+            match cert_probe::fingerprint_of_classified(&url) {
+                Ok(_) => return, // it answered; the app page is on its way
+                // Nothing is listening. No amount of waiting will change that,
+                // so stop waiting for it.
+                Err(cert_probe::ProbeFailure::Refused) => break,
+                // Could not tell yet (slow start, DNS, TLS). Give it the rest of
+                // the window.
+                Err(cert_probe::ProbeFailure::Unknown(_)) => {}
+            }
+        }
+
+        eprintln!("saved host {url} did not answer; showing setup so the overlay exists");
+        if let Ok(mut slot) = app.state::<AppState>().startup_error.lock() {
+            *slot = Some(format!(
+                "Nothing answered at {url}. Check that the server is running and reachable, \
+                 then save this address again."
+            ));
+        }
+        let _ = open_setup_in_main(&app);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1555,6 +1628,15 @@ pub fn run() {
                             *slot = Some(e);
                         }
                         let _ = open_setup(&handle);
+                    } else {
+                        // Desktop opens the window straight at the host, so a
+                        // host that is not there leaves the WebView's own error
+                        // page — no scripts, no wipe overlay. Watch it from
+                        // behind and fall back to the local address screen (see
+                        // `watch_closed_host`). Mobile already answered this
+                        // question before opening the window.
+                        #[cfg(desktop)]
+                        watch_closed_host(handle.clone(), url.to_string());
                     }
                 }
                 None => {

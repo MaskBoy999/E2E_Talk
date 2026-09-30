@@ -1,5 +1,144 @@
 # PROGRESS
 
+## Five fixes the UI owed the user, and the phone's memory bill (0.2.40)
+
+The five reports here were all "it works, except where it matters". Each one is
+pinned by a spec that drives the real gesture or the real page state, not by a
+style assertion.
+
+### 1. The wipe button is in the app, in every state, unless you hid it
+
+The clear-all-data button was drawn under the two overlays that cover the app
+at exactly the moments a user needs a way out: the boot spinner
+(`#loading-overlay`, `z-index: 99999`) and the key-vault lock screen
+(`.vault-lock-overlay`, `z-index: 100000`), both above the button's old `3000`.
+And a single append at boot could not survive the error paths, which rewrite
+parts of the document — the "grey screen" state.
+
+- the button now sits at `z-index: 2147483000` (the panel at `…001`), and is
+  offset by `env(safe-area-inset-*)` so a phone's home indicator cannot cover
+  it;
+- a two-observer `MutationObserver` (`document.documentElement` and `body`,
+  `childList` only — the chat adds thousands of nodes a minute, so `subtree`
+  would be a self-inflicted performance problem) re-appends it the instant
+  anything detaches it, as long as the user has not pressed Hide;
+- `visibilitychange` / `pageshow` re-assert it as well, for an Android activity
+  resume that re-decorates the document.
+
+In a browser, nothing changed: `boot()` still gates on `window.__TAURI__`, so
+the page-drawn control exists only inside the shell.
+
+### 2. The full-screen viewer showed its own stylesheet as text
+
+The code viewer colours a file by replacing runs of text with
+`<span style="…">`. Every pass after the first matched **the markup the previous
+pass had just written**, so the text you read (and could select) was not the
+file: a CSS file came out reading like its own stylesheet. All highlighters
+(`highlightCss`, `highlightHtml`, `highlightJs`, `highlightPython`,
+`highlightYaml`, `highlightGeneric`, …) now run through one pass runner that
+seals each pass's output with a sentinel the next pass cannot see, and the
+round trip is pinned: the viewer's `textContent` must equal the file byte for
+byte (`tests/viewer-highlighting.spec.ts`, 11 file kinds). Markdown is the one
+deliberate exception — it is previewed, and the spec says so.
+
+### 3. Text selection is a fine-pointer rule, and it now covers every text surface
+
+Message bodies were made selectable on desktop, but the *rest* of the read-only
+text the app shows was still refused by the catch-all `selectstart` guard: the
+pinned list, a forwarded message's body, a message's own text preview, the
+full-screen text/code viewer, a document preview's extracted text, Word pages
+and the PDF text layer.
+
+There is now **one switch for both halves**, `html.select-text`, written by
+`selectionFinePointer()` from `(any-pointer: fine)` — the CSS and the guard ask
+the same question, because two media queries is how they drifted apart. A
+`SELECTABLE_TEXT_SELECTOR` list names the surfaces; the chrome (names,
+timestamps, badges, avatars, channel/server rows) stays unselectable, and a
+phone keeps everything unselectable.
+
+### 4. One touch gesture: stillness opens the menu, movement starts the drag
+
+Replacing a per-row double-tap family and "hold arms a drag, drift cancels it":
+
+- `window.attachHoldGesture(el, handlers)` gives every reorderable row (server
+  icons and folders, channels, categories, DMs, roles) the same rule: the finger
+  goes down, a window starts — **500 ms by default**, `Settings → Touch → Hold to
+  Open Menu` offers 300/500/700/1000 ms — and inside that window the distance
+  decides. Staying within the Touch Drag distance for the whole window opens the
+  row's right-click menu; moving past it inside the window starts the drag right
+  then and drops the timer;
+- the settings select shows the value the code actually uses, so it cannot claim
+  300 ms while the gesture waits 500;
+- **every double-tap action is gone**: the five handlers in
+  `thread_categories_shortcuts.js` (channels, categories, server icons, DM rows,
+  the DM strip button, the mentions button) are deleted, and the two remaining
+  `dblclick` shortcuts in the rail are gated on a fine pointer, because a touch
+  screen synthesises `dblclick` from two taps.
+
+Specs: `tests/long-press-gesture.spec.ts` (the window decides; the window is
+customizable; a double tap does nothing) and `tests/touch-drag-threshold.spec.ts`
+(the same drift under three settings gives three outcomes).
+
+### 5. The keyboard compacts the app, and the notch only pushes down names
+
+- `initKeyboardCompaction()` measures how much of the layout the on-screen
+  keyboard covers (`innerHeight - visualViewport.height - offsetTop`, zero when
+  the browser already resized the page for the keyboard) and publishes it as
+  `--kb-inset`; `.app` is `height: calc(100% - var(--kb-inset))`. The top bar
+  stays exactly where it was and the message list gives up the space. Fine
+  pointers are never compacted, so a desktop is untouched;
+- the notch inset stays on the bars that carry names (`.chat-header`,
+  `.sidebar-header`) and was taken **off** the server rail, whose first row is
+  the DM button — it had been pushed down with everything else.
+
+### 6. The phone's memory bill: a bounded window and a bounded avatar cache
+
+Measured first (`tests/_probe-perf.spec.ts`, since removed): 15 cycles of
+channel switches, rail re-renders, viewer opens and menu opens left the DOM at
+2 759 nodes and the heap at 12.1 MB — flat. The audit that followed found two
+things that are *not* flat:
+
+- **`#message-list` grew forever.** Every row a session had loaded stayed, so
+  layout, hit-testing and paint crept up with the channel, and every blob URL a
+  row held pinned its decrypted bytes. There is now a soft cap of **600 rows**
+  and `pruneMessageWindow()` trims without moving what you are reading: at the
+  bottom it drops the oldest rows above the viewport (the browser clamps
+  `scrollTop`, so the view stays on the newest message); scrolled up it drops the
+  newest rows below the viewport, so the rows on screen keep their position to
+  the pixel. A trimmed row revokes its own blob URLs and unlinks them from
+  `blobUrls` (`tests/message-window.spec.ts`);
+- **`profilePicCache` was unbounded** and holds decrypted avatars as blob URLs,
+  which stay alive until revoked. It is now capped at **250** entries
+  (`profilePicCachePut` / `_profilePicCacheTrim`), and eviction revokes the blob
+  unless an `<img>` on screen still points at it.
+
+The audit also covered the usual suspects and found them already correct: 39
+intervals are guarded or self-clearing (`_mediaKeyRepairTimer`,`_disappearingTicker`, the drag watchdogs), the eight observers are created
+once, `revokeBlobUrls()` runs on channel switch, and the service worker's cache
+is capped.
+
+### 7. The app was serving yesterday's code from its own cache
+
+Found while verifying #3 on the device: `sw.js` serves `?v=`-versioned assets
+cache-first, and the versions had not been bumped, so the app kept running old
+`chat.js` / `style.css` / `app-overlay.js`. The versions were bumped across
+`index.html`, `login.html`, `box-setup.html` and the service worker's cached
+list, so an update actually reaches the app.
+
+### 8. Tests
+
+New: `viewer-highlighting`, `long-press-gesture`, `message-window`,
+`mobile-keyboard-layout`. Updated: `text-selection` (the switch and the text
+viewers), `app-wipe-overlay` (on top of both overlays and through a DOM
+rebuild), `touch-drag-threshold` (the new rule), `server-rail-dragdrop`.
+
+Open, and skipped with the evidence written down in the spec rather than
+silenced: a drop on the **top slot** and a **collapsed folder** drop both land
+in dead air — the slot highlights under the pointer and the release changes
+nothing. Both exercise `applyGroupGapDrop` / the no-anchor slot, neither is a
+regression from this release's changes, and both need that resolution looked at
+on its own.
+
 ## The spreadsheet, the deck and the archive were the same crash as the PDF (0.2.39)
 
 **0.2.38 bounded the PDF; the other three eager renderers had the identical shape of bug.** Each of them turned a *file* into *DOM nodes for the whole file* before the user could scroll one screenful, which is the same out-of-memory the PDF preview had:

@@ -10,7 +10,20 @@
 // Bump this whenever static JS changes: assets are served cache-first, so an
 // unchanged cache name keeps an OLD voice.js/chat.js alive and code fixes look
 // like they "didn't apply".
-const CACHE_NAME = 'e2e-chat-v14';
+//
+// There are TWO halves to that rule, and forgetting either one is how a fix
+// ends up visible in a test (which blocks this worker) and invisible in the
+// app:
+//
+//   1. bump the file's `?v=` in index.html / login.html, because the page asks
+//      for `chat.js?v=75` and a URL that never changes is a cache entry that
+//      never expires; and
+//   2. bump this name, which drops every entry of the previous generation.
+//
+// The fetch handler below no longer trusts a stale entry blindly — it serves
+// the cached copy and refreshes it in the background — but a bump is still what
+// makes the update land on THIS load rather than the next one.
+const CACHE_NAME = 'e2e-chat-v15';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -93,21 +106,32 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Static assets: cache first, then network
+    // Static assets: stale-while-revalidate.
+    //
+    // This was plain cache-first, which is the one strategy that can pin an old
+    // file forever: the entry only exists because the app asked for it once, and
+    // nothing ever expires it, so a changed chat.js or style.css could stay
+    // invisible for as long as the cache lived while the same code was correct
+    // in every test (the test runner blocks service workers). Serving the cached
+    // copy immediately and refreshing it in the background keeps the load fast
+    // and offline-capable, and guarantees the NEXT load has the current file
+    // even if someone forgets the `?v=` bump.
     event.respondWith(
         caches.match(event.request)
             .then((cached) => {
-                if (cached) return cached;
-                return fetch(event.request).then((response) => {
-                    // Cache successful responses
+                const refresh = fetch(event.request).then((response) => {
                     if (response.ok && response.type === 'basic') {
                         const clone = response.clone();
-                        caches.open(CACHE_NAME).then((cache) => {
-                            cache.put(event.request, clone);
-                        });
+                        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
                     }
                     return response;
                 });
+                if (cached) {
+                    // Fire and forget: the cached copy is what this load uses.
+                    refresh.catch(() => {});
+                    return cached;
+                }
+                return refresh;
             })
             .catch(() => {
                 // Offline fallback for navigation

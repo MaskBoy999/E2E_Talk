@@ -203,6 +203,44 @@ test.describe('desktop: message text is selectable, everything else is not', () 
         })).toBe(true);
     });
 
+    test('one switch decides for the whole app, and the text viewers are inside it', async ({ page }) => {
+        test.setTimeout(180000);
+        const body = await registerUser(page, 'sels_' + Date.now());
+        await createServerAndKey(page, body.token, body.user.id);
+        await openChannelAndSend(page, 'switch-gated message text');
+
+        // The switch is a class on <html>, written once from the same
+        // `(any-pointer: fine)` question the `selectstart` guard asks — a CSS
+        // media query and a JS media query is how the two drifted apart before.
+        expect(await page.evaluate(() => document.documentElement.classList.contains('select-text'))).toBe(true);
+
+        // A read-only text surface that is NOT a message: the full-screen
+        // viewer. Reading a code file and copying a line out of it is the whole
+        // reason it exists, so it must select with the same switch.
+        const code = 'const answer = 42; // copy me';
+        await page.evaluate((code) => {
+            (window as any).openMediaViewer(null, 'text', {
+                filename: 'snippet.js', mime_type: 'text/javascript', file_size: code.length, fullText: code,
+            }, null);
+        }, code);
+        await expect(page.locator('.text-viewer-content')).toBeVisible({ timeout: 10000 });
+        const box = await page.locator('.text-viewer-content').boundingBox();
+        if (!box) throw new Error('viewer content has no box');
+        const y = box.y + box.height / 2;
+        await page.mouse.move(box.x + 2, y);
+        await page.mouse.down();
+        await page.mouse.move(box.x + box.width - 4, y, { steps: 12 });
+        await page.mouse.up();
+        const selected = await page.evaluate(() => (window.getSelection() || '').toString());
+        await page.evaluate(() => window.getSelection()?.removeAllRanges());
+        expect(selected.trim(), 'a code file must be selectable on a desktop').toContain('answer = 42');
+        await page.evaluate(() => (window as any).closeMediaViewer());
+
+        // And the same switch keeps the chrome out: a code file selects, the
+        // channel row that opened it does not.
+        expect(await dragSelect(page, '.channel-item')).toBe('');
+    });
+
     test('the ⋯ button opens the same menu as the right-click', async ({ page }) => {
         test.setTimeout(180000);
         const body = await registerUser(page, 'selm_' + Date.now());
@@ -241,6 +279,9 @@ test.describe('touch: text stays unselectable, but the action row matches deskto
         await openChannelAndSend(page, 'unselectable on a phone');
 
         expect(await page.evaluate(() => window.matchMedia('(pointer: fine)').matches)).toBe(false);
+        // No fine pointer anywhere, so the app's own switch is off — the same
+        // answer the CSS uses, from the same question.
+        expect(await page.evaluate(() => document.documentElement.classList.contains('select-text'))).toBe(false);
 
         // Default 'hover' mode: a phone has no hover, so the row is hidden at
         // rest — and it is the WHOLE row, not ⋯ on its own.

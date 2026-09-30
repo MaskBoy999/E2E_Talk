@@ -491,109 +491,72 @@
     }
 
     /**
-     * Touch drag for phones — mirrors setupTouchDragItem in chat.js (server
-     * rail).  Long-press picks the row up, a ghost follows the finger, and
-     * drop targets highlight underneath.  Movement > 10 px before the timer
-     * fires cancels the pick-up so normal scrolling still works.
+     * Touch gesture for phones — the same hold-or-drag rule the rest of the app
+     * uses (chat.js's `window.attachHoldGesture`): moving the finger past the
+     * Touch Drag distance picks the row up, a still finger is not a drag. A role
+     * row has no right-click menu, so there is no `onHold` to give it.
      */
     function _wireRoleRowTouchDrag(row, role) {
         if (!('ontouchstart' in window)) return;
-        var LONG_PRESS_MS = 500;
-        var st = {
-            timer: null, active: false, ghost: null,
-            id: '', startX: 0, startY: 0, lastX: 0, lastY: 0,
-        };
+        if (typeof window.attachHoldGesture !== 'function') return;
+        var st = { ghost: null, id: '' };
+        function ghostAt(x, y) {
+            if (!st.ghost) return;
+            st.ghost.style.left = (x - 70) + 'px';
+            st.ghost.style.top = (y - 16) + 'px';
+        }
         function cleanup() {
-            if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+            _roleDragEndedAt = Date.now();
             if (st.ghost) { st.ghost.remove(); st.ghost = null; }
-            st.active = false;
             row.classList.remove('dragging');
             endRoleDrag();
         }
-        row.addEventListener('touchstart', function (e) {
-            var t = e.touches[0];
-            if (!t) return;
-            st.id = role.id || '';
-            if (!st.id) return;
-            // Prevent the browser's own long-press drag from hijacking.
-            row.draggable = false;
-            st.startX = st.lastX = t.clientX;
-            st.startY = st.lastY = t.clientY;
-            st.timer = setTimeout(function () {
-                st.timer = null;
-                st.active = true;
+        window.attachHoldGesture(row, {
+            draggableEl: row,
+            admit: function () {
+                st.id = role.id || '';
+                return !!st.id;
+            },
+            onDragStart: function (x, y) {
                 row.classList.add('dragging');
                 _roleDragPayload = { roleId: role.id };
                 beginRoleDrag(row);
                 _setRoleDragging(true);
                 _startRoleAutoScroll(row.closest('.roles-list'));
-                // Ghost at the finger's CURRENT position.
                 st.ghost = row.cloneNode(true);
                 st.ghost.classList.add('role-drag-ghost');
-                st.ghost.style.left = (st.lastX - 70) + 'px';
-                st.ghost.style.top = (st.lastY - 16) + 'px';
                 document.body.appendChild(st.ghost);
+                ghostAt(x, y);
                 if (window.boxBuzz) window.boxBuzz(30);
-            }, LONG_PRESS_MS);
-        }, { passive: false });
-        // Suppress browser context menu during long-press.
-        row.addEventListener('contextmenu', function (e) {
-            if (st.timer || st.active) { e.preventDefault(); }
-        });
-        row.addEventListener('touchmove', function (e) {
-            var t = e.touches[0];
-            if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
-            if (st.timer) {
-                // Any real movement means the user is scrolling — abort. The
-                // limit is the shared Touch Drag setting (default 10px).
-                var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
-                if (t && (Math.abs(t.clientX - st.startX) > movePx || Math.abs(t.clientY - st.startY) > movePx)) {
-                    clearTimeout(st.timer);
-                    st.timer = null;
+            },
+            onDragMove: function (x, y) {
+                ghostAt(x, y);
+                // Drive the auto-scroll loop.
+                _roleAutoScroll.y = y;
+                // Hit-test: hide ghost, check what's under the finger, show ghost.
+                if (st.ghost) st.ghost.style.display = 'none';
+                var under = document.elementFromPoint(x, y);
+                if (st.ghost) st.ghost.style.display = '';
+                var gap = under && under.closest ? under.closest('.role-drop-gap') : null;
+                var group = under && under.closest ? under.closest('.role-tier-group[data-managed="1"]') : null;
+                _clearRoleDropMarkers();
+                if (gap) _markRoleDrop(gap, 'active');
+                else if (group) _markRoleDrop(group, 'join');
+            },
+            onDragEnd: function (x, y) {
+                if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+                cleanup();
+                var under = document.elementFromPoint(x, y);
+                var gap = under && under.closest ? under.closest('.role-drop-gap') : null;
+                var group = under && under.closest ? under.closest('.role-tier-group[data-managed="1"]') : null;
+                if (gap) {
+                    if (gap.classList.contains('role-drop-gap-tail')) dropRolePayload({ roleId: role.id }, null, 'below');
+                    else dropRolePayload({ roleId: role.id }, parseInt(gap.dataset.tierPos, 10), 'above');
+                } else if (group) {
+                    dropRolePayload({ roleId: role.id }, parseInt(group.dataset.tierPos, 10), 'join');
                 }
-            }
-            if (!st.active) return;
-            e.preventDefault();
-            // Move ghost.
-            if (st.ghost) {
-                st.ghost.style.left = (st.lastX - 70) + 'px';
-                st.ghost.style.top = (st.lastY - 16) + 'px';
-            }
-            // Drive the auto-scroll loop.
-            _roleAutoScroll.y = st.lastY;
-            // Hit-test: hide ghost, check what's under the finger, show ghost.
-            if (st.ghost) st.ghost.style.display = 'none';
-            var under = document.elementFromPoint(st.lastX, st.lastY);
-            if (st.ghost) st.ghost.style.display = '';
-            var gap = under && under.closest ? under.closest('.role-drop-gap') : null;
-            var group = under && under.closest ? under.closest('.role-tier-group[data-managed="1"]') : null;
-            _clearRoleDropMarkers();
-            if (gap) _markRoleDrop(gap, 'active');
-            else if (group) _markRoleDrop(group, 'join');
-        }, { passive: false });
-        row.addEventListener('touchend', function (e) {
-            row.draggable = true;
-            if (st.timer) { clearTimeout(st.timer); st.timer = null; }
-            if (!st.active) return;
-            st.active = false;
-            _roleDragEndedAt = Date.now();
-            if (st.ghost) { st.ghost.remove(); st.ghost = null; }
-            var t = e.changedTouches[0];
-            endRoleDrag();
-            if (!t) return;
-            var under = document.elementFromPoint(t.clientX, t.clientY);
-            var gap = under && under.closest ? under.closest('.role-drop-gap') : null;
-            var group = under && under.closest ? under.closest('.role-tier-group[data-managed="1"]') : null;
-            if (gap) {
-                if (gap.classList.contains('role-drop-gap-tail')) dropRolePayload({ roleId: role.id }, null, 'below');
-                else dropRolePayload({ roleId: role.id }, parseInt(gap.dataset.tierPos, 10), 'above');
-            } else if (group) {
-                dropRolePayload({ roleId: role.id }, parseInt(group.dataset.tierPos, 10), 'join');
-            }
-        });
-        row.addEventListener('touchcancel', function () {
-            row.draggable = true;
-            cleanup();
+            },
+            onCancel: cleanup,
         });
     }
 

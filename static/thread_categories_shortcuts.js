@@ -70,25 +70,44 @@
         if (_clistScroll.raf) { cancelAnimationFrame(_clistScroll.raf); _clistScroll.raf = null; }
     }
 
-    // ─── Touch drag helper for channels and categories ─────────────────
-    // Mirrors setupTouchDragItem in chat.js but for the channel sidebar.
-    // `el` is the drag source, `kind` is 'channel' or 'category', `getId()`
-    // returns the item's ID, and `onDrop(x, y)` resolves the drop target.
-    var _chDragTimerPending = false; // true while any channel/category long-press timer is ticking
-    function _setupChannelTouchDrag(el, kind, getId, onDrop) {
-        var LONG_PRESS = 350;
-        var s = { timer: null, active: false, ghost: null, sx: 0, sy: 0, lx: 0, ly: 0 };
-        el.addEventListener('touchstart', function (e) {
-            var t = e.touches[0]; if (!t) return;
-            var id = getId(); if (!id) return;
-            el.draggable = false;
-            s.sx = s.lx = t.clientX;
-            s.sy = s.ly = t.clientY;
-            _chDragTimerPending = true;
-            s.timer = setTimeout(function () {
-                _chDragTimerPending = false;
-                s.timer = null;
-                s.active = true;
+    // ─── Touch gesture for channels and categories ────────────────────
+    // The same hold-or-drag rule as the whole app (chat.js's
+    // `window.attachHoldGesture`): a finger that stays put for the hold window
+    // opens the item's right-click menu (`onHold`), one that moves past the
+    // Touch Drag distance picks the item up. `kind` is 'channel' or 'category',
+    // `getId()` returns the item's ID, `onDrop(x, y)` resolves the drop target.
+    function _setupChannelTouchDrag(el, kind, getId, onDrop, onHold) {
+        // chat.js defines the gesture and loads after this file; the rows are
+        // bound at render time, which is after every script has parsed.
+        if (typeof window.attachHoldGesture !== 'function') return;
+        var s = { ghost: null, id: '' };
+        function ghostAt(x, y) {
+            if (!s.ghost) return;
+            s.ghost.style.left = (x - 20) + 'px';
+            s.ghost.style.top = (y - 20) + 'px';
+        }
+        function clearMarks() {
+            document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el2) {
+                el2.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
+                el2.style.background = '';
+            });
+        }
+        function tearDown() {
+            stopChannelListAutoScroll();
+            clearMarks();
+            if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
+            s.ghost = null;
+            el.classList.remove('dragging');
+            if (kind === 'category') {
+                var grp = el.closest('.channel-category-group');
+                if (grp) grp.classList.remove('dragging');
+            }
+        }
+        window.attachHoldGesture(el, {
+            draggableEl: el,
+            admit: function () { s.id = getId(); return !!s.id; },
+            onHold: function (x, y) { if (onHold) onHold(x, y); },
+            onDragStart: function (x, y) {
                 el.classList.add('dragging');
                 if (kind === 'category') {
                     var grp = el.closest('.channel-category-group');
@@ -98,101 +117,46 @@
                 s.ghost = el.cloneNode(true);
                 s.ghost.classList.add('role-drag-ghost');
                 s.ghost.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;opacity:0.85;transform:scale(1.15);';
-                s.ghost.style.left = (s.lx - 20) + 'px';
-                s.ghost.style.top = (s.ly - 20) + 'px';
                 document.body.appendChild(s.ghost);
+                ghostAt(x, y);
                 if (window.boxBuzz) window.boxBuzz(30);
-            }, LONG_PRESS);
-        }, { passive: false });
-        // Suppress browser context menu during long-press on channel/category items
-        el.addEventListener('contextmenu', function (e) {
-            if (s.timer || s.active) { e.preventDefault(); }
-        });
-        el.addEventListener('touchmove', function (e) {
-            var t = e.touches[0]; if (!t) return;
-            s.lx = t.clientX; s.ly = t.clientY;
-            if (s.timer) {
-                // Shared Touch Drag setting (default 10px): how far a finger may
-                // drift before the pending pick-up becomes a scroll instead.
-                var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
-                if (Math.abs(t.clientX - s.sx) > movePx || Math.abs(t.clientY - s.sy) > movePx) {
-                    clearTimeout(s.timer); s.timer = null;
-                    _chDragTimerPending = false;
+            },
+            onDragMove: function (x, y) {
+                ghostAt(x, y);
+                // Auto-scroll the channel list near edges
+                var cl = document.getElementById('channel-list');
+                if (cl) {
+                    var cr = cl.getBoundingClientRect();
+                    var EDGE = 44, MAX = 18;
+                    if (y < cr.top + EDGE && y >= cr.top - 24) {
+                        cl.scrollTop -= Math.ceil(Math.max(0, Math.min(1, (cr.top + EDGE - y) / EDGE)) * MAX);
+                    } else if (y > cr.bottom - EDGE && y <= cr.bottom + 24) {
+                        cl.scrollTop += Math.ceil(Math.max(0, Math.min(1, (y - (cr.bottom - EDGE)) / EDGE)) * MAX);
+                    }
                 }
-            }
-            if (!s.active) return;
-            e.preventDefault();
-            if (s.ghost) {
-                s.ghost.style.left = (s.lx - 20) + 'px';
-                s.ghost.style.top = (s.ly - 20) + 'px';
-            }
-            // Auto-scroll the channel list near edges
-            var cl = document.getElementById('channel-list');
-            if (cl) {
-                var cr = cl.getBoundingClientRect();
-                var EDGE = 44, MAX = 18;
-                if (s.ly < cr.top + EDGE && s.ly >= cr.top - 24) {
-                    cl.scrollTop -= Math.ceil(Math.max(0, Math.min(1, (cr.top + EDGE - s.ly) / EDGE)) * MAX);
-                } else if (s.ly > cr.bottom - EDGE && s.ly <= cr.bottom + 24) {
-                    cl.scrollTop += Math.ceil(Math.max(0, Math.min(1, (s.ly - (cr.bottom - EDGE)) / EDGE)) * MAX);
+                // Highlight drop target
+                clearMarks();
+                var hit = document.elementFromPoint(x, y);
+                if (!hit) return;
+                var grp = hit.closest('.channel-category-group');
+                var chItem = hit.closest('.channel-item[data-id]');
+                if (grp && kind === 'category') {
+                    var rect = grp.getBoundingClientRect();
+                    if (y < rect.top + rect.height / 2) grp.classList.add('drag-over-top');
+                    else grp.classList.add('drag-over-bottom');
+                } else if (grp && kind === 'channel') {
+                    grp.style.background = 'rgba(79,195,247,0.1)';
+                } else if (chItem && kind === 'channel' && chItem !== el) {
+                    var r2 = chItem.getBoundingClientRect();
+                    if (y < r2.top + r2.height / 2) chItem.classList.add('drag-over-top');
+                    else chItem.classList.add('drag-over-bottom');
                 }
-            }
-            // Highlight drop target
-            var hit = document.elementFromPoint(s.lx, s.ly);
-            document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el) {
-                el.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
-                el.style.background = '';
-            });
-            if (!hit) return;
-            var grp = hit.closest('.channel-category-group');
-            var chItem = hit.closest('.channel-item[data-id]');
-            if (grp && kind === 'category') {
-                var rect = grp.getBoundingClientRect();
-                if (s.ly < rect.top + rect.height / 2) grp.classList.add('drag-over-top');
-                else grp.classList.add('drag-over-bottom');
-            } else if (grp && kind === 'channel') {
-                grp.style.background = 'rgba(79,195,247,0.1)';
-            } else if (chItem && kind === 'channel' && chItem !== el) {
-                var r2 = chItem.getBoundingClientRect();
-                if (s.ly < r2.top + r2.height / 2) chItem.classList.add('drag-over-top');
-                else chItem.classList.add('drag-over-bottom');
-            }
-        }, { passive: false });
-        el.addEventListener('touchend', function (e) {
-            el.draggable = true;
-            _chDragTimerPending = false;
-            if (s.timer) { clearTimeout(s.timer); s.timer = null; }
-            if (!s.active) return;
-            s.active = false;
-            stopChannelListAutoScroll();
-            document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el2) {
-                el2.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
-                el2.style.background = '';
-            });
-            if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
-            s.ghost = null;
-            if (kind === 'category') {
-                var grp2 = el.closest('.channel-category-group');
-                if (grp2) grp2.classList.remove('dragging');
-            }
-            onDrop(s.lx, s.ly);
-        });
-        el.addEventListener('touchcancel', function () {
-            el.draggable = true;
-            if (s.timer) { clearTimeout(s.timer); s.timer = null; }
-            if (!s.active) return;
-            s.active = false;
-            stopChannelListAutoScroll();
-            document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el2) {
-                el2.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
-                el2.style.background = '';
-            });
-            if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
-            s.ghost = null;
-            if (kind === 'category') {
-                var grp3 = el.closest('.channel-category-group');
-                if (grp3) grp3.classList.remove('dragging');
-            }
+            },
+            onDragEnd: function (x, y) {
+                tearDown();
+                onDrop(x, y);
+            },
+            onCancel: tearDown,
         });
     }
 
@@ -1236,7 +1200,7 @@
                     el.classList.remove('drag-over-top', 'drag-over-bottom');
                 });
             });
-            // Touch drag for category reordering on mobile
+            // Touch gesture for category reordering on mobile
             _setupChannelTouchDrag(header, 'category', function () { return categoryId; }, function (x, y) {
                 var hit = document.elementFromPoint(x, y);
                 if (!hit) return;
@@ -1258,13 +1222,16 @@
                         })();
                     }
                 }
+            }, function (x, y) {
+                // Held still: the category's right-click menu (its own contextmenu
+                // handler does the mouse side of the same thing).
+                if (isOwner && categoryId) _showCategoryContextMenu(x, y, serverId, categoryId, name, channels);
             });
         }
 
         // Right-click context menu for category header (owner only)
         if (isOwner && categoryId) {
             header.addEventListener('contextmenu', function (e) {
-                if (_chDragTimerPending) return; // suppress during long-press
                 e.preventDefault();
                 e.stopPropagation();
                 _showCategoryContextMenu(e.clientX, e.clientY, serverId, categoryId, name, channels);
@@ -1308,24 +1275,9 @@
 
 
 
-        // Touch-based double-tap for category header: double-tap opens
-        // context menu instead of collapsing/expanding.
-        var _catLastTE = 0, _catLastTETarget = null;
-        header.addEventListener('touchend', function () {
-            var now = Date.now();
-            if (header === _catLastTETarget && (now - _catLastTE) < 150) {
-                _catLastTETarget = null;
-                window._doubleTapJustFired = true;
-                if (isOwner && categoryId) {
-                    _showCategoryContextMenu(0, 0, serverId, categoryId, name, channels);
-                }
-                return;
-            }
-            _catLastTETarget = header;
-            _catLastTE = now;
-        }, { passive: true });
-        header.addEventListener('click', function (e) {
-            if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
+        // No double-tap: the category menu is opened by holding the header
+        // still (see _setupChannelTouchDrag), so a tap only collapses/expands.
+        header.addEventListener('click', function () {
             group.classList.toggle('collapsed');
         });
 
@@ -1428,7 +1380,7 @@
                     el.classList.remove('drag-over-top', 'drag-over-bottom');
                 });
             });
-            // Touch drag for channel reorder on mobile
+            // Touch gesture for channel reorder on mobile
             if (isOwner) {
                 _setupChannelTouchDrag(div, 'channel', function () { return ch.id; }, function (x, y) {
                     var hit = document.elementFromPoint(x, y);
@@ -1465,6 +1417,10 @@
                         // Dropped outside any category — move to uncategorized
                         moveChannelToCategory(serverId, ch.id, null);
                     }
+                }, function (x, y) {
+                    // Held still: the channel's right-click menu, same one the
+                    // contextmenu handler below opens for a mouse.
+                    _showChannelContextMenu(x, y, serverId, ch, chDisplayName, categoryId, isOwner);
                 });
             }
             // Channel drag-to-reorder within category
@@ -1530,26 +1486,9 @@
                     if (window.VoiceManager) VoiceManager.joinServerVoice(serverId, ch.id, chDisplayName);
 
                 });            } else {
-                // Double-tap detection via touchstart (instant, no delay).
-                // If the same channel is tapped twice within 150 ms, show the
-                // context menu instead of entering the channel.
-                var _chLastTouchEnd = 0, _chLastTouchTarget = null;
-                div.addEventListener('touchend', function () {
-                    var now = Date.now();
-                    if (div === _chLastTouchTarget && (now - _chLastTouchEnd) < 150) {
-                        _chLastTouchTarget = null;
-                        window._chTapPending = false;
-                        window._doubleTapJustFired = true;
-                        _showChannelContextMenu(0, 0, serverId, ch, chDisplayName, categoryId, isOwner);
-                        return;
-                    }
-                    _chLastTouchTarget = div;
-                    _chLastTouchEnd = now;
-                    window._chTapPending = true;
-                    setTimeout(function () { window._chTapPending = false; }, 200);
-                }, { passive: true });
+                // No double-tap: holding the row still opens its context menu
+                // (see _setupChannelTouchDrag), so a tap only enters the channel.
                 div.addEventListener('click', function (ev) {
-                    if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
                     if (ev.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
                         try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
                     }
@@ -1565,7 +1504,6 @@
             div.appendChild(nameSpan);
             // Right-click context menu for channel (all users)
             div.addEventListener('contextmenu', function (e) {
-                if (_chDragTimerPending) return; // suppress during long-press
                 e.preventDefault();
                 e.stopPropagation();
                 _showChannelContextMenu(e.clientX, e.clientY, serverId, ch, chDisplayName, categoryId, isOwner);
@@ -1873,142 +1811,19 @@
         };
     }
 
-    // --- Mobile double-tap: context menu (keeps drag-and-drop working) ---
-    var _lastTapTarget = null;
-    var _lastTapTime = 0;
-    var DOUBLE_TAP_MS = 350;
-    var isTouchDevice = ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+    // The mobile double-tap family that used to live here — two taps to open the
+    // menu on a channel, a category, a server icon, a DM row, the DM strip
+    // button or the mentions button — is gone, replaced by ONE gesture: a hold
+    // opens the right-click menu on every one of those rows (see
+    // `window.attachHoldGesture` in chat.js). Two taps were never discoverable,
+    // they made every drag suspect on a phone, and a double tap is also how the
+    // platform zooms; a hold is what a finger expresses as "what can I do with
+    // this?" and it is now the only way to ask.
 
-    if (isTouchDevice) {
-        document.getElementById('channel-list').addEventListener('touchend', function(e) {
-            var chDiv = e.target.closest('.channel-item[data-id]');
-            var catHeader = e.target.closest('.channel-category-header');
-            var target = chDiv || catHeader;
-            if (!target) { _lastTapTarget = null; return; }
-            var now = Date.now();
-            if (target === _lastTapTarget && (now - _lastTapTime) < DOUBLE_TAP_MS) {
-                e.preventDefault();
-                e.stopPropagation();
-                var touch = e.changedTouches ? e.changedTouches[0] : null;
-                var cx = touch ? touch.clientX : 0;
-                var cy = touch ? touch.clientY : 0;
-                if (chDiv) {
-                    var chId = chDiv.getAttribute('data-id');
-                    var chName = chDiv.getAttribute('data-name') || '';
-                    var isCat = chDiv.closest('.channel-category-group');
-                    var catId = isCat ? isCat.getAttribute('data-category-id') : null;
-                    var fakeCh = { id: chId, channel_type: chDiv.getAttribute('data-type') || 'text' };
-                    if (typeof _showChannelContextMenu === 'function') {
-                        _showChannelContextMenu(cx, cy, '', fakeCh, chName, catId, false);
-                    }
-                } else if (catHeader) {
-                    var group = catHeader.closest('.channel-category-group');
-                    if (group) {
-                        var catIdVal = group.getAttribute('data-category-id');
-                        var catChannels = [];
-                        group.querySelectorAll('.channel-item[data-id]').forEach(function(el) {
-                            catChannels.push({ id: el.getAttribute('data-id'), channel_type: el.getAttribute('data-type') || 'text' });
-                        });
-                        var catNameVal = catHeader.textContent.trim();
-                        if (typeof _showCategoryContextMenu === 'function') {
-                            _showCategoryContextMenu(cx, cy, '', catIdVal, catNameVal, catChannels);
-                        }
-                    }
-                }
-                _lastTapTarget = null;
-            } else {
-                _lastTapTarget = target;
-                _lastTapTime = now;
-            }
-        });
-
-        document.getElementById('server-list').addEventListener('touchend', function(e) {
-            var svIcon = e.target.closest('.server-icon');
-            if (!svIcon) return;
-            var now = Date.now();
-            if (svIcon === _lastTapTarget && (now - _lastTapTime) < DOUBLE_TAP_MS) {
-                e.preventDefault();
-                e.stopPropagation();
-                var touch = e.changedTouches ? e.changedTouches[0] : null;
-                if (touch && typeof showServerContextMenu === 'function') {
-                    var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
-                    showServerContextMenu(fakeEvt, svIcon.dataset.id, svIcon.title);
-                }
-                _lastTapTarget = null;
-            } else {
-                _lastTapTarget = svIcon;
-                _lastTapTime = now;
-            }
-        });
-
-        // DM items: double-tap opens DM context menu
-        document.getElementById('channel-list').addEventListener('touchend', function(e) {
-            var dmItem = e.target.closest('.dm-item[data-dm-id]');
-            if (!dmItem) return;
-            var now = Date.now();
-            if (dmItem === _lastTapTarget && (now - _lastTapTime) < DOUBLE_TAP_MS) {
-                e.preventDefault();
-                e.stopPropagation();
-                var touch = e.changedTouches ? e.changedTouches[0] : null;
-                if (touch && typeof showDmContextMenu === 'function') {
-                    var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
-                    showDmContextMenu(fakeEvt, dmItem.dataset.dmId, dmItem.dataset.username || 'user');
-                }
-                _lastTapTarget = null;
-            } else {
-                _lastTapTarget = dmItem;
-                _lastTapTime = now;
-            }
-        });
-
-        // DM strip button: double-tap opens DM strip context menu
-        (function() {
-            var dmBtn = document.getElementById('dm-strip-btn');
-            if (!dmBtn) return;
-            var _dmLastTap = 0;
-            dmBtn.addEventListener('touchend', function(e) {
-                var now = Date.now();
-                if (now - _dmLastTap < DOUBLE_TAP_MS) {
-                    e.preventDefault();
-                    var touch = e.changedTouches ? e.changedTouches[0] : null;
-                    if (touch && typeof showDmStripContextMenu === 'function') {
-                        var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
-                        showDmStripContextMenu(fakeEvt);
-                    }
-                    _dmLastTap = 0;
-                } else {
-                    _dmLastTap = now;
-                }
-            });
-        })();
-
-        // Mentions strip button: double-tap opens mentions context menu
-        (function() {
-            var mtBtn = document.getElementById('mentions-strip-btn');
-            if (!mtBtn) return;
-            var _mtLastTap = 0;
-            mtBtn.addEventListener('touchend', function(e) {
-                var now = Date.now();
-                if (now - _mtLastTap < DOUBLE_TAP_MS) {
-                    e.preventDefault();
-                    var touch = e.changedTouches ? e.changedTouches[0] : null;
-                    if (touch) {
-                        // The button already has a contextmenu handler — fire it synthetically
-                        var fakeEvt = new MouseEvent('contextmenu', {
-                            clientX: touch.clientX,
-                            clientY: touch.clientY,
-                            bubbles: true,
-                            cancelable: true
-                        });
-                        mtBtn.dispatchEvent(fakeEvt);
-                    }
-                    _mtLastTap = 0;
-                } else {
-                    _mtLastTap = now;
-                }
-            });
-        })();
-    }
+    // The DM strip button and the mentions button open their menus through the
+    // ordinary `contextmenu` handler now (long-press on a phone reaches it, and
+    // holding a rail row is the same gesture everywhere) — the double-tap
+    // versions that used to sit here are gone with the rest of the family.
 
     // Expose category API
 

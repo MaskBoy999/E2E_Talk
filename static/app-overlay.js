@@ -236,8 +236,16 @@
         'cursor:pointer;border:1px solid #3f4147;background:#2b2d31;color:#dbdee1;';
 
     function buildButton() {
+        // The corner is offset by the device's safe area so the button is not
+        // under a phone's home indicator or a rounded corner, and the z-index is
+        // deliberately enormous: the app draws the boot spinner (#loading-overlay,
+        // 99999) and the key-vault lock screen (.vault-lock-overlay, 100000) over
+        // *everything else*, and both used to bury this button — which is exactly
+        // when a user most needs a way out. See ensureButton() for the other half
+        // of "always there": surviving a DOM swap.
         _button = el('button',
-            'position:fixed;left:14px;bottom:14px;z-index:3000;width:42px;height:42px;border-radius:50%;' +
+            'position:fixed;left:calc(14px + env(safe-area-inset-left,0px));bottom:calc(14px + env(safe-area-inset-bottom,0px));'
+            + 'z-index:2147483000;width:42px;height:42px;border-radius:50%;' +
             'border:1px solid #3f4147;background:rgba(43,45,49,0.92);color:#dbdee1;cursor:pointer;' +
             'display:flex;align-items:center;justify-content:center;padding:0;opacity:.72;' +
             'transition:opacity .15s,transform .15s;box-shadow:0 6px 18px rgba(0,0,0,0.45);' +
@@ -264,7 +272,7 @@
     function openPanel() {
         closePanel();
         var root = el('div',
-            'position:fixed;inset:0;z-index:3001;background:rgba(0,0,0,0.45);display:flex;' +
+            'position:fixed;inset:0;z-index:2147483001;background:rgba(0,0,0,0.45);display:flex;' +
             'align-items:flex-end;justify-content:flex-start;padding:14px;');
         var panel = el('div',
             'max-width:380px;background:#1e1f22;border:1px solid #3f4147;border-radius:12px;' +
@@ -362,6 +370,22 @@
         });
     }
 
+    /**
+     * Put the button on the page, and keep it there.
+     *
+     * The vault lock screen, the boot spinner, error paths and general re-renders
+     * all rewrite parts of the document, so a single append at boot is not enough:
+     * a MutationObserver re-appends the button the instant anything detaches it,
+     * as long as the user has not hidden it. This is what makes "always there in
+     * the app" true in every state, not just the happy one.
+     */
+    function ensureButton() {
+        if (hiddenState() !== 'none') return;
+        if (!document.body) return;
+        if (_button && _button.isConnected) return;
+        buildButton();
+    }
+
     function boot() {
         // Native shell ONLY. The page is the same whether it is opened in the
         // app or in an ordinary browser, so a floating button drawn by the page
@@ -377,9 +401,23 @@
         try {
             if (/[?&]mini=1\b/.test(window.location.search)) return;
         } catch (_) {}
-        if (hiddenState() !== 'none') return;
-        if (!document.body) return;
-        buildButton();
+        ensureButton();
+        // Re-assert when the top-level DOM changes, but never after the user hid
+        // it (ensureButton() checks that itself). Two shallow observers: the
+        // button lives directly under <body>, so a body-level childList watch
+        // catches it being removed, and a document-level one catches <body>
+        // itself being swapped. `subtree` is deliberately off — the chat adds
+        // thousands of nodes a minute and re-checking on each would be a
+        // self-inflicted performance problem (see the perf pass).
+        try {
+            var mo = new MutationObserver(function () { ensureButton(); });
+            mo.observe(document.documentElement, { childList: true });
+            mo.observe(document.body, { childList: true });
+        } catch (_) {}
+        // And after the page becomes visible again (e.g. an Android activity
+        // resume re-decorates the document).
+        document.addEventListener('visibilitychange', ensureButton);
+        window.addEventListener('pageshow', ensureButton);
     }
 
     if (document.readyState === 'loading') {

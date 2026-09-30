@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
     <meta name="theme-color" content="#4fc3f7">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -17,7 +17,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=32">
+    <link rel="stylesheet" href="style.css?v=33">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -825,7 +825,17 @@
                         <option value="loose">Loose — 18 px</option>
                         <option value="very-loose">Very loose — 28 px</option>
                     </select>
-                    <p class="settings-hint">How far a finger may drift before a long-press drag is treated as a scroll instead. A phone with a shaky or very responsive screen can raise this so picking up a server, channel or role does not cancel on the first wobble; a steady hand can lower it so a scroll takes over sooner. Applies wherever you long-press to reorder: the server rail and folders, channels, categories, DMs and roles.</p>
+                    <p class="settings-hint">How far the finger may move during the hold before the gesture becomes a drag instead of opening the right-click menu. A phone with a shaky or very responsive screen can raise this so a hold does not turn into a drag on the first wobble; a steady hand can lower it. Applies wherever you hold to reorder: the server rail and folders, channels, categories, DMs and roles.</p>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>Hold to Open Menu</h4>
+                    <select id="touch-hold-ms" class="settings-select" style="max-width:260px">
+                        <option value="300">Quick — 300 ms</option>
+                        <option value="500">Normal — 500 ms (default)</option>
+                        <option value="700">Deliberate — 700 ms</option>
+                        <option value="1000">Slow — 1000 ms</option>
+                    </select>
+                    <p class="settings-hint">How long to keep a finger still on a server, folder, channel, category, DM or role before its right-click menu opens. Moving further than the Touch Drag distance inside that window starts a drag instead, so holding is the touch equivalent of a right-click.</p>
                 </div>
                 <div class="settings-group" id="hardware-acceleration-group" style="display:none;padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>Hardware Acceleration</h4>
@@ -2653,13 +2663,13 @@
 <script src="secure-storage.js?v=5"></script>
     <script src="voice.js?v=36"></script>
     <script src="soundboard-pairing.js?v=12"></script>
-    <script src="thread_categories_shortcuts.js?v=11"></script>
-    <script src="roles.js?v=5"></script>
+    <script src="thread_categories_shortcuts.js?v=12"></script>
+    <script src="roles.js?v=6"></script>
     <script src="doc-preview.js?v=6"></script>
-    <script src="chat.js?v=74"></script>
+    <script src="chat.js?v=75"></script>
 <!-- The always-on "clear all app data" overlay: one button, every page, whether
      or not a connection exists. Inert in the mini call-controls window. -->
-<script src="app-overlay.js?v=1"></script>
+<script src="app-overlay.js?v=2"></script>
 <script src="captions.js?v=5"></script>
 <!-- F15: custom UI icon packs (app-only settings tab) -->
 <script src="icon-packs.js?v=2"></script>

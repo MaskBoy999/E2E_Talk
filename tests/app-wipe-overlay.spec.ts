@@ -130,6 +130,78 @@ test.describe('the clear-all-data overlay is native-app only', () => {
         await fresh.close();
     });
 
+    test('it is on top of the app\'s own overlays and survives the DOM being rebuilt', async ({ page }) => {
+        await page.addInitScript(TAURI_STUB);
+        await register(page, true);
+
+        /**
+         * Is the wipe button the thing at the centre of its own box?
+         *
+         * `elementFromPoint` answers exactly the user's question — can I press
+         * it — while `z-index` alone cannot: the vault lock screen and the boot
+         * spinner are full-screen overlays with their own stacking, and they
+         * used to swallow the button.
+         */
+        const reachable = () => page.evaluate(() => {
+            const btn = document.getElementById('app-wipe-button');
+            if (!btn) return { present: false, atPoint: null as string | null, z: null as string | null };
+            const r = btn.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return {
+                present: true,
+                atPoint: hit ? (hit.closest('#app-wipe-button') ? 'button' : (hit.id || hit.className || hit.tagName)) : null,
+                z: getComputedStyle(btn).zIndex,
+            };
+        });
+
+        // 1. Nothing on screen: it is pressable.
+        expect(await reachable()).toEqual({ present: true, atPoint: 'button', z: expect.any(String) });
+
+        // 2. The boot spinner (#loading-overlay) is up: still pressable. This is
+        //    the state a user is in when the app is opening against a server
+        //    that is no longer answering.
+        await page.evaluate(() => {
+            let el = document.getElementById('loading-overlay') as HTMLElement | null;
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'loading-overlay';
+                el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1e1f22';
+                document.body.appendChild(el);
+            } else {
+                el.style.display = 'flex';
+            }
+        });
+        expect((await reachable()).atPoint, 'the boot spinner must not cover the wipe button').toBe('button');
+
+        // 3. The vault lock screen (.vault-lock-overlay, z-index 100000): the app
+        //    is locked, which is exactly when a way out matters most.
+        await page.evaluate(() => {
+            const el = document.createElement('div');
+            el.className = 'vault-lock-overlay';
+            el.style.cssText = 'position:fixed;inset:0;z-index:100000;background:#0b0b0d';
+            document.body.appendChild(el);
+        });
+        expect((await reachable()).atPoint, 'the vault lock screen must not cover the wipe button').toBe('button');
+
+        // 4. The document is rebuilt under it (a re-render, or the "grey screen"
+        //    an error path leaves behind): the observer puts it straight back.
+        await page.evaluate(() => { document.getElementById('app-wipe-button')?.remove(); });
+        await expect(page.locator('#app-wipe-button')).toBeAttached({ timeout: 5000 });
+
+        await page.evaluate(() => {
+            // Wipe the body the app lives in, the way a failed boot leaves it.
+            document.body.innerHTML = '';
+        });
+        await expect(page.locator('#app-wipe-button')).toBeAttached({ timeout: 5000 });
+        expect((await reachable()).atPoint, 'after the DOM is rebuilt the button must still be pressable').toBe('button');
+
+        // 5. And hiding still wins: the observer must not resurrect it.
+        await page.evaluate(() => (window as any).__appWipe?.setHidden(true));
+        await page.evaluate(() => { document.getElementById('app-wipe-button')?.remove(); });
+        await page.waitForTimeout(400);
+        await expect(page.locator('#app-wipe-button')).toHaveCount(0);
+    });
+
     test('erasing everything wipes local data, signs out, and tells the shell to forget the connection', async ({ page }) => {
         await page.addInitScript(TAURI_RECORDING_STUB);
         await register(page, true);

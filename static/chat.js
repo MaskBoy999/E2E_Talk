@@ -438,6 +438,42 @@ let emojiCache = {};
 let emojiBlobCache = {}; // name -> blob URL
 let currentFileIndex = 0;    // Profile cache: file_id -> blob URL
 var profilePicCache = {};
+// Bound the profile-picture cache. Each entry can hold a decrypted avatar as a
+// blob URL, and blob bytes stay alive until the URL is revoked — an unbounded
+// map is an unbounded memory bill on a phone that sits in a busy server all
+// day. Keys are kept in insertion order; on overflow we drop the oldest
+// quarter and revoke whatever the DOM no longer references.
+var PROFILE_PIC_CACHE_MAX = 250;
+var _profilePicCacheOrder = [];
+function profilePicCachePut(key, url) {
+    if (!key || !url) return url;
+    if (!profilePicCache[key]) _profilePicCacheOrder.push(key);
+    profilePicCache[key] = url;
+    if (_profilePicCacheOrder.length > PROFILE_PIC_CACHE_MAX) _profilePicCacheTrim();
+    return url;
+}
+function _profilePicCacheTrim() {
+    var drop = Math.max(1, Math.floor(PROFILE_PIC_CACHE_MAX / 4));
+    while (drop-- > 0 && _profilePicCacheOrder.length) {
+        var k = _profilePicCacheOrder.shift();
+        var u = profilePicCache[k];
+        delete profilePicCache[k];
+        if (!u || String(u).indexOf('blob:') !== 0) continue;
+        var inUse = false;
+        try {
+            for (var i = 0; i < document.images.length; i++) {
+                if (document.images[i].src === u) { inUse = true; break; }
+            }
+        } catch (_) {}
+        if (inUse) {
+            // Still painted on screen — keep it, and treat it as recently used.
+            profilePicCache[k] = u;
+            _profilePicCacheOrder.push(k);
+        } else {
+            try { URL.revokeObjectURL(u); } catch (_) {}
+        }
+    }
+}
 let myProfile = null; // { display_name, profile_picture_file_id }
 
 /**
@@ -3795,6 +3831,39 @@ function showVaultLockScreen() {
 
 window.__vaultShowLock = showVaultLockScreen;
 
+// ─── Mobile keyboard: compact the app, don't move it ─────────────────────────
+// With the keyboard open, a phone WebView scrolls the *page* up to keep the
+// focused input visible, which takes the header — and the channel name in it —
+// off the top of the screen. The fix has two halves.
+//
+// `index.html`'s viewport meta asks the browser to resize the page for the
+// keyboard (`interactive-widget=resizes-content`, Chrome/Android WebView),
+// which makes the ordinary flex column shrink, so everything compacts where it
+// stands and the input stays above the keys. Where that is not supported the
+// layout viewport keeps its full height and only the *visual* viewport shrinks,
+// so the same measurement is taken here and published as `--kb-inset`, which
+// `.app`'s height subtracts. Either way the top bar never leaves the screen.
+(function initKeyboardCompaction() {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    var root = document.documentElement;
+    function apply() {
+        // How much of the layout the keyboard covers, in CSS px: 0 when the
+        // browser already resized the layout viewport (innerHeight shrank with
+        // it), the keyboard's height when it did not.
+        var covered = Math.round(window.innerHeight - vv.height - vv.offsetTop);
+        if (covered < 40) covered = 0;   // sub-pixel noise, or no keyboard
+        // Only a device with no fine pointer pops a keyboard up over the app;
+        // on a desktop there is nothing to compact for.
+        try { if (!window.matchMedia('(pointer: coarse)').matches) covered = 0; } catch (_) {}
+        root.style.setProperty('--kb-inset', covered + 'px');
+    }
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+    window.addEventListener('orientationchange', apply);
+    apply();
+})();
+
 document.addEventListener('DOMContentLoaded', () => {
     // 4.2: ?mini=1 boots ONLY the controls view — before the token gate and
     // everything else, so the mini window never opens a second session.
@@ -4907,6 +4976,163 @@ document.addEventListener('DOMContentLoaded', () => {
             try { localStorage.setItem('touch_drag_threshold', sel.value); } catch (_) {}
         });
     })();
+
+    // ... and how long the finger must stay still for the *menu*: the other half
+    // of the same gesture. 500 ms by default (Settings → Touch → Hold to Open
+    // Menu). See `attachHoldGesture` for the rules.
+    var TOUCH_HOLD_DEFAULT_MS = 500;
+    window.touchHoldMs = function () {
+        var stored = 0;
+        try { stored = parseInt(localStorage.getItem('touch_hold_ms'), 10); } catch (_) {}
+        if (stored >= 150 && stored <= 3000) return stored;
+        return TOUCH_HOLD_DEFAULT_MS;
+    };
+    (function initTouchHoldMs() {
+        var sel = document.getElementById('touch-hold-ms');
+        if (!sel) return;
+        try {
+            var stored = localStorage.getItem('touch_hold_ms');
+            if (stored && sel.querySelector('option[value="' + stored + '"]')) sel.value = stored;
+            // Nothing stored (or a value no longer offered): show what the code
+            // actually uses, so the select can never claim 300 ms while the
+            // gesture waits 500.
+            else sel.value = String(window.touchHoldMs());
+        } catch (_) {}
+        sel.addEventListener('change', function () {
+            try { localStorage.setItem('touch_hold_ms', sel.value); } catch (_) {}
+        });
+    })();
+
+    /**
+     * ONE touch gesture for every reorderable row in the app: the server rail
+     * (icons and folders), the channel list (channels and categories), the DM
+     * list and the roles list.
+     *
+     * The rule is a single time window with a distance test inside it, and it
+     * is the whole of the mobile interaction now:
+     *
+     *   * the finger goes down and a `touchHoldMs` timer starts (500 ms default,
+     *     Settings → Touch);
+     *   * if the finger stays within the Touch Drag distance for that whole
+     *     window, the **right-click menu opens** — a hold IS a right-click;
+     *   * if it moves past that distance while the window is still open, the
+     *     **drag starts** right then, and the timer is dropped;
+     *   * letting go without either is an ordinary tap, untouched (the click
+     *     handler runs as usual).
+     *
+     * This replaced "hold arms a drag, drift cancels it" plus a family of
+     * double-tap detectors for the menus. Movement now means drag and stillness
+     * means menu, which is what a finger actually expresses — and it let every
+     * mobile double-tap action be deleted rather than tuned.
+     *
+     * `handlers`:
+     *   admit(e)          optional: false to ignore this touchstart entirely
+     *   holdMs            optional: window in ms (default window.touchHoldMs())
+     *   draggableEl       optional: element whose `draggable` is disabled for the
+     *                     gesture (a phone's native long-press drag otherwise
+     *                     kills the touch stream mid-gesture) and restored after
+     *   onHold(x, y)      the window elapsed without movement — open the menu
+     *   onDragStart(x, y)
+     *   onDragMove(x, y)
+     *   onDragEnd(x, y)   only after onDragStart
+     *   onCancel()        the browser cancelled a gesture that had opened a menu
+     *
+     * `preventDefault` is applied only while dragging, so a plain tap still
+     * produces a click and the list can still be scrolled before the window
+     * elapses. Defined on `window` because the channel and role files load
+     * before this one and bind their rows lazily, at render time.
+     */
+    window.attachHoldGesture = function (el, handlers) {
+        var st = { state: 'idle', timer: null, x0: 0, y0: 0, x: 0, y: 0 };
+        var dragEl = handlers.draggableEl || null;
+        function clearTimer() {
+            if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+        }
+        function radius() {
+            return window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
+        }
+        function settle() {
+            clearTimer();
+            st.state = 'idle';
+            if (dragEl) dragEl.draggable = true;
+        }
+        // A hold opens a menu under the finger; the release that follows would
+        // otherwise also fire the row's click (switching to that server/channel/
+        // DM underneath the open menu). This swallows exactly that one click, and
+        // only for as long as it can plausibly arrive.
+        function swallowNextClick() {
+            var swallow = function (e) { e.stopPropagation(); e.preventDefault(); };
+            el.addEventListener('click', swallow, true);
+            setTimeout(function () { el.removeEventListener('click', swallow, true); }, 500);
+        }
+        el.addEventListener('touchstart', function (e) {
+            if (handlers.admit && !handlers.admit(e)) return;
+            var t = e.touches[0];
+            if (!t) return;
+            if (dragEl) dragEl.draggable = false;
+            st.state = 'pending';
+            st.x0 = st.x = t.clientX;
+            st.y0 = st.y = t.clientY;
+            clearTimer();
+            st.timer = setTimeout(function () {
+                st.timer = null;
+                if (st.state !== 'pending') return;
+                st.state = 'held';
+                swallowNextClick();
+                if (handlers.onHold) handlers.onHold(st.x0, st.y0);
+            }, handlers.holdMs || window.touchHoldMs());
+        }, { passive: false });
+        el.addEventListener('touchmove', function (e) {
+            var t = e.touches[0];
+            if (!t) return;
+            st.x = t.clientX;
+            st.y = t.clientY;
+            if (st.state === 'pending') {
+                var limit = radius();
+                if (Math.abs(st.x - st.x0) <= limit && Math.abs(st.y - st.y0) <= limit) return;
+                // Past the distance inside the window: this is a drag after all.
+                st.state = 'drag';
+                clearTimer();
+                if (handlers.onDragStart) handlers.onDragStart(st.x, st.y);
+            }
+            if (st.state !== 'drag') return;
+            e.preventDefault();
+            if (handlers.onDragMove) handlers.onDragMove(st.x, st.y);
+        }, { passive: false });
+        el.addEventListener('touchend', function (e) {
+            var was = st.state;
+            settle();
+            if (was === 'drag' && handlers.onDragEnd) handlers.onDragEnd(st.x, st.y, e);
+        });
+        el.addEventListener('touchcancel', function () {
+            var was = st.state;
+            settle();
+            if (was === 'held' && handlers.onCancel) handlers.onCancel();
+        });
+        // The browser's own long-press menu is never what we want here: a hold
+        // opens ours, and a drag owns the finger. The row's own contextmenu
+        // handler (bound earlier, for the mouse) still runs first, so this only
+        // suppresses the native menu.
+        el.addEventListener('contextmenu', function (e) {
+            if (st.state !== 'idle') e.preventDefault();
+        });
+        return st;
+    };
+
+    /**
+     * The event object a hold hands to a context menu. The menus only read
+     * `clientX`/`clientY` (and the two no-op guards below), so a hold opens the
+     * very same menu the mouse opens, anchored under the finger — which is what
+     * makes the mobile double-tap detectors unnecessary.
+     */
+    window.touchMenuEvent = function (x, y) {
+        return {
+            clientX: x,
+            clientY: y,
+            preventDefault: function () {},
+            stopPropagation: function () {},
+        };
+    };
 
     // Composer (chat-input bar: + attach, emoji/sticker/gif, text box, send)
     // must only appear when a server TEXT channel or DM conversation is open.
@@ -15973,17 +16199,10 @@ var _dmDragPendingRerender = false;
 var _dmDragSourceEl = null;
 var _dmDragWatchdog = null;
 var _dmTouchDragActive = false;
-var _chTapPending = false; // true during channel double-tap detection window
-// DM double-tap → context menu. Detection is driven off the delayed single-tap
-// action: the first tap schedules the selection 150 ms out, and a second tap on
-// the same row before that timer fires cancels it and opens the context menu.
-// This keeps the detection window and the action delay in lockstep instead of
-// comparing touch timestamps that can drift from the click that actually acts.
-// State lives at module scope (not inside renderDmSidebar) because the selection
-// rebuilds the whole list, wiping per-item closure state mid-gesture.
-var _DM_DOUBLE_TAP_MS = 150;  // how long a single tap waits before acting
-var _dmTapLastId = null;      // dm-id whose selection is pending
-var _dmTapActionTimer = null; // the delayed selection: pending == double-tap window open
+// NOTE: the mobile double-tap actions that used to live here (and a 150 ms
+// delayed selection that existed only to detect them) are gone. Holding a row
+// still now opens its right-click menu, and a tap selects immediately — see
+// `window.attachHoldGesture`.
 var _dmDragEndedAt = 0;       // guards the click that follows a drag release
 function _dmDragJustEnded() { return Date.now() - _dmDragEndedAt < 400; }
 
@@ -16291,22 +16510,10 @@ function renderServerList() {
         div.title = dn;
         div.dataset.id = s.id;
         if (!opts.noSelect) {
-            // Touch-based double-tap for servers: double-tap opens context menu
-            var _svLastTE = 0, _svLastTETarget = null;
-            div.addEventListener('touchend', function () {
-                if (Date.now() - _serverTouchDragEndedAt < 400) return;
-                var now = Date.now();
-                if (div === _svLastTETarget && (now - _svLastTE) < 150) {
-                    _svLastTETarget = null;
-                    window._doubleTapJustFired = true;
-                    if (!opts.noSelect) showServerContextMenu({ clientX: 0, clientY: 0, preventDefault: function(){}, stopPropagation: function(){} }, s.id, s.name);
-                    return;
-                }
-                _svLastTETarget = div;
-                _svLastTE = now;
-            }, { passive: true });
+            // No touch double-tap any more: on a phone the right-click menu is
+            // opened by holding the icon still for the hold window, which the
+            // rail's touch gesture (setupTouchDragItem) handles. A tap just taps.
             div.addEventListener('click', function(e) {
-                if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
                 if (Date.now() - _serverTouchDragEndedAt < 400) return;
                 if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
                     try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
@@ -16325,6 +16532,11 @@ function renderServerList() {
         });
         div.addEventListener('dblclick', function(e) {
             if (opts.noSelect) return;
+            // Mouse double-click is a desktop convenience (and the desktop-only
+            // half of the old double-tap family). A touch screen synthesises
+            // `dblclick` from two taps, and two taps must do nothing but what a
+            // tap does: hold is how a menu is asked for on a phone.
+            if (!window.hasFinePointer || !window.hasFinePointer()) return;
             e.preventDefault();
             e.stopPropagation();
             showServerContextMenu(e, s.id, s.name);
@@ -16391,22 +16603,9 @@ function renderServerList() {
                 badge.className = 'group-badge';
                 badge.textContent = groupServers.length;
                 header.appendChild(badge);
-                // Touch-based double-tap for collapsed group header
-                var _grpLastTE = 0, _grpLastTETarget = null;
-                header.addEventListener('touchend', function () {
-                    if (_touchDragJustEnded()) return;
-                    var now = Date.now();
-                    if (header === _grpLastTETarget && (now - _grpLastTE) < 150) {
-                        _grpLastTETarget = null;
-                        window._doubleTapJustFired = true;
-                        showGroupContextMenu({ clientX: 0, clientY: 0, preventDefault: function(){}, stopPropagation: function(){} }, g);
-                        return;
-                    }
-                    _grpLastTETarget = header;
-                    _grpLastTE = now;
-                }, { passive: true });
+                // The folder's context menu on a phone is the hold gesture (see
+                // setupTouchDragItem); there is no double-tap to guard here.
                 header.addEventListener('click', function(e) {
-                    if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
                     if (e.target !== header || _touchDragJustEnded()) return;
                     toggleGroup(g.id);
                 });
@@ -16420,22 +16619,8 @@ function renderServerList() {
                 }
                 toggle.textContent = '\u25BC ' + g.name;
                 toggle.title = 'Click to collapse ' + g.name;
-                // Touch-based double-tap for expanded group toggle
-                var _grpLastTE2 = 0, _grpLastTETarget2 = null;
-                toggle.addEventListener('touchend', function () {
-                    if (_touchDragJustEnded()) return;
-                    var now = Date.now();
-                    if (toggle === _grpLastTETarget2 && (now - _grpLastTE2) < 150) {
-                        _grpLastTETarget2 = null;
-                        window._doubleTapJustFired = true;
-                        showGroupContextMenu({ clientX: 0, clientY: 0, preventDefault: function(){}, stopPropagation: function(){} }, g);
-                        return;
-                    }
-                    _grpLastTETarget2 = toggle;
-                    _grpLastTE2 = now;
-                }, { passive: true });
+                // Held-to-menu, as everywhere else on touch.
                 toggle.addEventListener('click', function(e) {
-                    if (window._doubleTapJustFired) { window._doubleTapJustFired = false; return; }
                     if (_touchDragJustEnded()) return;
                     toggleGroup(g.id);
                 });
@@ -16447,6 +16632,9 @@ function renderServerList() {
                 showGroupContextMenu(e, g);
             });
             header.addEventListener('dblclick', function(e) {
+                // Desktop-only, for the same reason as the server row above: on a
+                // phone the two taps that make a `dblclick` stay ordinary taps.
+                if (!window.hasFinePointer || !window.hasFinePointer()) return;
                 e.preventDefault();
                 e.stopPropagation();
                 showGroupContextMenu(e, g);
@@ -16831,114 +17019,78 @@ function renderServerList() {
         });
     }
 
-    // Touch drag: long-press to pick something up, drag, release. State is per
-    // element (not one object shared by every icon) so a re-render or a second
-    // finger can never leave half a gesture behind on another icon.
+    // Touch gesture on a rail item: the shared hold-or-drag rule (see
+    // `window.attachHoldGesture`) wired to the rail's drag body. A finger that
+    // stays put for the hold window opens that server's/folder's right-click
+    // menu; a finger that moves past the Touch Drag distance is picking it up.
     // `kind` is 'server' (el = the icon) or 'group' (el = the folder wrapper,
-    // handleEl = the header that carries `draggable`).
-    function setupTouchDragItem(el, kind, handleEl) {
-        var LONG_PRESS_MS = 350;
+    // handleEl = the header that carries `draggable`), and `onHold(x, y)` opens
+    // the matching context menu.
+    function setupTouchDragItem(el, kind, handleEl, onHold) {
         var isGroup = kind === 'group';
-        var st = {
-            timer: null, active: false, ghost: null,
-            id: '', startX: 0, startY: 0, lastX: 0, lastY: 0,
-        };
-        el.addEventListener('touchstart', function(e) {
-            var t = e.touches[0];
-            if (!t) return;
-            // Members of an expanded folder are their own drag sources, so a
-            // touch on one belongs to it — except the mini icons of a collapsed
-            // folder, which are part of the folder's own handle.
-            if (isGroup && e.target.closest && e.target.closest('.server-icon')
-                && !e.target.closest('.server-group-collapsed-grid')) return;
-            st.id = isGroup ? (el.dataset.groupId || '') : (el.dataset.id || '');
-            if (!st.id) return;
-            // Take the element off the browser's own long-press drag path. On a
-            // phone a long press on a draggable element starts a *native* drag,
-            // which cancels this gesture's touch stream about half a second in —
-            // right when the long press arms — so the ghost vanished and the
-            // release had nothing left to drop onto.
-            if (handleEl) handleEl.draggable = false;
-            st.startX = st.lastX = t.clientX;
-            st.startY = st.lastY = t.clientY;
-            st.timer = setTimeout(function() {
-                st.timer = null;
-                st.active = true;
+        var st = { ghost: null, id: '' };
+        window.attachHoldGesture(el, {
+            // Take the item off the browser's own long-press drag path while
+            // the gesture runs (see `attachHoldGesture`).
+            draggableEl: handleEl || el,
+            admit: function(e) {
+                // Members of an expanded folder are their own drag sources, so a
+                // touch on one belongs to it — except the mini icons of a
+                // collapsed folder, which are part of the folder's own handle.
+                if (isGroup && e.target.closest && e.target.closest('.server-icon')
+                    && !e.target.closest('.server-group-collapsed-grid')) return false;
+                st.id = isGroup ? (el.dataset.groupId || '') : (el.dataset.id || '');
+                return !!st.id;
+            },
+            onHold: function(x, y) {
+                if (onHold) onHold(x, y);
+            },
+            onDragStart: function(x, y) {
                 el.classList.add('dragging');
                 beginServerDrag(handleEl || el);
-                // Ghost goes at the finger's CURRENT position, not where the
-                // press started — that is stale by the time the timer fires.
-                st.ghost = makeTouchGhost(handleEl || el, st.lastX, st.lastY);
+                // The ghost goes at the finger's current position.
+                st.ghost = makeTouchGhost(handleEl || el, x, y);
                 if (window.boxBuzz) window.boxBuzz(30);
-            }, LONG_PRESS_MS);
-        }, { passive: false });
-        // Suppress the browser's native context menu on mobile when a
-        // long-press timer is pending (prevents the menu from popping up
-        // while the user intends to drag).
-        el.addEventListener('contextmenu', function(e) {
-            if (st.timer || st.active) { e.preventDefault(); }
-        });
-        el.addEventListener('touchmove', function(e) {
-            var t = e.touches[0];
-            if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
-            if (st.timer) {
-                // Any real movement means the user is scrolling — abort the
-                // pending long-press instead of hijacking the scroll. "Real
-                // movement" is the user's Touch Drag setting (default 10px).
-                var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
-                if (t && (Math.abs(t.clientX - st.startX) > movePx || Math.abs(t.clientY - st.startY) > movePx)) {
-                    clearTimeout(st.timer);
-                    st.timer = null;
+            },
+            onDragMove: function(x, y) {
+                moveTouchGhost(st.ghost, x, y);
+                // Holding near the rail's edge scrolls it, so a server can be
+                // dragged onto a folder that is currently off-screen. Feeding the
+                // shared probe (rather than scrolling here) lets the rAF ticker
+                // keep scrolling while the finger rests at the edge.
+                _stripAutoScroll.x = x;
+                _stripAutoScroll.y = y;
+                var under = document.elementFromPoint(x, y);
+                var gap = under && under.closest ? under.closest('.server-drop-gap') : null;
+                // Slots inside a folder only take servers; a folder drag skips them.
+                if (gap && isGroup && gap.dataset.inside) gap = null;
+                clearServerDragIndicators(gap);
+                if (gap) { gap.classList.add('drop-active'); return; }
+                if (!isGroup) {
+                    var icon = under && under.closest ? under.closest('.server-icon') : null;
+                    if (icon && icon.dataset.id && icon.dataset.id !== st.id
+                        && !icon.closest('.server-group-collapsed-grid')) {
+                        icon.classList.add('drag-over-group');
+                        return;
+                    }
                 }
-            }
-            if (!st.active) return;
-            e.preventDefault();
-            moveTouchGhost(st.ghost, st.lastX, st.lastY);
-            // Holding near the rail's edge scrolls it, so a server can be
-            // dragged onto a folder that is currently off-screen. Feeding the
-            // shared probe (rather than scrolling here) lets the rAF ticker keep
-            // scrolling while the finger rests at the edge.
-            _stripAutoScroll.x = st.lastX;
-            _stripAutoScroll.y = st.lastY;
-            var under = document.elementFromPoint(st.lastX, st.lastY);
-            var gap = under && under.closest ? under.closest('.server-drop-gap') : null;
-            // Slots inside a folder only take servers; a folder drag skips them.
-            if (gap && isGroup && gap.dataset.inside) gap = null;
-            clearServerDragIndicators(gap);
-            if (gap) { gap.classList.add('drop-active'); return; }
-            if (!isGroup) {
-                var icon = under && under.closest ? under.closest('.server-icon') : null;
-                if (icon && icon.dataset.id && icon.dataset.id !== st.id
-                    && !icon.closest('.server-group-collapsed-grid')) {
-                    icon.classList.add('drag-over-group');
-                    return;
+                var wrapper = under && under.closest ? under.closest('.server-group') : null;
+                if (wrapper && wrapper.dataset.groupId && wrapper.dataset.groupId !== st.id) {
+                    var handle = wrapper.querySelector('.server-group-header') || wrapper;
+                    wrapper.classList.add(zoneClass(dragZone(handle, y)));
                 }
-            }
-            var wrapper = under && under.closest ? under.closest('.server-group') : null;
-            if (wrapper && wrapper.dataset.groupId && wrapper.dataset.groupId !== st.id) {
-                var handle = wrapper.querySelector('.server-group-header') || wrapper;
-                wrapper.classList.add(zoneClass(dragZone(handle, st.lastY)));
-            }
-        }, { passive: false });
-        el.addEventListener('touchend', function(e) {
-            if (handleEl) handleEl.draggable = true;
-            if (st.timer) { clearTimeout(st.timer); st.timer = null; }
-            if (!st.active) return;
-            st.active = false;
-            _serverTouchDragEndedAt = Date.now();
-            var t = e.changedTouches[0];
-            if (st.ghost) { st.ghost.remove(); st.ghost = null; }
-            endServerDrag();
-            if (t) resolveTouchDrop(kind, st.id, t.clientX, t.clientY);
-        });
-        el.addEventListener('touchcancel', function() {
-            if (handleEl) handleEl.draggable = true;
-            if (st.timer) { clearTimeout(st.timer); st.timer = null; }
-            if (!st.active) return;
-            st.active = false;
-            _serverTouchDragEndedAt = Date.now();
-            if (st.ghost) { st.ghost.remove(); st.ghost = null; }
-            endServerDrag();
+            },
+            onDragEnd: function(x, y) {
+                _serverTouchDragEndedAt = Date.now();
+                if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+                endServerDrag();
+                resolveTouchDrop(kind, st.id, x, y);
+            },
+            onCancel: function() {
+                _serverTouchDragEndedAt = Date.now();
+                if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+                endServerDrag();
+            },
         });
     }
 
@@ -16990,7 +17142,10 @@ function renderServerList() {
         if (el.closest('.server-group-collapsed-grid')) return;
         setupDraggableServer(el);
         setupDropOnServerIcon(el);
-        setupTouchDragItem(el, 'server', el);
+        setupTouchDragItem(el, 'server', el, function(x, y) {
+            var sv = servers.find(function(s) { return s.id === el.dataset.id; });
+            showServerContextMenu(window.touchMenuEvent(x, y), el.dataset.id, sv ? sv.name : null);
+        });
     });
 
     // Setup drag on group wrappers: header = drag source, whole wrapper = drop target
@@ -17015,8 +17170,12 @@ function renderServerList() {
             });
         }
         // A long press picks the folder up on a phone too: same gesture, same
-        // slots, same resolution as a server drag.
-        setupTouchDragItem(wrapper, 'group', hdr || wrapper);
+        // slots, same resolution as a server drag — and a *still* finger opens
+        // the folder's menu instead.
+        setupTouchDragItem(wrapper, 'group', hdr || wrapper, function(x, y) {
+            var g = serverGroups.find(function(gr) { return gr.id === gId; });
+            if (g) showGroupContextMenu(window.touchMenuEvent(x, y), g);
+        });
 
         // The whole wrapper is a drop target. Its handle decides which of the
         // three things a drop means: above it, into it, or below it. For a
@@ -17105,37 +17264,6 @@ function renderServerList() {
         });
     }
 
-    // Mobile double-tap on group headers for context menu
-    if (('ontouchstart' in window || navigator.maxTouchPoints > 0) && !list._grpTapBound) {
-        list._grpTapBound = true;
-        var _grpLastTap = null, _grpLastTapTime = 0;
-        list.addEventListener('touchend', function(e) {
-            var hdr = e.target.closest('.server-group-header');
-            if (!hdr) { _grpLastTap = null; return; }
-            // A long press that picked the folder up was a drag, not a tap.
-            if (Date.now() - _serverTouchDragEndedAt < 400) { _grpLastTap = null; return; }
-            var now = Date.now();
-            if (hdr === _grpLastTap && (now - _grpLastTapTime) < 350) {
-                e.preventDefault();
-                e.stopPropagation();
-                var touch = e.changedTouches ? e.changedTouches[0] : null;
-                if (touch) {
-                    var w = hdr.closest('.server-group');
-                    if (w && w.dataset.groupId) {
-                        var g = serverGroups.find(function(g) { return g.id === w.dataset.groupId; });
-                        if (g) {
-                            var fakeEvt = { clientX: touch.clientX, clientY: touch.clientY, preventDefault: function(){}, stopPropagation: function(){} };
-                            showGroupContextMenu(fakeEvt, g);
-                        }
-                    }
-                }
-                _grpLastTap = null;
-            } else {
-                _grpLastTap = hdr;
-                _grpLastTapTime = now;
-            }
-        });
-    }
 
     function reorderServers(ids) {
         // The rail renders from `position`, so record the new sequence locally
@@ -17759,15 +17887,10 @@ async function selectChannel(channelId, channelName, element) {    markChannelR
 
     await loadMessages(channelId);
 
-    // On mobile, delay sidebar close so a second tap can reach the channel item
-    // for double-tap → context menu.
-    if (window._closeSidebar) {
-        if (_chTapPending) {
-            // Sidebar will close after the double-tap window expires.
-        } else {
-            window._closeSidebar();
-        }
-    }
+    // On mobile the sidebar closes as soon as a channel is chosen. There is no
+    // double-tap window to keep it open for any more: the context menu is a
+    // hold, and a tap is a tap.
+    if (window._closeSidebar) window._closeSidebar();
 }
 
 // --- Messages ---
@@ -18960,6 +19083,8 @@ if (expiresAt) {
         insertMessageChronologically(list, div, msg);
         list.scrollTop = list.scrollHeight;
     }
+    // Bounded history: never let one channel grow an unbounded row count.
+    _scheduleMessagePrune();
 }
 
 async function loadStickerPreview(container, stickerData) {
@@ -19244,22 +19369,80 @@ document.getElementById('message-list').addEventListener('click', function(e) {
 // `preventDefault()` on `selectstart` is the one hook that stops a mouse drag
 // and a keyboard selection alike, and it is safe to refuse: everything that
 // genuinely needs selecting is allowed below.
+// Every read-only piece of TEXT the app shows, as one selector: message bodies
+// (`selectstart` names the block the selection would live in — `.content` for a
+// message — not the `.text` inside it, so both are listed), a forwarded
+// message's body, the pinned-messages list, and the text viewers: the
+// full-screen text/code viewer, a message's own text preview, and a document
+// preview's extracted text, Word pages and PDF text layer.
+//
+// The chrome around that text — display names, timestamps, badges, avatars,
+// channel and server rows — is deliberately absent, and the CSS list plus this
+// catch-all are what keep it unselectable.
+var SELECTABLE_TEXT_SELECTOR = [
+    '.message .content',
+    '.message .text',
+    '.forwarded .content',
+    '.forwarded .text',
+    '.pins-item-text',
+    '.text-viewer-content',
+    '.text-preview',
+    '.doc-view-text',
+    '.doc-view-docx',
+    '.doc-view-pdf .textLayer',
+].join(', ');
+
+/**
+ * Whether this device is one that selects text: a machine with a FINE pointer
+ * somewhere (a mouse, a trackpad, a stylus).
+ *
+ * `(any-pointer: fine)`, not `(pointer: fine)`: the question is whether the
+ * device *has* a text cursor to place, and a touch-screen laptop — or a phone
+ * with a mouse attached — answers yes to that through `any-pointer` even when
+ * its primary pointer is the finger. A phone with nothing attached has no fine
+ * pointer at all, so message text stays unselectable there, which is the rule
+ * this whole function exists for.
+ *
+ * Read live from `matchMedia` (so a mouse plugged into an Android tablet is
+ * noticed on the next gesture) and mirrored onto `<html>` as `.select-text`,
+ * which is the single switch both this and the CSS read — the two cannot
+ * disagree about the same device.
+ */
+function selectionFinePointer() {
+    try {
+        return window.matchMedia('(any-pointer: fine)').matches;
+    } catch (_) {
+        return false;
+    }
+}
+
+// One answer for "does this device have a mouse/stylus?", used by the selection
+// rule above and by the double-click shortcuts in the rail: both are the
+// desktop half of an affordance whose touch half is a hold.
+window.hasFinePointer = selectionFinePointer;
+
+function applySelectionPointerClass() {
+    try {
+        document.documentElement.classList.toggle('select-text', selectionFinePointer());
+    } catch (_) {}
+}
+applySelectionPointerClass();
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', applySelectionPointerClass);
+// A pointer can appear or go away while the app runs (a mouse plugged in, a
+// tablet undocked): re-answer then, not just at boot.
+(function watchSelectionPointer() {
+    try {
+        var mq = window.matchMedia('(any-pointer: fine)');
+        if (mq.addEventListener) mq.addEventListener('change', applySelectionPointerClass);
+        else if (mq.addListener) mq.addListener(applySelectionPointerClass);
+    } catch (_) {}
+})();
+
 function selectionAllowed(target) {
     if (!target || typeof target.closest !== 'function') return false;
     if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return true;
     if (target.closest('.identity-key-display, .friend-code-display, .identity-key-box .key-value')) return true;
-    // `selectstart` names the block the selection would live in, which for a
-    // message is `.content` (its anchor container), not `.text` — so both are
-    // accepted. The message's own chrome is still refused, by the CSS: a drag
-    // starting on the display name or the timestamp is inside `.header` /
-    // `.time-hover`, which are `user-select: none`.
-    if (target.closest('.message .content, .message .text')) {
-        // Gated on a fine pointer, not on hover: a touch-screen laptop still
-        // has a mouse/trackpad as its primary pointer and MUST be able to
-        // select, while a phone (coarse pointer) must not. This matches the
-        // CSS media query below for the same reason.
-        return window.matchMedia('(pointer: fine)').matches;
-    }
+    if (target.closest(SELECTABLE_TEXT_SELECTOR)) return selectionFinePointer();
     return false;
 }
 
@@ -21027,48 +21210,23 @@ function renderDmSidebar() {
     html += '</div>';
     container.innerHTML = html;
 
-    // Event delegation for DM items.
-    // A touch double-tap mirrors right-click: it opens the DM context menu.
-    // Detection is purely "is the previous tap's selection still waiting?": if a
-    // second tap lands on the same row before the 150 ms timer fires it becomes
-    // the context menu instead, so there is no separate window that can drift.
+    // Event delegation for DM items. No touch double-tap: holding the row still
+    // opens its context menu (the touch gesture below), so a tap is only ever a
+    // tap and selects immediately — no 150 ms delay before the DM opens.
     document.querySelectorAll('.dm-item[data-dm-id]').forEach(item => {
         item.addEventListener('click', (e) => {
             // The click synthesized on release of a long-press drag is not a tap.
             if (_dmDragJustEnded()) return;
             var dmId = item.dataset.dmId;
-            if (_dmTapActionTimer && dmId === _dmTapLastId) {
-                // Second tap before the pending selection fired → double tap.
-                clearTimeout(_dmTapActionTimer);
-                _dmTapActionTimer = null;
-                _dmTapLastId = null;
-                // Don't let this click bubble to the menu's outside-click handler.
-                e.stopPropagation();
-                var r = item.getBoundingClientRect();
-                showDmContextMenu(
-                    { clientX: e.clientX || (r.left + 24), clientY: e.clientY || (r.top + r.height / 2), preventDefault: function(){}, stopPropagation: function(){} },
-                    dmId, item.dataset.username || 'user'
-                );
-                return;
-            }
-            // First tap: wait 150 ms before acting so a second tap can be seen.
-            if (_dmTapActionTimer) clearTimeout(_dmTapActionTimer);
-            _dmTapLastId = dmId;
             var userId = item.dataset.userId;
             var username = item.dataset.username;
-            var isTrusted = e.isTrusted;
-            _dmTapActionTimer = setTimeout(function () {
-                _dmTapActionTimer = null;
-                _dmTapLastId = null;
-                if (isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
-                    try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
-                }
-                selectDmChannel(dmId, userId, username, item);
-            }, _DM_DOUBLE_TAP_MS);
+            if (e.isTrusted && window.VoiceManager && window.VoiceManager.exitVoiceChannelView) {
+                try { window.VoiceManager.exitVoiceChannelView(); } catch (_) {}
+            }
+            selectDmChannel(dmId, userId, username, item);
         });
         // Right-click context menu for mute/unmute
         item.addEventListener('contextmenu', function (e) {
-            if (_dmDragTimerPending) return; // suppress during long-press
             e.preventDefault();
             e.stopPropagation();
             var dmId = item.dataset.dmId;
@@ -21078,7 +21236,6 @@ function renderDmSidebar() {
     });
     
     // DM drag-to-reorder
-    var _dmDragTimerPending = false; // true while any DM long-press timer is ticking
     document.querySelectorAll('.dm-item[data-dm-id]').forEach(function(el) {
         el.draggable = true;
         el.addEventListener('dragstart', function(e) {
@@ -21090,87 +21247,58 @@ function renderDmSidebar() {
         el.addEventListener('dragend', function() {
             endDmDrag();
         });
-        // Touch drag support for mobile — mirrors the server rail's
-        // setupTouchDragItem but targets DM gaps instead of server gaps.
+        // Touch gesture for mobile — the same hold-or-drag rule the rail uses
+        // (window.attachHoldGesture), targeting DM gaps instead of server gaps.
         (function () {
-            var LONG_PRESS_MS = 350;
-            var st = { timer: null, active: false, ghost: null, id: '', startX: 0, startY: 0, lastX: 0, lastY: 0 };
-            el.addEventListener('touchstart', function (e) {
-                var t = e.touches[0];
-                if (!t) return;
-                st.id = el.dataset.dmId || '';
-                if (!st.id) return;
-                el.draggable = false;
-                st.startX = st.lastX = t.clientX;
-                st.startY = st.lastY = t.clientY;
-                _dmDragTimerPending = true;
-                st.timer = setTimeout(function () {
-                    st.timer = null;
-                    _dmDragTimerPending = false;
-                    st.active = true;
+            var st = { ghost: null, id: '' };
+            window.attachHoldGesture(el, {
+                draggableEl: el,
+                admit: function () {
+                    st.id = el.dataset.dmId || '';
+                    return !!st.id;
+                },
+                onHold: function (x, y) {
+                    showDmContextMenu(window.touchMenuEvent(x, y), st.id, el.dataset.username || 'user');
+                },
+                onDragStart: function (x, y) {
                     _dmTouchDragActive = true;
                     el.classList.add('dragging');
                     beginDmDrag(el);
-                    st.ghost = makeTouchGhost(el, st.lastX, st.lastY);
-                    if (window.boxBuzz) window.boxBuzz(30);                }, LONG_PRESS_MS);
-            }, { passive: false });
-            // Suppress browser context menu during long-press on DM items
-            el.addEventListener('contextmenu', function (e) {
-                if (st.timer || st.active) { e.preventDefault(); }
-            });
-            el.addEventListener('touchmove', function (e) {
-                var t = e.touches[0];
-                if (t) { st.lastX = t.clientX; st.lastY = t.clientY; }
-
-                if (st.timer) {
-                    var movePx = window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
-                    if (t && (Math.abs(t.clientX - st.startX) > movePx || Math.abs(t.clientY - st.startY) > movePx)) {
-                        clearTimeout(st.timer); st.timer = null;
-                        _dmDragTimerPending = false;
+                    st.ghost = makeTouchGhost(el, x, y);
+                    if (window.boxBuzz) window.boxBuzz(30);
+                },
+                onDragMove: function (x, y) {
+                    moveTouchGhost(st.ghost, x, y);
+                    // Auto-scroll the DM list when dragging near its edges
+                    var dmList = document.getElementById('dm-list');
+                    if (dmList) {
+                        var rect = dmList.getBoundingClientRect();
+                        var EDGE = 44;
+                        var MAX = 18;
+                        if (y < rect.top + EDGE && y >= rect.top - 24) {
+                            var up = (rect.top + EDGE - y) / EDGE;
+                            dmList.scrollTop -= Math.ceil(Math.max(0, Math.min(1, up)) * MAX);
+                        } else if (y > rect.bottom - EDGE && y <= rect.bottom + 24) {
+                            var down = (y - (rect.bottom - EDGE)) / EDGE;
+                            dmList.scrollTop += Math.ceil(Math.max(0, Math.min(1, down)) * MAX);
+                        }
                     }
-                }
-                if (!st.active) return;
-                e.preventDefault();
-                moveTouchGhost(st.ghost, st.lastX, st.lastY);
-                // Auto-scroll the DM list when dragging near its edges
-                var dmList = document.getElementById('dm-list');
-                if (dmList) {
-                    var rect = dmList.getBoundingClientRect();
-                    var EDGE = 44;
-                    var MAX = 18;
-                    if (st.lastY < rect.top + EDGE && st.lastY >= rect.top - 24) {
-                        var up = (rect.top + EDGE - st.lastY) / EDGE;
-                        dmList.scrollTop -= Math.ceil(Math.max(0, Math.min(1, up)) * MAX);
-                    } else if (st.lastY > rect.bottom - EDGE && st.lastY <= rect.bottom + 24) {
-                        var down = (st.lastY - (rect.bottom - EDGE)) / EDGE;
-                        dmList.scrollTop += Math.ceil(Math.max(0, Math.min(1, down)) * MAX);
-                    }
-                }
-                var slot = dmSlotAtY(st.lastY);
-                clearDmDragIndicators(slot.gap);
-                if (slot.gap) slot.gap.classList.add('drop-active');
-            }, { passive: false });
-            el.addEventListener('touchend', function (e) {
-                el.draggable = true;
-                _dmDragTimerPending = false;
-                if (st.timer) { clearTimeout(st.timer); st.timer = null; }
-                if (!st.active) { _dmTouchDragActive = false; return; }
-                st.active = false;
-                _dmTouchDragActive = false;
-                if (st.ghost) { st.ghost.remove(); st.ghost = null; }
-                var t = e.changedTouches[0];
-                var afterDmId = t ? dmSlotAtY(t.clientY).afterDmId : '';
-                endDmDrag();
-                applyDmGapDrop(st.id, afterDmId);
-            });
-            el.addEventListener('touchcancel', function () {
-                el.draggable = true;
-                if (st.timer) { clearTimeout(st.timer); st.timer = null; }
-                if (!st.active) { _dmTouchDragActive = false; return; }
-                st.active = false;
-                _dmTouchDragActive = false;
-                if (st.ghost) { st.ghost.remove(); st.ghost = null; }
-                endDmDrag();
+                    var slot = dmSlotAtY(y);
+                    clearDmDragIndicators(slot.gap);
+                    if (slot.gap) slot.gap.classList.add('drop-active');
+                },
+                onDragEnd: function (x, y) {
+                    _dmTouchDragActive = false;
+                    if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+                    var afterDmId = dmSlotAtY(y).afterDmId;
+                    endDmDrag();
+                    applyDmGapDrop(st.id, afterDmId);
+                },
+                onCancel: function () {
+                    _dmTouchDragActive = false;
+                    if (st.ghost) { st.ghost.remove(); st.ghost = null; }
+                    endDmDrag();
+                },
             });
         })();
     });
@@ -22293,6 +22421,8 @@ div.querySelectorAll('.file-preview').forEach((container) => {
         insertMessageChronologically(list, div, msg);
         list.scrollTop = list.scrollHeight;
     }
+    // Bounded history: never let one channel grow an unbounded row count.
+    _scheduleMessagePrune();
 }
 
 async function sendDmMessage() {
@@ -24666,27 +24796,28 @@ function highlightBatch(text, c) {
     const lines = text.split('\n');
     const out = [];
     const KW = /\b(echo|set|setlocal|endlocal|if|else|else if|for|in|do|goto|call|shift|exit|\/b|pause|cls|cd|chdir|mkdir|md|rmdir|rd|copy|move|del|erase|ren|rename|type|find|findstr|more|sort|title|color|mode|prompt|pushd|popd|start|choice|errorlevel|defined|not|exist|equ|neq|lss|leq|gtr|geq|ver|date|time|dir|attrib|fc|comp|xcopy|robocopy|tree)\b/gi;
+    const store = [];
     for (const raw of lines) {
         let line = raw;
         // rem / :: comments (to end of line)
-        line = line.replace(/^(\s*)(::.*|rem\b.*)$/i, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
+        line = hlPass(line, store, /^(\s*)(::.*|rem\b.*)$/i, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
         // labels :name
-        line = line.replace(/^(:[A-Za-z_][\w]*)/, '<span style="color:' + (c.label || c.tag) + ';font-weight:bold">$1</span>');
+        line = hlPass(line, store, /^(:[A-Za-z_][\w]*)/, '<span style="color:' + (c.label || c.tag) + ';font-weight:bold">$1</span>');
         // %var% and !var! variables
-        line = line.replace(/(%[A-Za-z_][\w]*%|![A-Za-z_][\w]*!)/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
+        line = hlPass(line, store, /(%[A-Za-z_][\w]*%|![A-Za-z_][\w]*!)/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
         // strings
-        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
         // numbers
-        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
         // keywords
-        line = line.replace(KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
+        line = hlPass(line, store, KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
         // flags /switches
-        line = line.replace(/(\/[A-Za-z][\w:]*)/g, '<span style="color:' + (c.flag || c.attr) + '">$1</span>');
+        line = hlPass(line, store, /(\/[A-Za-z][\w:]*)/g, '<span style="color:' + (c.flag || c.attr) + '">$1</span>');
         // operators: && || | > >> < ( )
-        line = line.replace(/(&amp;&amp;|\|\||&gt;&gt;|&lt;&lt;|&gt;|&lt;|\||[\(\)])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
+        line = hlPass(line, store, /(&amp;&amp;|\|\||&gt;&gt;|&lt;&lt;|&gt;|&lt;|\||[\(\)])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
         out.push(line);
     }
-    return out.join('\n');
+    return hlExpand(out.join('\n'), store);
 }
 
 function highlightVbScript(text, c) {
@@ -24694,119 +24825,125 @@ function highlightVbScript(text, c) {
     const out = [];
     const KW = /\b(Option|Explicit|Dim|Set|Const|If|Then|Else|ElseIf|End|For|Each|Next|While|Wend|Do|Loop|Until|Select|Case|Function|Sub|Call|Exit|On|Error|Resume|True|False|Nothing|Null|Empty|And|Or|Not|Mod|Is|With|Class|Property|Get|Let|ByRef|ByVal|Public|Private|Static|ReDim|Preserve)\b/gi;
     const BUILTIN = /\b(WScript|MsgBox|InputBox|CreateObject|GetObject|Err|Date|Time|Now|Len|Left|Right|Mid|UCase|LCase|Trim|Replace|InStr|InStrRev|Split|Join|Array|IsArray|IsDate|IsEmpty|IsNull|IsNumeric|IsObject|TypeName|CStr|CInt|CLng|CDbl|CBool|CDate|Rnd|Randomize|Abs|Int|Fix|Sgn|Sqr|Round|FormatNumber|FormatDateTime|Hex|Oct|Asc|Chr|FileSystemObject|Scripting|Dictionary)\b/gi;
+    const store = [];
     for (const raw of lines) {
         let line = raw;
         // ' comments (to end of line)
-        line = line.replace(/(&#39;.*|'.*)$/, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+        line = hlPass(line, store, /(&#39;.*|'.*)$/, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
         // strings
-        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
         // numbers
-        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
         // builtins (function-like objects/methods)
-        line = line.replace(BUILTIN, '<span style="color:' + (c.builtin || c.function) + '">$1</span>');
+        line = hlPass(line, store, BUILTIN, '<span style="color:' + (c.builtin || c.function) + '">$1</span>');
         // keywords
-        line = line.replace(KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
+        line = hlPass(line, store, KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
         // operators
-        line = line.replace(/(&lt;=|&gt;=|&lt;&gt;|&lt;|&gt;|[+\-*/\\^&=])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
+        line = hlPass(line, store, /(&lt;=|&gt;=|&lt;&gt;|&lt;|&gt;|[+\-*/\\^&=])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
         out.push(line);
     }
-    return out.join('\n');
+    return hlExpand(out.join('\n'), store);
 }
 
 function highlightPowershell(text, c) {
     // Process in one pass so strings/here-strings/comments aren't re-tokenized.
+    const store = [];
     let result = text;
     // Block comments <# ... #>
-    result = result.replace(/(&lt;#[\s\S]*?#&gt;)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = hlPass(result, store, /(&lt;#[\s\S]*?#&gt;)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
     const lines = result.split('\n');
     const out = [];
     const KW = /\b(function|param|if|else|elseif|for|foreach|while|do|until|switch|case|default|break|continue|return|try|catch|finally|throw|new|class|enum|in|begin|process|end|filter|workflow|trap|exit|using|module|import|export|from|static|this|base|true|false|null)\b/gi;
     for (const raw of lines) {
         let line = raw;
         // line comments # (only when not inside a string — handled by string pass below)
-        line = line.replace(/(#[^"']*)$/, function (m) {
-            if (/<span/.test(m)) return m;
+        line = hlPass(line, store, /(#[^"']*)$/, function (m) {
             return '<span style="color:' + c.comment + ';font-style:italic">' + m + '</span>';
         });
         // here-strings @"..."@ / @'...'@
-        line = line.replace(/(@&quot;[\s\S]*?&quot;@|@"[\s\S]*?"@|@&#39;[\s\S]*?&#39;@|@'[\s\S]*?'@)/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(@&quot;[\s\S]*?&quot;@|@"[\s\S]*?"@|@&#39;[\s\S]*?&#39;@|@'[\s\S]*?'@)/g, '<span style="color:' + c.string + '">$1</span>');
         // strings with backtick escapes
-        line = line.replace(/(`(?:[^`\\]|\\.)*`|&quot;(?:[^&]|&quot;)*?&quot;|"(?:[^"\\]|\\.)*"|'[^']*')/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(`(?:[^`\\]|\\.)*`|&quot;(?:[^&]|&quot;)*?&quot;|"(?:[^"\\]|\\.)*"|'[^']*')/g, '<span style="color:' + c.string + '">$1</span>');
         // $variables and ${...}
-        line = line.replace(/(\$\{[^}]*\}|\$[A-Za-z_][\w]*(?:::[A-Za-z_][\w]*)?)/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
+        line = hlPass(line, store, /(\$\{[^}]*\}|\$[A-Za-z_][\w]*(?:::[A-Za-z_][\w]*)?)/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
         // [types] and ::static members
-        line = line.replace(/(\[[A-Za-z_][\w.]*\])/g, '<span style="color:' + (c.type || c.tag) + '">$1</span>');
+        line = hlPass(line, store, /(\[[A-Za-z_][\w.]*\])/g, '<span style="color:' + (c.type || c.tag) + '">$1</span>');
         // cmdlets Verb-Noun
-        line = line.replace(/\b([A-Z][a-zA-Z]+-[A-Z][a-zA-Z]+)\b/g, '<span style="color:' + (c.function || c.constant) + '">$1</span>');
+        line = hlPass(line, store, /\b([A-Z][a-zA-Z]+-[A-Z][a-zA-Z]+)\b/g, '<span style="color:' + (c.function || c.constant) + '">$1</span>');
         // -flags / -parameters
-        line = line.replace(/(-[A-Za-z][\w]*)/g, '<span style="color:' + (c.flag || c.attr) + '">$1</span>');
+        line = hlPass(line, store, /(-[A-Za-z][\w]*)/g, '<span style="color:' + (c.flag || c.attr) + '">$1</span>');
         // numbers
-        line = line.replace(/\b(\d+\.?\d*(?:[eE][+-]?\d+)?)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+\.?\d*(?:[eE][+-]?\d+)?)\b/g, '<span style="color:' + c.number + '">$1</span>');
         // keywords
-        line = line.replace(KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
+        line = hlPass(line, store, KW, '<span style="color:' + c.keyword + ';font-weight:bold">$1</span>');
         // operators & comparison operators
-        line = line.replace(/\b(-eq|-ne|-gt|-lt|-ge|-le|-like|-notlike|-match|-notmatch|-contains|-notcontains|-and|-or|-not|-band|-bor|-bxor|-shl|-shr)\b/gi, '<span style="color:' + (c.operator || c.keyword) + '">$1</span>');
-        line = line.replace(/(&lt;=|&gt;=|&lt;|&gt;|[+\-*/%=!])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
+        line = hlPass(line, store, /\b(-eq|-ne|-gt|-lt|-ge|-le|-like|-notlike|-match|-notmatch|-contains|-notcontains|-and|-or|-not|-band|-bor|-bxor|-shl|-shr)\b/gi, '<span style="color:' + (c.operator || c.keyword) + '">$1</span>');
+        line = hlPass(line, store, /(&lt;=|&gt;=|&lt;|&gt;|[+\-*/%=!])/g, '<span style="color:' + (c.operator || c.punctuation) + '">$1</span>');
         out.push(line);
     }
-    return out.join('\n');
+    return hlExpand(out.join('\n'), store);
 }
 
 function highlightIni(text, c) {
     const lines = text.split('\n');
     const out = [];
+    const store = [];
     for (const raw of lines) {
         let line = raw;
         // ; and # comments
-        line = line.replace(/^(\s*)([;#].*)$/, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
+        line = hlPass(line, store, /^(\s*)([;#].*)$/, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
         // [sections]
-        line = line.replace(/^(\s*\[[^\]]*\])/, '<span style="color:' + (c.section || c.tag) + ';font-weight:bold">$1</span>');
+        line = hlPass(line, store, /^(\s*\[[^\]]*\])/, '<span style="color:' + (c.section || c.tag) + ';font-weight:bold">$1</span>');
         // key = value / key: value
-        line = line.replace(/^([A-Za-z0-9_@%+\-.\/\\]+)(\s*[:=]\s*)/, '<span style="color:' + c.key + '">$1</span>$2');
+        line = hlPass(line, store, /^([A-Za-z0-9_@%+\-.\/\\]+)(\s*[:=]\s*)/, '<span style="color:' + c.key + '">$1</span>$2');
         // strings
-        line = line.replace(/(&quot;.*?&quot;|".*?"|'.*?')/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(&quot;.*?&quot;|".*?"|'.*?')/g, '<span style="color:' + c.string + '">$1</span>');
         // numbers
-        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
         // booleans
-        line = line.replace(/\b(true|false|yes|no|on|off|enabled|disabled)\b/gi, '<span style="color:' + (c.boolean || c.constant) + '">$1</span>');
+        line = hlPass(line, store, /\b(true|false|yes|no|on|off|enabled|disabled)\b/gi, '<span style="color:' + (c.boolean || c.constant) + '">$1</span>');
         out.push(line);
     }
-    return out.join('\n');
+    return hlExpand(out.join('\n'), store);
 }
 
 function highlightRegistry(text, c) {
     const lines = text.split('\n');
     const out = [];
+    const store = [];
     for (const raw of lines) {
         let line = raw;
         // ; comments
-        line = line.replace(/^(\s*)(;.*)$/, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
+        line = hlPass(line, store, /^(\s*)(;.*)$/, '$1<span style="color:' + c.comment + ';font-style:italic">$2</span>');
         // [HKEY_...] sections
-        line = line.replace(/^(\s*\[[^\]]*\])/, '<span style="color:' + (c.section || c.tag) + ';font-weight:bold">$1</span>');
+        line = hlPass(line, store, /^(\s*\[[^\]]*\])/, '<span style="color:' + (c.section || c.tag) + ';font-weight:bold">$1</span>');
         // "value name" = data
-        line = line.replace(/^("[^"]*")(\s*=)/, '<span style="color:' + c.key + '">$1</span>$2');
+        line = hlPass(line, store, /^("[^"]*")(\s*=)/, '<span style="color:' + c.key + '">$1</span>$2');
         // data types dword:/hex:/qword:/binary:/sz:
-        line = line.replace(/\b(dword|hex|qword|binary|sz|expand)\s*:/gi, '<span style="color:' + (c.type || c.constant) + ';font-weight:bold">$1</span>:');
-        // hex numbers
-        line = line.replace(/\b(?:0x)?[0-9a-fA-F]{2}(?:,[0-9a-fA-F]{2})*\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(dword|hex|qword|binary|sz|expand)\s*:/gi, '<span style="color:' + (c.type || c.constant) + ';font-weight:bold">$1</span>:');
+        // hex numbers — the capture group is new: without one the `$1` below had
+        // nothing to expand to, so every hex byte in a .reg file was replaced by
+        // the literal text "$1".
+        line = hlPass(line, store, /\b((?:0x)?[0-9a-fA-F]{2}(?:,[0-9a-fA-F]{2})*)\b/g, '<span style="color:' + c.number + '">$1</span>');
         // strings
-        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
         // plain numbers
-        line = line.replace(/\b(\d+)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+)\b/g, '<span style="color:' + c.number + '">$1</span>');
         out.push(line);
     }
-    return out.join('\n');
+    return hlExpand(out.join('\n'), store);
 }
 
 function highlightLog(text, c) {
     const lines = text.split('\n');
     const out = [];
+    const store = [];
     for (const raw of lines) {
         let line = raw;
         // ISO timestamps 2026-07-31T10:34:27Z / with space / date only
-        line = line.replace(/\b(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b/g, '<span style="color:' + (c.timestamp || c.constant) + '">$1</span>');
+        line = hlPass(line, store, /\b(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b/g, '<span style="color:' + (c.timestamp || c.constant) + '">$1</span>');
         // log levels
-        line = line.replace(/\b(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL|SEVERE|PANIC)\b/g, function (m, lvl) {
+        line = hlPass(line, store, /\b(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL|SEVERE|PANIC)\b/g, function (m, lvl) {
             var col = (c.level || c.keyword);
             if (/WARN|WARNING/.test(lvl)) col = '#e5c07b';
             if (/ERROR|ERR|FATAL|CRITICAL|SEVERE|PANIC/.test(lvl)) col = '#e06c75';
@@ -24814,37 +24951,38 @@ function highlightLog(text, c) {
             return '<span style="color:' + col + ';font-weight:bold">' + lvl + '</span>';
         });
         // IP addresses
-        line = line.replace(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g, '<span style="color:' + (c.ip || c.number) + '">$1</span>');
+        line = hlPass(line, store, /\b(\d{1,3}(?:\.\d{1,3}){3})\b/g, '<span style="color:' + (c.ip || c.number) + '">$1</span>');
         // bracketed [tags]
-        line = line.replace(/(\[[^\]]*\])/g, '<span style="color:' + (c.punctuation || c.comment) + '">$1</span>');
+        line = hlPass(line, store, /(\[[^\]]*\])/g, '<span style="color:' + (c.punctuation || c.comment) + '">$1</span>');
         // strings
-        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
         // numbers
-        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
         out.push(line);
     }
-    return out.join('\n');
+    return hlExpand(out.join('\n'), store);
 }
 
 function highlightCsv(text, c) {
     const lines = text.split('\n');
     const delim = text.indexOf('\t') !== -1 ? '\t' : ',';
+    const store = [];
     const out = lines.map(function (raw, idx) {
         let line = raw;
         // strings
-        line = line.replace(/(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(&quot;.*?&quot;|".*?")/g, '<span style="color:' + c.string + '">$1</span>');
         // numbers
-        line = line.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
         // delimiters
         const d = delim === '\t' ? '\t' : ',';
-        line = line.split(d).join('<span style="color:' + (c.delimiter || c.punctuation) + '">' + d + '</span>');
+        line = hlSealTags(line, store).split(d).join(hlProtect(store, '<span style="color:' + (c.delimiter || c.punctuation) + '">' + d + '</span>'));
         // header row emphasis
         if (idx === 0 && line.length > 0) {
-            line = '<span style="color:' + (c.header || c.key) + ';font-weight:bold">' + line + '</span>';
+            line = hlProtect(store, '<span style="color:' + (c.header || c.key) + ';font-weight:bold">') + line + hlProtect(store, '</span>');
         }
         return line;
     });
-    return out.join('\n');
+    return hlExpand(out.join('\n'), store);
 }
 
 // ── In-depth programming-language highlighters (js/ts/py/c/cpp/java/cs) ─────
@@ -25479,51 +25617,127 @@ function highlightSyntax(text, filename, mime) {
     return highlightGeneric(escaped, lang, c);
 }
 
+// ── Markup protection for the highlighters ───────────────────────────────────
+// Every highlighter below colours code with a sequence of plain string
+// replacements, and after the first one the text contains markup of the
+// highlighter's own making — `<span style="color:#e06c75">`. A later, looser
+// pattern then matches *inside* that markup and shreds it: the number pass
+// wraps the digits of the colour it just wrote, a `#`-comment pass eats the
+// rest of the line from `#e06c75` on, and an HTML attribute pass turns
+// `style=` into a nested tag. What the reader gets is a wall of
+// `style="color:#98c379"` instead of their code — which is exactly what a
+// .css, .html, .yaml, .ini, .sh or .log file looked like in the full-screen
+// viewer while .js and .py looked fine.
+//
+// So each pass goes through `hlPass`, which seals the tags it wrote into
+// private-use markers before the next pass runs, and `hlExpand` restores them
+// at the end. The marker is a run of `\uE000` whose run length indexes a
+// per-highlight store, closed by `\uE001`: it is not a word character, not a
+// digit, not whitespace and not in any punctuation set these patterns use, so
+// no pass can match one — and the terminating `\uE001` means two adjacent
+// markers can never merge into a single, wrong index. The text *inside* the
+// spans is left visible, so a later pass may still nest a colour inside one
+// (harmless: the inner span wins and the characters are untouched).
+var HL_MARK = '\uE000';
+var HL_SEP = '\uE001';
+var HL_MARK_RE = /\uE000+\uE001/g;
+
+function hlProtect(store, html) {
+    store.push(html);
+    return new Array(store.length + 1).join(HL_MARK) + HL_SEP;
+}
+
+/** Turn the store's markers back into markup. The last step of every highlighter. */
+function hlExpand(text, store) {
+    if (!store.length || text.indexOf(HL_MARK) === -1) return text;
+    return text.replace(HL_MARK_RE, function (m) { return store[m.length - 2] || ''; });
+}
+
+/** Hide every tag currently in `text` behind a marker (contents stay put). */
+function hlSealTags(text, store) {
+    if (text.indexOf('<span') === -1) return text;
+    return text.replace(/<span[^>]*>|<\/span>/g, function (m) { return hlProtect(store, m); });
+}
+
+/**
+ * `$1`..`$9` in a template, the way `String.prototype.replace` expands them
+ * when the *template* is the second argument. Needed because a pass's markup is
+ * expanded here (so it can be sealed) rather than by the engine.
+ */
+function hlTemplate(tmpl, args) {
+    if (tmpl.indexOf('$') === -1) return tmpl;
+    return tmpl.replace(/\$(\d)/g, function (m, d) {
+        var v = args[+d];
+        return v == null ? m : v;
+    });
+}
+
+/**
+ * One highlighting pass, with everything it writes sealed from later passes.
+ *
+ * `tpl` is either the same replacement template the pass always used
+ * (`'<span style="color:' + c.key + '">$1</span>'`) or, for the few passes that
+ * pick a colour per match, the same function — which may also return a template
+ * with `$n` in it.
+ */
+function hlPass(text, store, re, tpl) {
+    var out = text.replace(re, function () {
+        var args = Array.prototype.slice.call(arguments, 0, -2);
+        var html = typeof tpl === 'function' ? tpl.apply(null, args) : hlTemplate(tpl, args);
+        return typeof html === 'string' ? html : String(html);
+    });
+    return hlSealTags(out, store);
+}
+
 function highlightHtml(text, c) {
+    const store = [];
     let result = text;
-    result = result.replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
-    result = result.replace(/(&lt;!\[CDATA\[[\s\S]*?\]\]&gt;)/g, '<span style="color:' + (c.cdata || c.comment) + '">$1</span>');
-    result = result.replace(/(&lt;\/?)([\w:-]+)/g, '$1<span style="color:' + c.tag + '">$2</span>');
-    result = result.replace(/\s([\w:-]+)(=)/g, ' <span style="color:' + (c.attribute || c.attr) + '">$1</span>$2');
-    result = result.replace(/(=)(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"[^"]*?"|'[^']*?')/g, '$1<span style="color:' + c.string + '">$2</span>');
-    result = result.replace(/(&amp;#\d+;|&amp;#x[\da-f]+;|&amp;\w+;)/g, '<span style="color:' + (c.entity || c.constant) + '">$1</span>');
-    return result;
+    result = hlPass(result, store, /(&lt;!--[\s\S]*?--&gt;)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = hlPass(result, store, /(&lt;!\[CDATA\[[\s\S]*?\]\]&gt;)/g, '<span style="color:' + (c.cdata || c.comment) + '">$1</span>');
+    result = hlPass(result, store, /(&lt;\/?)([\w:-]+)/g, '$1<span style="color:' + c.tag + '">$2</span>');
+    result = hlPass(result, store, /\s([\w:-]+)(=)/g, ' <span style="color:' + (c.attribute || c.attr) + '">$1</span>$2');
+    result = hlPass(result, store, /(=)(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"[^"]*?"|'[^']*?')/g, '$1<span style="color:' + c.string + '">$2</span>');
+    result = hlPass(result, store, /(&amp;#\d+;|&amp;#x[\da-f]+;|&amp;\w+;)/g, '<span style="color:' + (c.entity || c.constant) + '">$1</span>');
+    return hlExpand(result, store);
 }
 
 function highlightJson(text, c) {
+    const store = [];
     let result = text;
-    result = result.replace(/(&quot;[^&]*?&quot;|"[^"]*?")\s*:/g, '<span style="color:' + c.key + '">$1</span>:');
-    result = result.replace(/:\s*(&quot;[^&]*?&quot;|"[^"]*?")/g, ': <span style="color:' + c.string + '">$1</span>');
-    result = result.replace(/:\s*(\d+\.?\d*)/g, ': <span style="color:' + c.number + '">$1</span>');
-    result = result.replace(/:\s*(true|false)/g, ': <span style="color:' + c.boolean + '">$1</span>');
-    result = result.replace(/:\s*(null)/g, ': <span style="color:' + c.null + '">$1</span>');
-    return result;
+    result = hlPass(result, store, /(&quot;[^&]*?&quot;|"[^"]*?")\s*:/g, '<span style="color:' + c.key + '">$1</span>:');
+    result = hlPass(result, store, /:\s*(&quot;[^&]*?&quot;|"[^"]*?")/g, ': <span style="color:' + c.string + '">$1</span>');
+    result = hlPass(result, store, /:\s*(\d+\.?\d*)/g, ': <span style="color:' + c.number + '">$1</span>');
+    result = hlPass(result, store, /:\s*(true|false)/g, ': <span style="color:' + c.boolean + '">$1</span>');
+    result = hlPass(result, store, /:\s*(null)/g, ': <span style="color:' + c.null + '">$1</span>');
+    return hlExpand(result, store);
 }
 
 function highlightCss(text, c) {
+    const store = [];
     let result = text;
-    result = result.replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
-    result = result.replace(/(!important)/g, '<span style="color:' + (c.important || '#e06c75') + ';font-weight:bold">$1</span>');
-    result = result.replace(/([\.\#][\w-]+)(\s*\{)/g, '<span style="color:' + (c.selector || c.tag) + '">$1</span>$2');
-    result = result.replace(/([\w-]+)\s*:/g, '<span style="color:' + c.property + '">$1</span>:');
-    result = result.replace(/:\s*([^;{}\n]+)/g, ': <span style="color:' + c.string + '">$1</span>');
-    result = result.replace(/(\d+\.?\d*(?:px|em|rem|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc|s|ms|deg|rad|grad|turn|fr)?)/g, '<span style="color:' + (c.unit || c.number) + '">$1</span>');
-    result = result.replace(/([+#>*~,.]+)/g, '<span style="color:' + (c.operator || '#56b6c2') + '">$1</span>');
-    return result;
+    result = hlPass(result, store, /(\/\*[\s\S]*?\*\/)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = hlPass(result, store, /(!important)/g, '<span style="color:' + (c.important || '#e06c75') + ';font-weight:bold">$1</span>');
+    result = hlPass(result, store, /([\.\#][\w-]+)(\s*\{)/g, '<span style="color:' + (c.selector || c.tag) + '">$1</span>$2');
+    result = hlPass(result, store, /([\w-]+)\s*:/g, '<span style="color:' + c.property + '">$1</span>:');
+    result = hlPass(result, store, /:\s*([^;{}\n]+)/g, ': <span style="color:' + c.string + '">$1</span>');
+    result = hlPass(result, store, /(\d+\.?\d*(?:px|em|rem|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc|s|ms|deg|rad|grad|turn|fr)?)/g, '<span style="color:' + (c.unit || c.number) + '">$1</span>');
+    result = hlPass(result, store, /([+#>*~,.]+)/g, '<span style="color:' + (c.operator || '#56b6c2') + '">$1</span>');
+    return hlExpand(result, store);
 }
 
 function highlightKeyValue(text, c) {
+    const store = [];
     let result = text;
-    result = result.replace(/(#.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
-    result = result.replace(/(&amp;[\w-]+)/g, '<span style="color:' + (c.anchor || '#56b6c2') + '">$1</span>');
-    result = result.replace(/(\*[\w-]+)/g, '<span style="color:' + (c.alias || '#56b6c2') + '">$1</span>');
-    result = result.replace(/^([\w.-]+)(\s*[:=])/gm, '<span style="color:' + c.key + '">$1</span>$2');
-    result = result.replace(/(&lt;[\w.-]+&gt;|!![\w.-]+)/g, '<span style="color:' + (c.tag || c.type) + '">$1</span>');
-    result = result.replace(/(&quot;[^&]*?&quot;|"[^"]*?"|'[^']*?')/g, '<span style="color:' + c.string + '">$1</span>');
-    result = result.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
-    result = result.replace(/\b(true|false|null|none|~|inf|-inf|nan)\b/gi, '<span style="color:' + c.boolean + '">$1</span>');
-    result = result.replace(/(~~[\w-]+)/g, '<span style="color:' + (c.merge || c.boolean) + '">$1</span>');
-    return result;
+    result = hlPass(result, store, /(#.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+    result = hlPass(result, store, /(&amp;[\w-]+)/g, '<span style="color:' + (c.anchor || '#56b6c2') + '">$1</span>');
+    result = hlPass(result, store, /(\*[\w-]+)/g, '<span style="color:' + (c.alias || '#56b6c2') + '">$1</span>');
+    result = hlPass(result, store, /^([\w.-]+)(\s*[:=])/gm, '<span style="color:' + c.key + '">$1</span>$2');
+    result = hlPass(result, store, /(&lt;[\w.-]+&gt;|!![\w.-]+)/g, '<span style="color:' + (c.tag || c.type) + '">$1</span>');
+    result = hlPass(result, store, /(&quot;[^&]*?&quot;|"[^"]*?"|'[^']*?')/g, '<span style="color:' + c.string + '">$1</span>');
+    result = hlPass(result, store, /\b(\d+\.?\d*)\b/g, '<span style="color:' + c.number + '">$1</span>');
+    result = hlPass(result, store, /\b(true|false|null|none|~|inf|-inf|nan)\b/gi, '<span style="color:' + c.boolean + '">$1</span>');
+    result = hlPass(result, store, /(~~[\w-]+)/g, '<span style="color:' + (c.merge || c.boolean) + '">$1</span>');
+    return hlExpand(result, store);
 }
 
 function highlightGeneric(text, lang, c) {
@@ -25555,71 +25769,75 @@ function highlightGeneric(text, lang, c) {
 
     const kw = kwMap[lang] || kwMap.javascript;
 
+    const store = [];
     for (let i = 0; i < lines.length; i++) {
         let line = lines[i];
 
         if (lang === 'c' || lang === 'cpp' || lang === 'java') {
-            line = line.replace(/(#\s*\w+)/g, '<span style="color:' + c.preprocessor + '">$1</span>');
+            line = hlPass(line, store, /(#\s*\w+)/g, '<span style="color:' + c.preprocessor + '">$1</span>');
         }
 
-        line = line.replace(/(\/\/.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
-        line = line.replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+        line = hlPass(line, store, /(\/\/.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+        line = hlPass(line, store, /(\/\*[\s\S]*?\*\/)/g, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
 
         if (lang === 'python' || lang === 'shell' || lang === 'ruby' || lang === 'perl' || lang === 'r') {
-            line = line.replace(/(#.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
+            line = hlPass(line, store, /(#.*$)/gm, '<span style="color:' + c.comment + ';font-style:italic">$1</span>');
         }
 
         if (lang === 'python') {
-            line = line.replace(/(@[\w.]+)/g, '<span style="color:' + c.decorator + ';font-style:italic">$1</span>');
-            line = line.replace(/\b(self|cls)\b/g, '<span style="color:' + (c.self || c.parameter) + ';font-style:italic">$1</span>');
-            line = line.replace(/(__(?:init|name|main|str__|repr__|enter__|exit__|call__|getitem__|setitem__|delitem__|len__|iter__|next__|eq__|ne__|lt__|le__|gt__|ge__|hash__|bool__|add__|sub__|mul__|truediv__|floordiv__|mod__|pow__|and__|or__|xor__|invert__|lshift__|rshift__|abs__|ceil__|floor__|round__|min__|max__|sum__|reversed__|sorted__|enumerate__|zip__|map__|filter__|type__|bases__|mro__|subclasses__|doc__|module__|dict__|class__|annotations__|qualname__|init_subclass__|set_name__|class_getitem__|copy__|deepcopy__|reduce__|getstate__|setstate__|sizeof__| subclasshook__)__)/g, '<span style="color:' + (c.magic || c.function) + ';font-style:italic">$1</span>');
+            line = hlPass(line, store, /(@[\w.]+)/g, '<span style="color:' + c.decorator + ';font-style:italic">$1</span>');
+            line = hlPass(line, store, /\b(self|cls)\b/g, '<span style="color:' + (c.self || c.parameter) + ';font-style:italic">$1</span>');
+            line = hlPass(line, store, /(__(?:init|name|main|str__|repr__|enter__|exit__|call__|getitem__|setitem__|delitem__|len__|iter__|next__|eq__|ne__|lt__|le__|gt__|ge__|hash__|bool__|add__|sub__|mul__|truediv__|floordiv__|mod__|pow__|and__|or__|xor__|invert__|lshift__|rshift__|abs__|ceil__|floor__|round__|min__|max__|sum__|reversed__|sorted__|enumerate__|zip__|map__|filter__|type__|bases__|mro__|subclasses__|doc__|module__|dict__|class__|annotations__|qualname__|init_subclass__|set_name__|class_getitem__|copy__|deepcopy__|reduce__|getstate__|setstate__|sizeof__| subclasshook__)__)/g, '<span style="color:' + (c.magic || c.function) + ';font-style:italic">$1</span>');
         }
 
         if (lang === 'rust') {
-            line = line.replace(/(r#?\w*"[^"]*"#?|r"[^"]*")/g, '<span style="color:' + c.string + '">$1</span>');
-            line = line.replace(/('#?\w+)/g, '<span style="color:' + (c.lifetime || c.type) + ';font-style:italic">$1</span>');
-            line = line.replace(/(#\[.*?\])/g, '<span style="color:' + (c.attribute || c.decorator) + ';font-style:italic">$1</span>');
-            line = line.replace(/\b([a-z_]\w*)!/g, '<span style="color:' + (c.macro || c.function) + '">$1</span>!');
+            line = hlPass(line, store, /(r#?\w*"[^"]*"#?|r"[^"]*")/g, '<span style="color:' + c.string + '">$1</span>');
+            line = hlPass(line, store, /('#?\w+)/g, '<span style="color:' + (c.lifetime || c.type) + ';font-style:italic">$1</span>');
+            line = hlPass(line, store, /(#\[.*?\])/g, '<span style="color:' + (c.attribute || c.decorator) + ';font-style:italic">$1</span>');
+            line = hlPass(line, store, /\b([a-z_]\w*)!/g, '<span style="color:' + (c.macro || c.function) + '">$1</span>!');
         }
 
         if (lang === 'go') {
-            line = line.replace(/(&quot;[^&]*?&quot;|"[^"]*?")/g, function(m) {
+            // The `$1` here is expanded by hlPass: a plain function replacement
+            // does not expand it, which is how every Go string in a file used to
+            // be replaced by the literal text "$1".
+            line = hlPass(line, store, /(&quot;[^&]*?&quot;|"[^"]*?")/g, function(m) {
                 if (m.includes('%')) return '<span style="color:' + (c.format || c.string) + '">$1</span>';
                 return '<span style="color:' + c.string + '">$1</span>';
             });
         }
 
         if (lang === 'shell') {
-            line = line.replace(/(\$[\w{][\w}]*|\$\{[^}]+\})/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
+            line = hlPass(line, store, /(\$[\w{][\w}]*|\$\{[^}]+\})/g, '<span style="color:' + (c.variable || c.parameter) + '">$1</span>');
         }
 
         if (lang === 'ruby') {
-            line = line.replace(/(:[\w!?]+)/g, '<span style="color:' + (c.symbol || c.constant) + '">$1</span>');
-            line = line.replace(/(@@?[\w]+)/g, '<span style="color:' + (c.instance || c.parameter) + '">$1</span>');
+            line = hlPass(line, store, /(:[\w!?]+)/g, '<span style="color:' + (c.symbol || c.constant) + '">$1</span>');
+            line = hlPass(line, store, /(@@?[\w]+)/g, '<span style="color:' + (c.instance || c.parameter) + '">$1</span>');
         }
 
         if (lang === 'perl') {
-            line = line.replace(/([\$@%][\w]+)/g, '<span style="color:' + (c.sigil || c.variable) + '">$1</span>');
+            line = hlPass(line, store, /([\$@%][\w]+)/g, '<span style="color:' + (c.sigil || c.variable) + '">$1</span>');
         }
 
-        line = line.replace(/(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span style="color:' + c.string + '">$1</span>');
+        line = hlPass(line, store, /(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span style="color:' + c.string + '">$1</span>');
 
-        line = line.replace(/\b([A-Z][A-Z_0-9]{2,})\b/g, '<span style="color:' + (c.constant || c.number) + '">$1</span>');
+        line = hlPass(line, store, /\b([A-Z][A-Z_0-9]{2,})\b/g, '<span style="color:' + (c.constant || c.number) + '">$1</span>');
 
-        line = line.replace(kw, '<span style="color:' + c.keyword + '">$1</span>');
+        line = hlPass(line, store, kw, '<span style="color:' + c.keyword + '">$1</span>');
 
-        line = line.replace(/\b(\d+\.?\d*(?:e[+-]?\d+)?(?:f|l|u|ll|ull)?)\b/gi, '<span style="color:' + c.number + '">$1</span>');
+        line = hlPass(line, store, /\b(\d+\.?\d*(?:e[+-]?\d+)?(?:f|l|u|ll|ull)?)\b/gi, '<span style="color:' + c.number + '">$1</span>');
 
-        line = line.replace(/\b([a-zA-Z_]\w*)\s*\(/g, '<span style="color:' + c.function + '">$1</span>(');
+        line = hlPass(line, store, /\b([a-zA-Z_]\w*)\s*\(/g, '<span style="color:' + c.function + '">$1</span>(');
 
-        line = line.replace(/\.([a-zA-Z_]\w*)\b(?!\s*\()/g, '.<span style="color:' + (c.property || c.attr) + '">$1</span>');
+        line = hlPass(line, store, /\.([a-zA-Z_]\w*)\b(?!\s*\()/g, '.<span style="color:' + (c.property || c.attr) + '">$1</span>');
 
-        line = line.replace(/([+\-*/%=!<>&|^~?:]+)/g, '<span style="color:' + (c.operator || '#56b6c2') + '">$1</span>');
+        line = hlPass(line, store, /([+\-*/%=!<>&|^~?:]+)/g, '<span style="color:' + (c.operator || '#56b6c2') + '">$1</span>');
 
         result.push(line);
     }
 
-    return result.join('\n');
+    return hlExpand(result.join('\n'), store);
 }
 
 function renderMarkdown(text) {
@@ -28616,6 +28834,71 @@ function warmDragOut(card) {
         return r;
     });
     return _dragOutPending[info.id];
+}
+
+// ---- Bounded message window -------------------------------------------------
+// The rendered history used to grow forever: #message-list kept every row ever
+// loaded, so layout/hit-testing/paint crept up with the channel, and every blob
+// URL referenced by a row pinned its decrypted bytes in memory. We now keep at
+// most MESSAGE_DOM_SOFT_CAP rows and trim without ever moving what the user is
+// looking at:
+//   * at the bottom -> drop the oldest rows above the viewport (the browser
+//     clamps scrollTop, so the view stays on the newest message), or
+//   * scrolled up   -> drop the newest rows that sit below the viewport, so the
+//     rows on screen keep their position exactly.
+var MESSAGE_DOM_SOFT_CAP = 600;
+var _messagePruneTimer = null;
+
+function _releaseRowObjects(row) {
+    try {
+        var media = row.querySelectorAll('img, video, source');
+        for (var i = 0; i < media.length; i++) {
+            var src = media[i].getAttribute('src') || '';
+            if (src.indexOf('blob:') !== 0) continue;
+            try { URL.revokeObjectURL(src); } catch (_) {}
+            try {
+                var at = blobUrls.indexOf(src);
+                if (at >= 0) blobUrls.splice(at, 1);
+            } catch (_) {}
+        }
+    } catch (_) {}
+}
+
+function pruneMessageWindow(list) {
+    if (!list) return;
+    var rows = list.querySelectorAll('.message');
+    var n = rows.length;
+    if (n <= MESSAGE_DOM_SOFT_CAP) return;
+    var remove = n - MESSAGE_DOM_SOFT_CAP;
+    var atBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 150;
+    var dropped = 0;
+    if (atBottom) {
+        for (var i = 0; i < remove; i++) {
+            _releaseRowObjects(rows[i]);
+            rows[i].remove();
+            dropped++;
+        }
+    } else {
+        var viewBottom = list.scrollTop + list.clientHeight + 200;
+        for (var j = n - 1; j >= 0 && remove > 0; j--) {
+            if (rows[j].offsetTop <= viewBottom) break;
+            _releaseRowObjects(rows[j]);
+            rows[j].remove();
+            remove--;
+            dropped++;
+        }
+    }
+    if (dropped) {
+        try { window.__messageWindowTrimmed = (window.__messageWindowTrimmed || 0) + dropped; } catch (_) {}
+    }
+}
+
+function _scheduleMessagePrune() {
+    if (_messagePruneTimer) return;
+    _messagePruneTimer = setTimeout(function () {
+        _messagePruneTimer = null;
+        pruneMessageWindow(document.getElementById('message-list'));
+    }, 500);
 }
 
 function revokeBlobUrls() {
@@ -32583,7 +32866,7 @@ function getProfilePicUrl(fileId, userId) {
             }
             
             var url = URL.createObjectURL(blob);
-            profilePicCache[cacheKeyForLoad] = url;
+            profilePicCachePut(cacheKeyForLoad, url);
             // Update loaded avatars
             document.querySelectorAll('[data-profile-pic="' + cacheKeyForLoad + '"]').forEach(function (el) {
                 el.src = url;
@@ -34519,7 +34802,7 @@ function getDecryptedFileUrl(fileId, fileKey, callback, userId) {
                     if (decrypted) {
                         var blob = new Blob([decrypted], { type: 'image/png' });
                         var url = URL.createObjectURL(blob);
-                        profilePicCache[cacheKey] = url;
+                        profilePicCachePut(cacheKey, url);
                         callback(url);
                         return;
                     }

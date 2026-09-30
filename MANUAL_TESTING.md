@@ -1052,3 +1052,114 @@ filling. The modal closes at once and nothing keeps loading in the background
 closing with **Esc** and with the **backdrop click**.
 **Expect:** every close is immediate, and repeating open → scroll → close ten
 times leaves the process's memory roughly flat rather than growing each cycle.
+
+## 27. Five fixes: the wipe button everywhere, code that reads as code, selectable text, one hold gesture, a compacting keyboard (0.2.40)
+
+The five reports below were all "it works, except where it matters". Each has an
+automated spec; what follows is how to see each one with your own eyes on a real
+device.
+
+### The wipe button is in the app, in every state, unless you hid it
+
+**Do (the flow that used to fail):** open the desktop app → open the server (`cargo run --manifest-path server/Cargo.toml --release`) → in the app enter the
+address `https://localhost:3443` and connect → **stop the server**, close the app,
+and open it again. It now boots against a saved address whose server is gone.
+
+**Expect:** the round ✕ button is in the bottom-left corner *while the app is
+still trying to load the closed server* — spinner, error page, whatever that
+attempt draws. Press it and the panel opens.\
+Also check the two states that used to bury it: the vault lock screen (a cold
+start with the vault locked) and any "grey screen" left by a failed boot.
+
+**Same in the browser:** there is no such button in a plain browser at all (only
+the desktop app draws it). Settings → Clear All Local Data and Alt+Shift+W still
+work there, by design.
+
+**Try to break it:** press **Hide** in the panel, reload, and reopen the app — it
+comes back when the app is restarted (hiding lives in the window, not on disk),
+and never comes back inside the run you hid it.
+
+### A code file in the full-screen viewer reads as the file
+
+**Do:** attach any source file (`.css`, `.js`, `.html`, `.json`, `.yaml`, `.toml`,
+`.py`, `.sh`, `.ini`) and open it full-screen.
+
+**Expect:** the text you read is the file character for character, with colour on
+top — not a stylesheet of the viewer's own tokens. Select a line with the mouse
+and paste it somewhere: it matches the file.
+
+**Try to break it:** a file whose first line is a comment, a file that contains
+`<span style=` as literal text, and a `.md` file (which is *previewed*, so its
+markers are rendered — that one is intentional).
+
+### Text selects on a desktop and never on a phone
+
+**Do (desktop, with a mouse):** drag across a message body, a pinned message, a
+forwarded message, a message's text preview, the full-screen text viewer, a
+document preview's extracted text, Word pages, a PDF's text layer.
+
+**Expect:** all of them select and copy. The chrome around them does not: display
+names, timestamps, badges, avatars, channel and server rows.
+
+**Do (phone):** the same drags.
+
+**Expect:** nothing selects anywhere; a press on a message stays a tap. The one
+switch both halves read is `html.select-text` (Console:
+`document.documentElement.classList.contains('select-text')`), and it flips live if
+you plug a mouse into the phone.
+
+### One hold gesture: stillness opens the menu, movement starts the drag
+
+**Do (phone):** press and *keep still* on a server icon, a folder header, a
+channel, a category, a DM row or a role row.
+
+**Expect:** after the hold window (500 ms by default) that row's right-click menu
+opens.
+
+**Do:** the same press, but move your finger a few millimetres before the window
+ends.
+
+**Expect:** the drag starts immediately (ghost, drop bands) and no menu opens.
+
+**Settings → Touch** has two dials: *Hold to Open Menu* (300/500/700/1000 ms,
+and the select shows what the code uses) and *Touch Drag* distance (6/10/18/28
+px). Set the hold to 1000 ms and 600 ms must do nothing; set the distance very
+loose and a 14 px drift must stay a hold.
+
+**Try to break it:** double-tap a server icon, a channel, a DM row, the DM strip
+button and the mentions button — nothing opens anywhere. A quick tap still does
+what a tap always did.
+
+### The keyboard compacts the app, and the notch only pushes down names
+
+**Do (phone):** open a channel and tap the message box so the keyboard appears.
+
+**Expect:** the channel name and the top bar stay exactly where they were; the
+message list is what shrinks. Close the keyboard: everything returns.
+
+**Do:** look at the server rail's first row (the DM button) on a notched phone.
+
+**Expect:** it sits at the top of the rail exactly as it always has — the camera
+cutout pushes down the bars that carry *names*, not the rail. (Console:
+`getComputedStyle(document.querySelector('.server-strip')).paddingTop` equals its
+`paddingBottom`; the `.chat-header` padding is larger than the rail's because of
+`env(safe-area-inset-top)`.)
+
+### A long channel does not eat the phone
+
+**Do:** stay in one busy channel and keep scrolling up until you have loaded well
+over a thousand messages.
+
+**Expect:** memory stays flat and scrolling stays smooth — the rendered history
+is capped at 600 rows, the oldest ones are dropped while you are at the bottom,
+and the newest ones while you are reading older history, so nothing you are
+looking at ever moves. Pictures and video in dropped rows release their decrypted
+bytes.
+
+**Console check:** `window.__messageWindowTrimmed` counts the rows that have been
+released; it stops growing once you stop scrolling up.
+
+**Try to break it:** scroll up, load many pages, jump back to the bottom (the
+newest message is still reachable and pinned to the bottom), and use search to
+jump to a message — a trimmed row simply lands you in the channel instead of on
+the row.
