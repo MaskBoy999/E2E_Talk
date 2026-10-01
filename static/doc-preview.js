@@ -311,7 +311,16 @@ var DocPreview = (function () {
         for (var i = 1; i <= MAX_PAGES; i++) {
             var slot = document.createElement('div');
             slot.dataset.page = String(i);
-            slot.style.cssText = 'width:100%;display:flex;justify-content:center;min-height:' + (placeholderH ? placeholderH + 'px' : '0px');
+            // `align-items:flex-start` is the whole point of this line being one
+            // string. The slot is a flex *row*, and a flex item whose cross size
+            // is `auto` is stretched to the line by the default `align-items:
+            // stretch` — which is the canvas (`height:auto`). So a page whose
+            // canvas is not exactly the placeholder's height (a window narrower
+            // than the scaled page clamps its width through `max-width:100%`, and
+            // a mixed-size document differs per page) was drawn stretched
+            // vertically for no reason the user could see. The canvas now keeps
+            // the aspect ratio in its own width/height attributes.
+            slot.style.cssText = 'width:100%;display:flex;justify-content:center;align-items:flex-start;min-height:' + (placeholderH ? placeholderH + 'px' : '0px');
             container.appendChild(slot);
             slots.push(slot);
         }

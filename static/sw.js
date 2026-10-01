@@ -16,14 +16,18 @@
 // app:
 //
 //   1. bump the file's `?v=` in index.html / login.html, because the page asks
-//      for `chat.js?v=75` and a URL that never changes is a cache entry that
+//      for `chat.js?v=79` and a URL that never changes is a cache entry that
 //      never expires; and
 //   2. bump this name, which drops every entry of the previous generation.
 //
 // The fetch handler below no longer trusts a stale entry blindly — it serves
 // the cached copy and refreshes it in the background — but a bump is still what
 // makes the update land on THIS load rather than the next one.
-const CACHE_NAME = 'e2e-chat-v15';
+//
+// v20: `style.css?v=34` — the hover-revealed message receipt is out of flow, so
+// hovering a message no longer pushes it up under the pointer (see the
+// `.msg-status` rules in style.css).
+const CACHE_NAME = 'e2e-chat-v20';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

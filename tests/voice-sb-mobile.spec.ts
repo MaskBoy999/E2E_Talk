@@ -315,7 +315,10 @@ test.describe('Mobile Viewport', () => {
         console.log('Server icons:', icons.length);
         expect(icons.length).toBeGreaterThanOrEqual(2);
 
-        // Simulate long press via JS touch events
+        // Simulate the app's touch gesture: hold past the minimum (150 ms) so
+        // the press is ours, then move — the move is what starts a drag (a hold
+        // on its own opens the right-click menu, and a move before the minimum
+        // is a scroll that starts nothing).
         const ghostCreated = await page.evaluate(() => {
             return new Promise((resolve) => {
                 const icon = document.querySelector('.server-icon[data-id]');
@@ -332,12 +335,24 @@ test.describe('Mobile Viewport', () => {
                 });
                 icon.dispatchEvent(touchStart);
 
-                // Wait for long press timer (350ms) + some buffer
+                // Past the minimum hold, then drift past the Touch Drag distance.
                 setTimeout(() => {
-                    const ghost = document.querySelector('[style*="position:fixed"][style*="z-index:99999"]');
-                    const hasActive = icon.classList.contains('dragging');
-                    resolve({ ghost: !!ghost, dragging: hasActive });
-                }, 600);
+                    icon.dispatchEvent(new TouchEvent('touchmove', {
+                        touches: [new Touch({
+                            identifier: 0,
+                            target: icon,
+                            clientX: rect.left + rect.width / 2,
+                            clientY: rect.top + rect.height / 2 + 24,
+                        })],
+                        bubbles: true,
+                        cancelable: true,
+                    }));
+                    setTimeout(() => {
+                        const ghost = document.querySelector('[style*="position:fixed"][style*="z-index:99999"]');
+                        const hasActive = icon.classList.contains('dragging');
+                        resolve({ ghost: !!ghost, dragging: hasActive });
+                    }, 400);
+                }, 250);
             });
         });
         console.log('Touch drag result:', JSON.stringify(ghostCreated));

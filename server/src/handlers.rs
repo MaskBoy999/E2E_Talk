@@ -7447,6 +7447,12 @@ pub struct UpdateProfileRequest {
     // Encrypted file keys (AES-GCM with identity key) — no plaintext keys accepted
     pub encrypted_pic_key: Option<String>,
     pub pic_key_nonce: Option<String>,
+    // 360x360 preview of the same picture, uploaded as its own encrypted file
+    // and encrypted with its own key. Optional: accounts that never upload one
+    // keep serving the full-resolution picture to every avatar.
+    pub profile_picture_thumb_file_id: Option<String>,
+    pub encrypted_pic_thumb_key: Option<String>,
+    pub pic_thumb_key_nonce: Option<String>,
     pub profile_banner_file_id: Option<String>,
     pub encrypted_banner_key: Option<String>,
     pub banner_key_nonce: Option<String>,
@@ -7479,6 +7485,11 @@ pub async fn get_profile(
     match state.db.get_user_profile(&requested_id) {
         Ok((id, username, profile_picture_file_id, _pph, banner_id, _banner_hash, enc_pic_key, pic_key_nonce, enc_banner_key, banner_key_nonce)) => {
             let encrypted = state.db.get_encrypted_profile(&requested_id).ok().flatten();
+            // 360x360 thumbnail of the same picture, if this account uploaded one.
+            let (thumb_id, thumb_hash, enc_thumb_key, thumb_nonce) = state
+                .db
+                .get_profile_thumb(&requested_id)
+                .unwrap_or((None, None, None, None));
             (StatusCode::OK, Json(serde_json::json!({
                 "id": id,
                 "username": username,
@@ -7486,6 +7497,10 @@ pub async fn get_profile(
                 // Return encrypted file keys (AES-GCM with user's identity key)
                 "encrypted_pic_key": enc_pic_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                 "pic_key_nonce": pic_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "profile_picture_thumb_file_id": thumb_id,
+                "profile_picture_thumb_file_id_hash": thumb_hash,
+                "encrypted_pic_thumb_key": enc_thumb_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                "pic_thumb_key_nonce": thumb_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                 "profile_banner_file_id": banner_id,
                 "encrypted_banner_key": enc_banner_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                 "banner_key_nonce": banner_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
@@ -7545,10 +7560,35 @@ pub async fn update_profile(
         Ok(())
     };
 
+    // The 360x360 thumbnail is a file of its own, so it is deleted separately:
+    // a new picture never inherits the previous picture's thumbnail.
+    let delete_current_thumb = |keep_thumb_id: Option<&str>| {
+        let old_thumb_id = state.db.get_profile_thumb(&user_id).ok().and_then(|t| t.0);
+        if let Some(old_id) = old_thumb_id {
+            if let Some(k) = keep_thumb_id {
+                if k == old_id {
+                    return;
+                }
+            }
+            if let Ok(old_info) = state.db.delete_file_record(&old_id) {
+                for i in 0..old_info.chunk_count {
+                    let chunk_path = format!("{}/{}/{}.enc", state.config.upload_dir, old_id, i);
+                    let _ = std::fs::remove_file(&chunk_path);
+                }
+                let dir = format!("{}/{}", state.config.upload_dir, old_id);
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
+    };
+
     // Handle profile picture removal
     if req.remove_picture.unwrap_or(false) {
         let _ = delete_current_pic(None);
+        delete_current_thumb(None);
         if let Err(e) = state.db.update_profile_picture(&user_id, None, None, None) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+        if let Err(e) = state.db.update_profile_thumb(&user_id, None, None, None) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
     }
@@ -7573,10 +7613,39 @@ pub async fn update_profile(
         // Delete old profile pic before setting new one — but only when it's a
         // DIFFERENT file than the one being set (re-sent unchanged ids must not
         // delete the file record we're about to re-assign → FK violation).
+        let new_thumb = req.profile_picture_thumb_file_id.as_deref();
         let _ = delete_current_pic(Some(file_id));
+        delete_current_thumb(new_thumb);
         let enc_key = req.encrypted_pic_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
         let key_nonce = req.pic_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
         if let Err(e) = state.db.update_profile_picture(&user_id, Some(file_id), enc_key.as_deref(), key_nonce.as_deref()) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        }
+        // A picture set without a thumbnail (older client, or the thumb upload
+        // failed) must not keep the previous picture's thumbnail around: it no
+        // longer depicts this user. Clients fall back to the full-size file.
+        if new_thumb.is_none() {
+            let _ = state.db.update_profile_thumb(&user_id, None, None, None);
+        }
+    }
+
+    // Handle the 360x360 profile-picture thumbnail. Same rules as the full-size
+    // picture: it must exist, be complete, and belong to the caller.
+    if let Some(ref thumb_id) = req.profile_picture_thumb_file_id {
+        let file_info = match state.db.get_file_info(thumb_id) {
+            Ok(f) => f,
+            Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Thumbnail file not found"}))).into_response(),
+        };
+        if !file_info.upload_complete {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Thumbnail upload not complete"}))).into_response();
+        }
+        if file_info.uploader_id != user_id {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not your file"}))).into_response();
+        }
+        delete_current_thumb(Some(thumb_id));
+        let enc_thumb_key = req.encrypted_pic_thumb_key.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        let thumb_nonce = req.pic_thumb_key_nonce.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        if let Err(e) = state.db.update_profile_thumb(&user_id, Some(thumb_id), enc_thumb_key.as_deref(), thumb_nonce.as_deref()) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
     }
@@ -7628,6 +7697,10 @@ pub async fn update_profile(
         let (_id, username, profile_picture_file_id, _pph, banner_id, _banner_hash, enc_pic_key, pic_key_nonce, enc_banner_key, banner_key_nonce) = profile;
         let encrypted = state.db.get_encrypted_profile(&user_id).ok().flatten();
         let profile_updated_at = state.db.get_profile_updated_at(&user_id).ok();
+        let (thumb_id, thumb_hash, enc_thumb_key, thumb_nonce) = state
+            .db
+            .get_profile_thumb(&user_id)
+            .unwrap_or((None, None, None, None));
         let profile_msg = serde_json::json!({
             "type": "profile_updated",
             "user_id": user_id,
@@ -7636,6 +7709,10 @@ pub async fn update_profile(
             "profile_picture_file_id_hash": _pph,
             "encrypted_pic_key": enc_pic_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             "pic_key_nonce": pic_key_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "profile_picture_thumb_file_id": thumb_id,
+            "profile_picture_thumb_file_id_hash": thumb_hash,
+            "encrypted_pic_thumb_key": enc_thumb_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            "pic_thumb_key_nonce": thumb_nonce.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             "profile_banner_file_id": banner_id,
             "profile_banner_file_id_hash": _banner_hash,
             "encrypted_banner_key": enc_banner_key.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)),

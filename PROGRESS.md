@@ -1,5 +1,309 @@
 # PROGRESS
 
+## A message selects from where you point, and the app window is never a dead end (0.2.42)
+
+Both reports here are about states the app *looked* right in, and both ship in
+the same 0.2.42 build as the avatar work below — nothing has been released since
+0.2.40, so neither fix had ever reached an installed app before this build.
+
+### 1. Message text selects from its first character
+
+The report: *"selection works if we start somewhere in the middle sometimes but
+not when we start from the start of the message."* It was one bug, and it was
+layout, not selection at all.
+
+- **the message moved out from under the pointer.** Hovering a message reveals
+  its delivery/read receipt (`.msg-status`), which was a **float** that existed
+  only in hover mode. A float that appears grows `.content`, and the message list
+  pins its content to the bottom (`.message-list::before { flex: 1 }`) — so the
+  message was pushed **up** by the receipt's whole height the instant the pointer
+  entered it. Measured: the message text sat at `y=546` at rest and at `y=527`
+  with the pointer on it. A reader aiming at the first line therefore pressed
+  ~19px lower than they aimed, which is the *second* line — the drag "started
+  somewhere in the middle" without them asking for it, and whether it worked came
+  down to whether the pointer already rested on the message. In hover mode the
+  receipt is now out of flow (`position: absolute`, right-aligned at the bottom
+  of the content box — the same place it was already drawn), so revealing it
+  moves nothing. `always` mode is untouched: it is on for every message at once,
+  so there is no state to jump between.
+- **and the guard refused some of what was left.** `selectstart` does not always
+  name an element — Chromium reports the text *node* (or the document) for some
+  drags where it reports the `DIV` for others — and the guard's first line was
+  "no `closest` → refuse". The guard now remembers the press (`pointerdown`,
+  capture) and answers with whichever of the two resolves to an element, so a
+  gesture is decided by **where it started** rather than by which node the
+  browser happened to name. The touch rule is unchanged: the exception is still
+  gated on `(any-pointer: fine)`, so a phone keeps every message unselectable.
+
+`tests/text-selection.spec.ts` gained the case, driving the real mouse: the text
+box must not move when the pointer enters it, and a drag from the **very first
+pixel of the first line** must select that line (and only it). Each half was
+checked to fail when only its own fix is reverted — `574 → 556` for the reflow,
+an empty selection for the guard.
+
+**Verified locally:** `tests/text-selection.spec.ts` 5/5, including the new case;
+the four tests that were already there are unchanged.
+
+### 2. The window with no way out
+
+The report, with a screenshot of the WebView's own `ERR_CONNECTION_REFUSED` page
+in the app window: *"the user who connected a host and then the host stopped
+hosting it completely is stuck without the ability to change host."* 0.2.41 gave
+this state a rescue (the `box:page-alive` beacon plus `watch_page_alive`), and
+this build closes the hole that rescue still had.
+
+- a page that **reported and then went quiet** is rescued after 25s, which covers
+  the reported case: the app was connected, the host died, the page reloaded onto
+  the WebView error page, and that page runs no script at all — so
+  `static/app-overlay.js` never boots there and the always-on "clear all app data"
+  control is missing exactly when it is most needed;
+- a page that has **never reported at all** is now rescued too, once the app has
+  been up past a 40s launch grace and the window has been on screen and silent on
+  the remote address for the full 25s. That is the page that died while the
+  window was minimized or hidden: the launch watchers
+  (`watch_closed_host` / `watch_unconfirmed_host`) had already given up on it, no
+  beacon was ever *missed* because none had ever been recorded, and the user
+  coming back to that window saw the error page with nothing watching it;
+- the watchdog only counts silence while the window is **on screen**
+  (`is_visible()` + `is_minimized()` on desktop), because a minimized window, a
+  window hidden to the tray and a backgrounded Android activity all stop their
+  timers legitimately and say so (`box:page-hidden`);
+- the whole decision is a pure function, `page_has_stopped`, so the rule that
+  decides this is unit-tested rather than assumed — including the boundary where
+  a window has been silent for exactly the timeout, in both directions.
+
+A page that is rescued lands on the bundled `box-setup.html`, which is local and
+is therefore the one page in the app that always has the wipe control; the
+already-stored address is prefilled, so correcting or replacing a host is one
+step from there.
+
+**Verified locally:** `cargo test --release --lib` 14/14 including
+`the_page_watchdog_rescues_a_page_that_has_stopped_and_only_that`; then end to
+end against the real built app (CDP on `E2E_BOX_DEBUG_PORT`, app pointed at
+`https://localhost:3443`):
+
+- a page that is *working* is left alone — the app sat on the live `login.html`
+  for 100 s (well past the 40 s + 25 s that would rescue a page that never
+  reported), which also proves the `box:page-alive` events really do reach the
+  shell across the remote-origin boundary;
+- the reported state recovers by itself: the server was killed and the window
+  reloaded onto the WebView's own *"Hmmm… can't reach this page / localhost
+  refused to connect"* page (`wipe:false`), and the window was back on
+  `box-setup.html` **22 s later** — measured, `t+2s` error page → `t+24s` address
+  screen — with the setup form prefilled and the ✕ clear-all-data control up
+  (`wipe:true`).
+
+The installed app on this machine is still **0.2.40** (`FileVersion 0.2.40`,
+30 Sep), which is why the report stayed open: 0.2.40 rescues only at launch
+(`watch_closed_host`), so a user who was *already* connected when the host stopped
+had nothing watching the window. Nothing between 0.2.40 and this build has been
+released.
+
+### 3. A minimum hold, so scrolling stops picking things up
+
+The third report of this batch, from the same session: *"we need to also add a
+minimum time to hold not just the max to move in that pixel, since scrolling is
+unbearable and causes us to move the draggable items around for no reason."*
+
+The hold gesture had **one** time bound (500 ms, *Hold to Open Menu*) and a
+distance bound (the drag threshold), but no floor under the time: the first pixel
+of movement was allowed to mean *drag*, so the opening pixel of an ordinary
+scroll raced the drag and the rail picked a server up under the thumb.
+
+- **Settings → Touch → Minimum Hold** is the new floor
+  (`#touch-hold-min-ms`, 0 / 50 / 100 / 150 / 200 / 300 ms, default **150**, and
+  it sits directly above the window it belongs to).
+- `window.touchHoldMinMs()` reads it (`touch_hold_min_ms`), clamps it to 0–400 ms,
+  and forces it **below the window** (window − 100 ms) so the drag phase always
+  has room: a floor at or above the window would swallow its own drag phase,
+  because the menu fires while the gesture is still un-armed.
+- the select shows what the code actually *uses* — on a stored value that is no
+  longer offered, and on first run — so it can never claim 150 ms while the
+  gesture waits something else; this is the same rule the window's select already
+  followed, and the same one the media-preview switches follow.
+- `preventDefault` is still issued **only** in the drag phase, so a scroll stays
+  a scroll: the gesture now distinguishes *pending → armed → held → scroll →
+  drag*, and the drag cannot begin until the floor has passed.
+
+**Verified locally:** `tests/long-press-gesture.spec.ts` 7/7 (including *"the
+minimum is its own setting, and it starts at 150 ms"* and the double-tap case),
+`tests/touch-drag-threshold.spec.ts` 5/5 (a drift *before* the minimum is a
+scroll; the same drift under a loose and a tight threshold), and
+`tests/server-rail-dragdrop.spec.ts` 20 passed / 2 skipped — the two skips are the
+pre-existing `test.fixme`s ("the slot above the first entry" and the collapsed
+folder drag), unchanged by this work.
+
+**Files:** `static/style.css`, `static/chat.js`, `static/index.html`
+(`style.css?v=34`), `static/sw.js` (`e2e-chat-v20`), `src-tauri/src/lib.rs`,
+`tests/text-selection.spec.ts`, `tests/long-press-gesture.spec.ts`,
+`tests/touch-drag-threshold.spec.ts`, `tests/server-rail-dragdrop.spec.ts`,
+`tests/voice-sb-mobile.spec.ts`, `tests/role-tiers.spec.ts`,
+`tests/server-rail-scroll.spec.ts`, `PROGRESS.md`, `MANUAL_TESTING.md`
+
+## Avatars stopped being multi-megabyte, and got a switch of their own (0.2.42)
+
+Both reports here are about the same picture: a profile picture that was fetched
+at full resolution by every single avatar slot, and that could not be *not*
+fetched anywhere in the app. This ships on top of 0.2.41's four fixes, which are
+still unreleased and are included in the same build.
+
+### 1. A profile picture is now two files, and the small one is what avatars read
+
+A profile picture is rendered at 32-64px in every place a user actually looks at
+one — message avatars, the DM sidebar, the DM header, the member list, mention
+chips, search results — and at full size in exactly one place: the profile view.
+Sending the original to all of them meant a phone downloaded, decrypted and
+decoded a multi-megapixel image to fill a 36px circle; a server with 50 members
+paid that once per member, per render.
+
+- **the client uploads a second file.** The crop confirm (`processPfpCrop`) draws
+the *same* square the user chose into a 360px canvas — `makePfpThumbBlob`, never
+upscaled, so a small source is not blown up into a bigger file than the original
+— encrypts it with its own random file key through the same chunked scheme, and
+uploads it as its own file. Measured on a real run: the original came to
+**394,196 bytes**, its preview to **64,530** — 6× less to move, and 6× less to
+decode.
+- **the keys never reach the server.** Both files are encrypted client-side; the
+  preview's key is wrapped with the owner's identity key
+  (`encrypted_pic_thumb_key` / `pic_thumb_key_nonce`) exactly like the picture's,
+  and the *raw* preview key rides inside the already-encrypted profile data blob
+  that the DM / server conversation profiles and the key-sync broadcasts carry —
+  so a recipient decrypts it with the key they already share with the owner, and
+  the host still holds nothing it can read.
+- **migration 093** adds `profile_picture_thumb_file_id`,
+  `profile_picture_thumb_file_id_hash`, `encrypted_pic_thumb_key` and
+  `pic_thumb_key_nonce` to `users`, plus the by-hash lookup so a preview can be
+downloaded by its blind hash like any other profile file. `PATCH /api/profile`
+  validates the preview file the same way it validates the picture (exists,
+  complete, **owned** — someone else's file is a 403) and deletes the previous
+  preview from disk with the file it belonged to; `remove_picture` clears both.
+  `GET /api/profile/{id}` and the `profile_updated` broadcast carry the four
+  fields, so a client learns the preview id from the server even before a shared
+  blob arrives.
+
+### 2. Every avatar reads the preview, the profile view reads the original
+
+`getProfilePicUrl()` is the single choke point every avatar path goes through, so
+the substitution lives there and nowhere else: when the caller's user has a
+preview **and** this client holds its key, the bytes for that preview are
+fetched and decrypted, while the cache key stays the *original* file id. No
+render site had to change, and a placeholder already on screen still matches.
+
+Three fallbacks keep a preview from ever costing a render: a preview whose key
+is missing is not used at all, a preview whose fetch fails (deleted, id moved on)
+or whose bytes do not decrypt falls back to the original, and an account that has
+never uploaded one simply serves the original everywhere — which is exactly the
+pre-0.2.42 behaviour.
+
+### 3. Loading profile pictures became a setting, separate from media previews
+
+*Automatically load media previews* covers message media and never covered
+avatars — they were always fetched, everywhere, with no way to say no. There is
+now a second switch, **Automatically load profile pictures**, right beside it and
+independent of it. With it off: every avatar stays as the user's initial, and
+`getProfilePicUrl` returns before it touches the network or the vault. A
+`MutationObserver` armed only while the setting is off turns *late*-rendered
+placeholders (a sidebar rebuilt after the fetch already started) into
+click-to-load, and clicking one loads just that picture. Turning the setting back
+on loads every avatar that was waiting.
+
+### 4. A test helper had been uploading files nobody could decrypt
+
+`tests/profile-pic-sharing.spec.ts` encrypted its fixture with
+`encryptFileChunk(key, bytes)` — a two-argument call, which leaves the chunk
+index out of the AEAD's associated data. `decryptFileChunk` always passes it, so
+every file that helper uploaded was undecryptable for everyone: the two tests in
+that file which require a rendered avatar had been failing on a test-side bug,
+not a product one. Both pass now that the index is passed (6/6 in the file).
+
+**Verified locally:** `tests/profile-pic-thumbnails.spec.ts` 3/3 — the server
+contract (store / hash-download / foreign-file 403 / removal clears), the crop
+flow (a 700×700 source uploads a 490×490 crop plus a **360×360** preview that
+decrypts at exactly 360, smaller in bytes than the original, and the profile view
+still pulls the original), and the recipient side (a DM peer renders the avatar
+from the preview id + key it decrypted from the conversation profile, and the
+bytes it fetched are the preview's). `tests/profile-pic-autoload.spec.ts` 4/4 —
+the switch sits in the same group as the media-preview one, defaults on, persists,
+an armed avatar fetches nothing until clicked, and a placeholder rendered *after*
+the setting is off still gets armed. `tests/profile-pic-sharing.spec.ts` 6/6,
+`tests/pfp-rendering.spec.ts` 1/1 + `tests/unified-pfp-sharing.spec.ts` 1/1 +
+`tests/dm-preview-and-upload-keys.spec.ts` 3/3 unchanged; `cargo check` clean.
+
+**Files:** `server/migrations/093_profile_picture_thumb.sql`, `server/src/db.rs`,
+`server/src/handlers.rs`, `static/chat.js`, `static/index.html`, `static/sw.js`,
+`tests/profile-pic-thumbnails.spec.ts`, `tests/profile-pic-autoload.spec.ts`,
+`tests/profile-pic-sharing.spec.ts`, `README.md`,
+`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`
+
+## The wipe button on the error page, a raw-JSON DM preview, two keys the upload dialog ignored, and a stretched PDF page (0.2.41)
+
+**1. The clear-all-data button now exists in the one state it could not.** The
+button already survived every *page* state (see 0.2.40), but not the state where
+there is no page: when the saved server has closed for good, the window shows the
+WebView's **own** error page (`ERR_CONNECTION_REFUSED`), which runs no script at
+all — so `app-overlay.js` never boots and the control is missing exactly when a
+wipe is most likely to be wanted. Nothing page-side can fix that; the shell has
+to notice.
+
+- `static/app-overlay.js` emits `box:page-alive` every 5 s while it is running
+  and *visible*, and `box:page-hidden` the moment it is hidden — a minimized
+  desktop window and a backgrounded Android activity stop their timers for
+  perfectly good reasons, and throttled timers must not read as a crash.
+- the shell (`watch_page_alive` in `src-tauri/src/lib.rs`, started once per run)
+  never probes the network: it watches that beacon, and *visible* silence for 25 s
+  while the window is still on the remote address means the WebView error page.
+  It then puts the main window back on `box-setup.html` — a local page, which
+  therefore does run the overlay — with `startup_error` set to say why.
+- a page that has never spoken is left alone (the launch path already owns that
+  window via `watch_closed_host` / `watch_unconfirmed_host`).
+
+**2. The DM list preview printed raw JSON.** A plain message travels encrypted as
+`{"type":"text","text":"…"}`; the preview only knew the `file`/`files` shapes, so
+everything else fell through to `decrypted.substring(0, 40)` and the sidebar read
+`{"type":"text","text":"@test"}`. It now unwraps `text` (and names gifs, stickers,
+forwards and polls), then flattens whitespace and trims to one line.
+
+**3. The upload dialog answered neither key.** Enter did nothing — finishing an
+upload always needed a reach for the mouse — and Escape hid the panel through the
+generic layer-closer *without* running Cancel, so the chosen files (and a
+transfer already in flight) survived the close. Enter now confirms while the
+dialog is the open layer (ignored mid-transfer, and from a text field), and
+Escape goes through `closeUploadModal()`: the same Cancel the button is, which
+aborts the transfer and deletes what already reached the server.
+
+**4. A PDF page was drawn stretched vertically.** Every page sits in a slot
+(`[data-page]`) that is a flex **row** carrying a `min-height` of the first
+page's height — the placeholder that keeps the scroll geometry real before
+anything renders. The canvas inside it has `height:auto`, and a flex item whose
+cross size is `auto` is *stretched* to the line by the default
+`align-items: stretch`. So a page that was not exactly the placeholder's height
+— a window narrower than the scaled page clamps the canvas width through
+`max-width:100%` while its height stayed at the placeholder, and a mixed-size
+document differs page by page — came out vertically stretched for no reason the
+user could see. The slot is now `align-items: flex-start`, and the canvas keeps
+the aspect ratio in its own width/height attributes. Measured before the fix: a
+Letter page in a 420px viewport rendered at a height/width of **3.04** instead
+of **1.29**.
+
+The deck viewer was checked for the same shape and is not affected: a slide
+(`renderPptxSlide`) carries an explicit height, so the flex default cannot
+stretch it.
+
+**Verified locally:** `tests/doc-view-aspect.spec.ts` 1/1 (it fails on the old
+slot style with 3.04 — the bug is reproduced, not assumed) and
+`tests/pdf-large-file.spec.ts` 3/3 unchanged;
+`tests/dm-preview-and-upload-keys.spec.ts` 3/3 — the new
+liveness test, the preview (against two real accounts and a real encrypted send),
+and the two keys; `tests/upload-cancel-overflow.spec.ts` 2/2,
+`tests/app-wipe-overlay.spec.ts` 5/5 and `tests/text-selection.spec.ts` 4/4
+unchanged; `cargo check` clean.
+
+**Files:** `static/app-overlay.js`, `static/chat.js`, `static/doc-preview.js`,
+`static/index.html`, `static/login.html`, `static/box-setup.html`,
+`static/sw.js`, `src-tauri/src/lib.rs`,
+`tests/dm-preview-and-upload-keys.spec.ts`, `tests/doc-view-aspect.spec.ts`,
+`README.md`
+
 ## Five fixes the UI owed the user, and the phone's memory bill (0.2.40)
 
 The five reports here were all "it works, except where it matters". Each one is

@@ -17,7 +17,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=33">
+    <link rel="stylesheet" href="style.css?v=34">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -789,6 +789,12 @@
                         <span class="toggle-label">Automatically load media previews (images, video, audio, stickers)</span>
                     </label>
                     <p class="settings-hint">When disabled, you can manually load each preview by clicking a "Load preview" button. Useful for saving bandwidth on slow connections.</p>
+                    <label class="settings-toggle">
+                        <input type="checkbox" id="auto-load-profile-pics">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label">Automatically load profile pictures</span>
+                    </label>
+                    <p class="settings-hint">Independent of the media previews setting above. When disabled, avatars stay as the user's initial and only load when you click them — handy on slow connections or in big servers, where a long member list would otherwise fetch every picture.</p>
                 </div>
                 <div class="settings-group">
                     <h4>Message Timestamps</h4>
@@ -826,6 +832,18 @@
                         <option value="very-loose">Very loose — 28 px</option>
                     </select>
                     <p class="settings-hint">How far the finger may move during the hold before the gesture becomes a drag instead of opening the right-click menu. A phone with a shaky or very responsive screen can raise this so a hold does not turn into a drag on the first wobble; a steady hand can lower it. Applies wherever you hold to reorder: the server rail and folders, channels, categories, DMs and roles.</p>
+                </div>
+                <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                    <h4>Minimum Hold</h4>
+                    <select id="touch-hold-min-ms" class="settings-select" style="max-width:260px">
+                        <option value="0">Instant — 0 ms</option>
+                        <option value="50">Quick — 50 ms</option>
+                        <option value="100">Fast — 100 ms</option>
+                        <option value="150">Normal — 150 ms (default)</option>
+                        <option value="200">Steady — 200 ms</option>
+                        <option value="300">Deliberate — 300 ms</option>
+                    </select>
+                    <p class="settings-hint">How long a finger must stay still before moving it can start a drag. Sooner than that, moving is you scrolling the list — and scrolling never picks anything up: servers, folders, channels, DMs and roles stay exactly where they are. Raise it if scrolling still grabs things on your screen; lower it if dragging feels late. It always stays below Hold to Open Menu.</p>
                 </div>
                 <div class="settings-group" style="padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
                     <h4>Hold to Open Menu</h4>
@@ -2665,11 +2683,11 @@
     <script src="soundboard-pairing.js?v=12"></script>
     <script src="thread_categories_shortcuts.js?v=12"></script>
     <script src="roles.js?v=6"></script>
-    <script src="doc-preview.js?v=6"></script>
-    <script src="chat.js?v=75"></script>
+    <script src="doc-preview.js?v=7"></script>
+    <script src="chat.js?v=79"></script>
 <!-- The always-on "clear all app data" overlay: one button, every page, whether
      or not a connection exists. Inert in the mini call-controls window. -->
-<script src="app-overlay.js?v=2"></script>
+<script src="app-overlay.js?v=3"></script>
 <script src="captions.js?v=5"></script>
 <!-- F15: custom UI icon packs (app-only settings tab) -->
 <script src="icon-packs.js?v=2"></script>

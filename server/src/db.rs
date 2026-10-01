@@ -1384,6 +1384,18 @@ impl Database {
         let _ = conn.execute_batch(include_str!("../migrations/090_key_blob_rev.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/091_push_devices.sql"));
         let _ = conn.execute_batch(include_str!("../migrations/092_user_icon_slots.sql"));
+        // Migration 093: separately encrypted 360x360 profile-picture thumbnail.
+        let _ = conn.execute_batch(include_str!("../migrations/093_profile_picture_thumb.sql"));
+        // Repair path: re-apply each ALTER on its own, because a multi-statement
+        // batch aborts at the first statement that already applied (058/059).
+        for col in [
+            "profile_picture_thumb_file_id TEXT",
+            "profile_picture_thumb_file_id_hash TEXT",
+            "encrypted_pic_thumb_key BLOB",
+            "pic_thumb_key_nonce BLOB",
+        ] {
+            let _ = conn.execute_batch(&format!("ALTER TABLE users ADD COLUMN {}", col));
+        }
 
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
@@ -1573,6 +1585,44 @@ impl Database {
         conn.execute(
             "UPDATE users SET profile_updated_at = datetime('now') WHERE id = ?1",
             params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The 360x360 thumbnail belonging to the current profile picture:
+    /// (thumb_file_id, thumb_file_id_hash, encrypted_thumb_key, thumb_key_nonce).
+    /// All NULL for accounts that never uploaded one — clients then fall back to
+    /// the full-resolution file. Returns NULLs if migration 093 hasn't run yet.
+    pub fn get_profile_thumb(&self, id: &str) -> Result<(Option<String>, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'profile_picture_thumb_file_id'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_col {
+            return Ok((None, None, None, None));
+        }
+        conn.query_row(
+            "SELECT profile_picture_thumb_file_id, profile_picture_thumb_file_id_hash,
+                    encrypted_pic_thumb_key, pic_thumb_key_nonce
+             FROM users WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|_| "User not found".to_string())
+    }
+
+    pub fn update_profile_thumb(&self, user_id: &str, file_id: Option<&str>, encrypted_key: Option<&[u8]>, key_nonce: Option<&[u8]>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let hash = file_id.map(|fid| sha256_hex(fid));
+        conn.execute(
+            "UPDATE users SET profile_picture_thumb_file_id = ?1, profile_picture_thumb_file_id_hash = ?2, encrypted_pic_thumb_key = ?3, pic_thumb_key_nonce = ?4 WHERE id = ?5",
+            params![file_id, hash, encrypted_key, key_nonce, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -7380,13 +7430,27 @@ impl Database {
         match result {
             Ok(fid) => Ok(fid),
             Err(_) => {
-                // Try banner hash
-                conn.query_row(
-                    "SELECT profile_banner_file_id FROM users WHERE (profile_banner_file_id_hash = ?1 OR profile_banner_file_id = ?1) AND profile_banner_file_id IS NOT NULL LIMIT 1",
-                    params![hash],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(|_| "File not found by hash".to_string())
+                // Try the profile-picture thumbnail (it is a separate file with
+                // its own hash, and avatars are downloaded by hash).
+                let thumb: Result<String, String> = conn
+                    .query_row(
+                        "SELECT profile_picture_thumb_file_id FROM users WHERE (profile_picture_thumb_file_id_hash = ?1 OR profile_picture_thumb_file_id = ?1) AND profile_picture_thumb_file_id IS NOT NULL LIMIT 1",
+                        params![hash],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|_| "File not found by hash".to_string());
+                match thumb {
+                    Ok(fid) => Ok(fid),
+                    Err(_) => {
+                        // Try banner hash
+                        conn.query_row(
+                            "SELECT profile_banner_file_id FROM users WHERE (profile_banner_file_id_hash = ?1 OR profile_banner_file_id = ?1) AND profile_banner_file_id IS NOT NULL LIMIT 1",
+                            params![hash],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .map_err(|_| "File not found by hash".to_string())
+                    }
+                }
             }
         }
     }

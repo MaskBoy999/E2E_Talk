@@ -42,14 +42,20 @@ async function phoneSignedIn(browser: Browser) {
     await mpage.click('#login-form button[type="submit"]');
     await mpage.waitForURL('**/index.html', { timeout: 90000 });
     await mpage.waitForSelector('#current-user', { timeout: 30000 });
-    // Room to start the drag. The app's hold window is 500 ms by default, and a
-    // CDP touchMove on an emulated phone can take a big bite out of that, so a
-    // drag that is a drag and not a menu becomes a race. These tests widen the
-    // window to three seconds: the window's own length is pinned by
-    // tests/long-press-gesture.spec.ts, and what is under test here is the drag
-    // pipeline — the ghost, the hit-testing, the drop — which must not depend
-    // on winning a race.
-    await mpage.evaluate(() => localStorage.setItem('touch_hold_ms', '3000'));
+    // Room to start the drag, on two dials. The app's hold window is 500 ms by
+    // default, and a CDP touchMove on an emulated phone can take a big bite out
+    // of that, so a drag that is a drag and not a menu becomes a race; the
+    // minimum hold (150 ms, the floor that keeps a SCROLL from becoming a drag)
+    // would swallow a helper that starts moving at ~30 ms. These tests widen the
+    // window to three seconds and switch the floor off: the timing rules are
+    // pinned by tests/long-press-gesture.spec.ts and
+    // tests/touch-drag-threshold.spec.ts, and what is under test here is the
+    // drag pipeline — the ghost, the hit-testing, the drop — which must not
+    // depend on winning a race.
+    await mpage.evaluate(() => {
+        localStorage.setItem('touch_hold_ms', '3000');
+        localStorage.setItem('touch_hold_min_ms', '0');
+    });
     await mpage.reload();
     await mpage.waitForSelector('#current-user', { timeout: 60000 });
     return { mcontext, mpage };

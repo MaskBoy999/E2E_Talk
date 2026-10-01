@@ -1163,3 +1163,65 @@ released; it stops growing once you stop scrolling up.
 newest message is still reachable and pinned to the bottom), and use search to
 jump to a message — a trimmed row simply lands you in the channel instead of on
 the row.
+
+## 28. Selecting from the start of a message, and the app that comes back from a dead host (0.2.42)
+
+Both of these are states the app used to *look* right in. The first has an
+automated spec (`tests/text-selection.spec.ts`), the second is a shell behaviour
+only this app has, so it is the one to do by hand.
+
+### Message text selects from where you point
+
+**Do (desktop, with a mouse):** aim at the **first character** of a message and
+drag right. Then do it the way it usually happens: move the pointer onto the
+message first, wait a beat for the receipt line ("Sent"/"Read") to appear, and
+then press the first character and drag.
+
+**Expect:** the same first line is selected both times, and it starts at the
+first character — not at the second line, and not nothing at all. Watch the
+message itself while the pointer arrives: the receipt line appears **below** it
+without the message moving a pixel (that reflow was the bug — the message was
+pushed 19 px up the instant the pointer entered it, so a reader aiming at the
+first line pressed on the second one).
+
+**Try to break it:** a long message that wraps to several lines, a message whose
+last line is full, a pinned message, a forwarded message, and the full-screen
+text/code viewer. Then on a phone: nothing selects anywhere, still.
+
+### The app finds its own way back when the host is gone
+
+**Do (desktop app):** connect to a server, then **stop the server** (`Ctrl+C` in
+the terminal running it) and reload the app window's page (`Ctrl+R`, or the
+tray's reload if you have it) so the window shows Microsoft Edge's own *"Hmmm…
+can't reach this page — refused to connect"* page. Nothing is clickable there:
+that page runs no script, so the app's ✕ control cannot exist on it.
+
+**Expect:** within about **30 seconds** the window puts *itself* back on the
+address screen — "Nothing is answering at `…` any more. Check that the server is
+running and reachable, then save this address again" — with the previous address
+prefilled, and the round ✕ (**Clear all local data**) in the bottom-left corner,
+which is the button the browser has and the app was missing. Measured on this
+machine: error page at `t+2s`, address screen by `t+24s`.
+
+**Try to break it:** leave a *working* app connected for two minutes — it must
+stay exactly where it is (the watchdog must never steal a page that is alive;
+the beacon is what makes that distinction). Then minimize the window, stop the
+server while it is minimized, and bring the window back: it must still rescue
+itself, because a page that died while nobody was looking is watched from
+scratch once the window is on screen again.
+
+### The rest of this build, all of it with a spec
+
+- **DM list previews** show the message, never the `{"type":"text",…}` it travels
+  in (`dm-preview-and-upload-keys`).
+- **Enter** confirms the file-upload dialog and **Escape** cancels it for real —
+  the transfer is aborted and what already reached the server is deleted
+  (`dm-preview-and-upload-keys`).
+- **A PDF page keeps its shape** instead of being stretched to the placeholder's
+  height; the deck (PPTX) viewer was checked for the same shape and is unaffected
+  (`doc-view-aspect`, `pdf-large-file`).
+- **Profile pictures are two files**: the original for the profile view, a
+  **360×360** encrypted preview for every avatar slot, with the preview's key
+  wrapped to the owner's identity key and never sent in the clear
+  (`profile-pic-thumbnails`), plus a **Settings → Display → Automatically load
+  profile pictures** switch beside the media-preview one (`profile-pic-autoload`).

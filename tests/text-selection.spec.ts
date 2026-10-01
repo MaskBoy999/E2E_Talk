@@ -203,6 +203,80 @@ test.describe('desktop: message text is selectable, everything else is not', () 
         })).toBe(true);
     });
 
+    test('a message holds still when the pointer enters it, and a drag from its first character selects it', async ({ page }) => {
+        // The report: "selection works if you start somewhere in the middle,
+        // but not when you start from the start of the message". It was one
+        // bug, and it was layout, not selection.
+        //
+        // Hovering a message reveals its delivery/read receipt (`.msg-status`),
+        // which was a *float* that appeared only in hover mode — and a float
+        // that appears grows `.content`, while the message list pins its
+        // content to the bottom (`.message-list::before { flex: 1 }`). So the
+        // message was pushed UP by the receipt line's whole height the instant
+        // the pointer entered it (measured: the text sat at y=546 at rest and at
+        // y=527 with the pointer on it). A reader aiming at the first line
+        // pressed ~19px lower than they aimed — which is the second line — so
+        // the drag "started somewhere in the middle" without them asking for it,
+        // and whether it worked came down to whether the pointer was already
+        // resting on the message. The receipt is now out of flow while it is
+        // hover-revealed, so nothing moves and the gesture starts where it was
+        // aimed.
+        test.setTimeout(180000);
+        const body = await registerUser(page, 'selstart_' + Date.now());
+        await createServerAndKey(page, body.token, body.user.id);
+        await openChannelAndSend(page, 'first line of the message\nsecond line of the message');
+
+        const textRect = () => page.evaluate(() => {
+            const el = document.querySelector('.message .text') as HTMLElement;
+            const b = el.getBoundingClientRect();
+            return { x: Math.round(b.x), y: Math.round(b.y), h: Math.round(b.height) };
+        });
+
+        // 1. The message must not move when the pointer enters it.
+        await page.mouse.move(700, 120);
+        await page.waitForTimeout(200);
+        const atRest = await textRect();
+        const box = await page.locator('.message .text').first().boundingBox();
+        if (!box) throw new Error('message text has no box');
+        await page.mouse.move(box.x + 40, box.y + 6); // hover the message
+        await page.waitForTimeout(250);
+        const hovered = await textRect();
+        expect(hovered.y, 'revealing the receipt must not move the message text').toBe(atRest.y);
+        expect(hovered.h).toBe(atRest.h);
+
+        // 2. A drag from the very first pixel of the first line selects from the
+        //    first character — not from the second line, and not nothing at all.
+        await page.mouse.move(700, 120);
+        await page.waitForTimeout(150);
+        await page.evaluate(() => window.getSelection()?.removeAllRanges());
+        const y = box.y + 10; // inside the first line
+        await page.mouse.move(box.x + 1, y);
+        await page.mouse.down();
+        await page.mouse.move(box.x + 260, y, { steps: 12 });
+        await page.mouse.up();
+        const result = await page.evaluate(() => {
+            const s = window.getSelection();
+            return { text: (s || '').toString(), anchorOffset: s ? s.anchorOffset : -1 };
+        });
+        expect(result.text, 'a drag from the start of a message must select from its first character')
+            .toContain('first line');
+        expect(result.text).not.toContain('second line');
+        expect(result.anchorOffset).toBeLessThan(4);
+        await page.evaluate(() => window.getSelection()?.removeAllRanges());
+
+        // …and the same is true when the pointer was already resting on the
+        // message, which is how a reader actually starts a drag.
+        await page.mouse.move(box.x + 40, box.y + 6);
+        await page.waitForTimeout(200);
+        await page.mouse.move(box.x + 1, y);
+        await page.mouse.down();
+        await page.mouse.move(box.x + 260, y, { steps: 12 });
+        await page.mouse.up();
+        const again = await page.evaluate(() => (window.getSelection() || '').toString());
+        expect(again, 'hovering first must not change where the selection starts').toContain('first line');
+        await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    });
+
     test('one switch decides for the whole app, and the text viewers are inside it', async ({ page }) => {
         test.setTimeout(180000);
         const body = await registerUser(page, 'sels_' + Date.now());

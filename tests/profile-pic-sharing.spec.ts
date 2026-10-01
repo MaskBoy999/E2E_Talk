@@ -152,7 +152,11 @@ async function uploadFileAndSetProfile(page: any, token: string, pngBytes: Buffe
         // Decode the PNG data, encrypt with a random key, upload
         const rawBytes = Uint8Array.from(atob(pngBase64), c => c.charCodeAt(0));
         const fileKey = E2ECrypto.generateFileKey();
-        const encrypted = E2ECrypto.encryptFileChunk(fileKey, rawBytes);
+        // The chunk index is AAD: encrypting without it produces a ciphertext
+        // that decryptFileChunk(…, …, 0) can never read back, so every profile
+        // picture this helper uploaded used to be undecryptable for everyone
+        // (which is why the rendering assertions below could never pass).
+        const encrypted = E2ECrypto.encryptFileChunk(fileKey, rawBytes, 0);
         const blob = new Blob([encrypted], { type: 'application/octet-stream' });
         await fetch(`/api/files/${fileId}/chunk/0`, {
             method: 'POST',

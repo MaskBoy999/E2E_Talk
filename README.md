@@ -439,8 +439,23 @@ not a missing feature:
 - **Streamer Mode** — hides all message content behind a *Reveal* button,
   disables DM sidebar previews and stops media auto-loading — for screenshares
   and streams
-- **Display settings** — media previews, timestamp mode, message-status mode,
-  message-actions mode
+- **Display settings** — media previews, a **separate profile-picture
+  auto-load switch**, timestamp mode, message-status mode, message-actions mode
+- **Avatars are small files of their own** — a profile picture is uploaded with
+  a **separately encrypted 360×360 preview**, and every avatar in the app
+  (message avatars, DM rows, the DM header, member lists, mentions, search
+  chips) renders from that preview. The full-size picture is only downloaded by
+  the profile view, so a multi-megapixel photo no longer crosses the network —
+  and gets decoded — to fill a 36px circle. The preview is capped at 360px and
+  never upscaled; accounts that have no preview yet (nothing re-uploaded) fall
+  back to the original everywhere, and if a preview ever fails to arrive the
+  reader renders the original instead of nothing
+- **Profile pictures can be switched off** — *Automatically load profile
+  pictures* is its own setting next to *Automatically load media previews*,
+  not a side effect of it: with it off, every avatar stays as the user's
+  initial until you click it, which keeps a long member list or DM sidebar from
+  fetching (and decrypting) every picture on screen. Clicking an avatar loads
+  that one picture
 - **A settings panel that matches itself** — the top tabs are spaced apart and
   scroll instead of squashing their labels into one word, and every checkbox
   and field in a panel comes from one shared style built on the theme tokens
@@ -472,14 +487,20 @@ not a missing feature:
   Security)
 - **Clear all local data** (keys, logins, settings, cookies) from Settings —
   the same total wipe is also a floating button, but **only inside the native
-  app**: a browser draws no page-level wipe control
+  app**: a browser draws no page-level wipe control. The button cannot exist on
+  the WebView's own error page (that page runs no script of ours), so the shell
+  treats a silent page as "the server is gone", puts the local address screen
+  back in the window, and the button is there — including when a server you were
+  using closes for good while the app is open
 
 ### Desktop app — the "box"
 
 - **First-run setup** — enter the server address (any host/port; defaults
   fill in), **Test connection** shows the certificate fingerprint, *Trust this
   server's certificate* pins it; later launches open directly; unreachable
-  host on Android falls back to setup (never a blank error page)
+  host on Android falls back to setup (never a blank error page), and a window
+  whose page stops running is returned to setup by a liveness watchdog (the
+  page beacons `box:page-alive`; silence means the WebView error page)
 - **System tray** — Show / Change Server Address… / Quit; the tooltip shows
   call state and unread **counts only** (never a name); close hides to tray
   (configurable); **auto-start** on login

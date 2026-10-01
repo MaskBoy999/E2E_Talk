@@ -58,6 +58,89 @@ const CHANGE_SERVER_EVENT: &str = "box:change-server";
 /// launch would open the app window straight back at the old host.
 const CLEAR_CONNECTION_EVENT: &str = "box:clear-connection";
 
+/// The running page's liveness beacon, and the pair of events that bracket it.
+///
+/// The one state this shell cannot otherwise see is a main window showing the
+/// WebView's **own** error page ("can't reach this page", `ERR_CONNECTION_
+/// REFUSED`). That page runs no script at all, so `static/app-overlay.js` never
+/// executes and the always-on "clear all app data" control is the first thing to
+/// disappear — exactly when the saved server has gone away for good and the user
+/// most needs a way back to the address screen. From Rust the window still looks
+/// perfect: visible, focused, its URL still the remote address, no error
+/// reported anywhere.
+///
+/// So the overlay emits [`PAGE_ALIVE_EVENT`] every few seconds while it is
+/// running and visible, and [`PAGE_HIDDEN_EVENT`] when the page is hidden (a
+/// minimized desktop window, a backgrounded Android activity — where timers are
+/// throttled or frozen and silence means nothing). `watch_page_alive` treats
+/// *visible* silence as "this is the error page" and puts the window back on the
+/// bundled address screen, which is a local page and therefore does run the
+/// overlay. A page that never reports at all is watched the same way once the
+/// launch watchers (`watch_closed_host` / `watch_unconfirmed_host`) have had
+/// their half-minute, so a page that died while the window was minimized cannot
+/// leave the user stuck either — see [`PAGE_ALIVE_STARTUP_GRACE`].
+const PAGE_ALIVE_EVENT: &str = "box:page-alive";
+const PAGE_HIDDEN_EVENT: &str = "box:page-hidden";
+
+/// How long a **visible** page may be silent before the shell assumes it is the
+/// WebView's own error page. Long enough to survive a stall, short enough that
+/// the wait is not itself the complaint.
+const PAGE_ALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// How long the app runs before a window that is on the remote address and has
+/// **never** heard from the page is treated as one the user is stuck behind.
+///
+/// The launch path owns the first half-minute and is the more precise answer
+/// there (`watch_closed_host` / `watch_unconfirmed_host` probe the host
+/// directly, and a refused port is certain on the first pass). This grace is the
+/// backstop for what that path cannot see — a page that died while the window
+/// was hidden or minimized, where the launch watcher has already returned and no
+/// beacon was ever missed because none was ever recorded.
+const PAGE_ALIVE_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// Everything the watchdog decides, as a pure function, so the rule can be
+/// tested without a window, a thread or a WebView.
+///
+/// `since_beacon` is how long ago the page last reported itself
+/// ([`PAGE_ALIVE_EVENT`]), or `None` when it has never reported at all.
+/// `silent_for` is how long the window has been on screen, on the remote
+/// address, and without a report. `running_for` is how long the app has been up.
+fn page_has_stopped(
+    since_beacon: Option<std::time::Duration>,
+    silent_for: std::time::Duration,
+    running_for: std::time::Duration,
+) -> bool {
+    match since_beacon {
+        // It reported, then it stopped: whatever is in the window now — the
+        // WebView's error page, or a page that hung — is not the app.
+        Some(since) => since >= PAGE_ALIVE_TIMEOUT,
+        // It has never reported. Past the launch grace that is no longer "still
+        // starting": no page this app serves stays silent for half a minute, so
+        // the window is on the error page, on a page that failed to run, or on
+        // nothing at all.
+        None => running_for >= PAGE_ALIVE_STARTUP_GRACE && silent_for >= PAGE_ALIVE_TIMEOUT,
+    }
+}
+
+/// Whether the main window is somewhere the user can see it, and so a page that
+/// has gone quiet has *stopped* rather than been parked.
+///
+/// A minimized desktop window and a hidden-to-tray one both stop their timers
+/// legitimately (`box:page-hidden`), and a backgrounded Android activity does
+/// too — so silence there means nothing at all.
+#[cfg(desktop)]
+fn window_is_on_screen(window: &tauri::WebviewWindow) -> bool {
+    let visible = window.is_visible().unwrap_or(true);
+    let minimized = window.is_minimized().unwrap_or(false);
+    visible && !minimized
+}
+#[cfg(not(desktop))]
+fn window_is_on_screen(_window: &tauri::WebviewWindow) -> bool {
+    // Android reports the window as visible even while the activity is
+    // backgrounded; `box:page-hidden` is what covers that case.
+    true
+}
+
 /// Event the page raises to ask for a **desktop** toast (audit fix F3,
 /// `FEATURE_PLAN.md`). An event rather than an app command for the same reason
 /// as [`CHANGE_SERVER_EVENT`]: Tauri refuses app commands to remote origins,
@@ -179,6 +262,10 @@ pub struct AppState {
     /// was silent: the user just saw the address screen again. On a phone there
     /// is no console to read, so the reason has to reach the page.
     pub startup_error: Mutex<Option<String>>,
+    /// When the running page last said it was alive (`PAGE_ALIVE_EVENT`), or
+    /// `None` when it has never spoken or is currently hidden. See
+    /// [`watch_page_alive`].
+    pub page_alive_at: Mutex<Option<std::time::Instant>>,
 }
 
 // ── Certificate pinning helpers ──────────────────────────────────────────
@@ -404,9 +491,138 @@ fn watch_closed_host(app: tauri::AppHandle, url: String) {
     });
 }
 
+/// Put the main window back on the bundled address screen because the page
+/// inside it stopped running, and record why.
+///
+/// The address screen is a *local* page, so it runs `app-overlay.js` — which is
+/// the whole point: the control the user needs when the server is gone exists
+/// there and nowhere on the WebView's error page.
+fn rescue_silent_page(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+        return;
+    };
+    // Already local (the setup screen heartbeats too): nothing to rescue.
+    if window.url().map(|u| is_app_page(&u)).unwrap_or(false) {
+        return;
+    }
+    let saved = app
+        .state::<AppState>()
+        .cfg
+        .lock()
+        .ok()
+        .and_then(|c| c.server_url.clone());
+    if let Ok(mut slot) = app.state::<AppState>().startup_error.lock() {
+        *slot = Some(match saved {
+            Some(url) => format!(
+                "Nothing is answering at {url} any more. Check that the server is \
+                 running and reachable, then save this address again."
+            ),
+            None => "The chat page stopped responding. Enter the server address again.".to_string(),
+        });
+    }
+    let _ = open_setup_in_main(app);
+}
+
+/// Watch the main window for a page that has stopped running.
+///
+/// Started once per run (see `setup`). It never probes the network: a live page
+/// reports itself ([`PAGE_ALIVE_EVENT`]), and this reacts only to that report
+/// going quiet while the window is still on the remote address — which is
+/// precisely the WebView's own error page, and precisely the state where the
+/// wipe overlay cannot exist (see [`PAGE_ALIVE_EVENT`]).
+///
+/// A page that has gone quiet while the window is hidden is left alone — a
+/// minimized desktop window and a backgrounded Android activity stop their
+/// timers legitimately — but the window coming back **on screen** to a page that
+/// never reports again is watched from scratch, so a page that died while nobody
+/// was looking cannot leave the user stuck behind it (`page_has_stopped`).
+fn watch_page_alive(app: tauri::AppHandle) {
+    /// The watchdog's own tick, and the granularity of `silent_for`.
+    const TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+    std::thread::spawn(move || {
+        let launched_at = std::time::Instant::now();
+        // How long the window has been on screen, on the remote address, with no
+        // report from the page: reset by every report, and by the window leaving
+        // the screen or showing one of our own pages.
+        let mut silent_for = std::time::Duration::ZERO;
+        loop {
+            std::thread::sleep(TICK);
+            let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+                return; // window closed, or the app is shutting down
+            };
+            let since_beacon = {
+                let state = app.state::<AppState>();
+                let Ok(guard) = state.page_alive_at.lock() else {
+                    return; // poisoned: the app is going down anyway
+                };
+                guard.map(|at| at.elapsed())
+            };
+            // The address screen heartbeats too, and it is a local page with the
+            // overlay on it: only a remote window is ever rescued.
+            let on_remote = !window.url().map(|u| is_app_page(&u)).unwrap_or(false);
+            if !on_remote || !window_is_on_screen(&window) {
+                silent_for = std::time::Duration::ZERO;
+                continue;
+            }
+            match since_beacon {
+                Some(_) => silent_for = std::time::Duration::ZERO,
+                None => silent_for += TICK,
+            }
+            if !page_has_stopped(since_beacon, silent_for, launched_at.elapsed()) {
+                continue;
+            }
+            // Disarm first: the address screen heartbeats again a moment from
+            // now, and until it does this must not fire twice.
+            if let Ok(mut guard) = app.state::<AppState>().page_alive_at.lock() {
+                *guard = None;
+            }
+            silent_for = std::time::Duration::ZERO;
+            rescue_silent_page(&app);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// The watchdog's rule, at its boundaries.
+    ///
+    /// This is the rule that decides whether the user is looking at the WebView's
+    /// own error page — the state in which the app has no wipe control at all and
+    /// no way to change host — so the two ways it can be wrong both matter: firing
+    /// while the page is simply slow (which steals a working window) and staying
+    /// quiet while the page is gone (which strands the user).
+    #[test]
+    fn the_page_watchdog_rescues_a_page_that_has_stopped_and_only_that() {
+        let none = None;
+        let long_ago = Some(PAGE_ALIVE_TIMEOUT + Duration::from_secs(1));
+        let just_now = Some(Duration::from_secs(1));
+        let never = Duration::ZERO;
+        let long_up = PAGE_ALIVE_STARTUP_GRACE + Duration::from_secs(1);
+        let just_started = Duration::from_secs(1);
+
+        // A page that reported and then went quiet is the error page.
+        assert!(page_has_stopped(long_ago, never, long_up));
+        // …but a page that reported a moment ago is a working app, however long
+        // it has been up and however quiet the last tick was.
+        assert!(!page_has_stopped(just_now, never, long_up));
+
+        // A page that has *never* reported is rescued only after the launch grace
+        // AND after it has been silent on screen for the full timeout: this is the
+        // page that died while the window was hidden, which the launch watchers
+        // have already given up on.
+        assert!(!page_has_stopped(none, PAGE_ALIVE_TIMEOUT, just_started), "still starting up");
+        assert!(!page_has_stopped(none, PAGE_ALIVE_TIMEOUT - Duration::from_secs(1), long_up), "not silent long enough");
+        assert!(page_has_stopped(none, PAGE_ALIVE_TIMEOUT, long_up), "past the grace, silent on screen");
+
+        // The boundary itself is inclusive on both clocks, so a window that has
+        // been on screen and silent for exactly the timeout is not rescued only by
+        // a rounding accident.
+        assert!(page_has_stopped(Some(PAGE_ALIVE_TIMEOUT), never, just_started));
+    }
 
     /// A launch that cannot establish a pin must be refused rather than opened:
     /// the window would be handed the host's self-signed certificate with nothing
@@ -1678,6 +1894,30 @@ pub fn run() {
                     forget_connection(&for_wipe);
                 });
             }
+
+            // The running page's liveness beacon (see PAGE_ALIVE_EVENT). Both
+            // handlers only write a timestamp, so the page may emit them as
+            // often as it likes — the event costs nothing to listen for.
+            {
+                let for_alive = handle.clone();
+                handle.listen(PAGE_ALIVE_EVENT, move |_| {
+                    if let Ok(mut slot) = for_alive.state::<AppState>().page_alive_at.lock() {
+                        *slot = Some(std::time::Instant::now());
+                    }
+                });
+            }
+            {
+                let for_hidden = handle.clone();
+                handle.listen(PAGE_HIDDEN_EVENT, move |_| {
+                    // Hidden is not dead: drop the timestamp so the watchdog
+                    // stops counting, instead of reading a throttled or frozen
+                    // page as one that has crashed.
+                    if let Ok(mut slot) = for_hidden.state::<AppState>().page_alive_at.lock() {
+                        *slot = None;
+                    }
+                });
+            }
+            watch_page_alive(handle.clone());
 
             // Hardware acceleration (Settings → Display). Desktop only: the flag
             // is a WebView2/Chromium launch argument, and the page offers the

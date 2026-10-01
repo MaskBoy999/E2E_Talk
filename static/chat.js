@@ -517,6 +517,8 @@ function saveUserDisplayNameCache() {
                 if (entry.username_border_color) saveEntry.ubc = entry.username_border_color;
                 if (entry.profile_picture_file_id) saveEntry.pf = entry.profile_picture_file_id;
                 if (entry.profile_picture_file_key) saveEntry.pk = entry.profile_picture_file_key;
+                if (entry.profile_picture_thumb_file_id) saveEntry.pt = entry.profile_picture_thumb_file_id;
+                if (entry.profile_picture_thumb_file_key) saveEntry.ptk = entry.profile_picture_thumb_file_key;
                 if (entry.profile_banner_file_id) saveEntry.pb_id = entry.profile_banner_file_id;
                 if (entry.profile_banner_file_key) saveEntry.pb_key = entry.profile_banner_file_key;
                 if (Object.keys(saveEntry).length > 0) saveable[uid] = saveEntry;
@@ -546,6 +548,8 @@ function loadUserDisplayNameCache() {
                     if (entry.ubc) userDisplayNameCache[uid].username_border_color = entry.ubc;
                     if (entry.pf) userDisplayNameCache[uid].profile_picture_file_id = entry.pf;
                     if (entry.pk) userDisplayNameCache[uid].profile_picture_file_key = entry.pk;
+                    if (entry.pt) userDisplayNameCache[uid].profile_picture_thumb_file_id = entry.pt;
+                    if (entry.ptk) userDisplayNameCache[uid].profile_picture_thumb_file_key = entry.ptk;
                     if (entry.pb_id) userDisplayNameCache[uid].profile_banner_file_id = entry.pb_id;
                     if (entry.pb_key) userDisplayNameCache[uid].profile_banner_file_key = entry.pb_key;
                 }
@@ -917,6 +921,8 @@ async function fetchAndCacheUserProfile(userId) {
         if (data.profile_picture_file_id !== undefined) userDisplayNameCache[userId].profile_picture_file_id = data.profile_picture_file_id;
         // Extract raw file keys from decrypted profileData
         if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
+        if (decrypted.profile_picture_thumb_file_id !== undefined) userDisplayNameCache[userId].profile_picture_thumb_file_id = decrypted.profile_picture_thumb_file_id;
+        if (decrypted.profile_picture_thumb_file_key !== undefined) userDisplayNameCache[userId].profile_picture_thumb_file_key = decrypted.profile_picture_thumb_file_key;
         if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
         if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
         // Persist the derived file keys into the fkc_* media cache (survives
@@ -924,6 +930,9 @@ async function fetchAndCacheUserProfile(userId) {
         // fetch/decrypt chain entirely.
         if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
             try { fileKeyCache.set(decrypted.profile_picture_file_id, decrypted.profile_picture_file_key); } catch (_) {}
+        }
+        if (decrypted.profile_picture_thumb_file_id && decrypted.profile_picture_thumb_file_key) {
+            try { fileKeyCache.set(decrypted.profile_picture_thumb_file_id, decrypted.profile_picture_thumb_file_key); } catch (_) {}
         }
         if (decrypted.profile_banner_file_id && decrypted.profile_banner_file_key) {
             try { fileKeyCache.set(decrypted.profile_banner_file_id, decrypted.profile_banner_file_key); } catch (_) {}
@@ -966,11 +975,16 @@ async function fetchServerConversationProfile(userId, serverId, serverKey) {
         // Use !== undefined so explicit null (field was removed) clears the cache.
         if (decrypted.profile_picture_file_id !== undefined) userDisplayNameCache[userId].profile_picture_file_id = decrypted.profile_picture_file_id;
         if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
+        if (decrypted.profile_picture_thumb_file_id !== undefined) userDisplayNameCache[userId].profile_picture_thumb_file_id = decrypted.profile_picture_thumb_file_id;
+        if (decrypted.profile_picture_thumb_file_key !== undefined) userDisplayNameCache[userId].profile_picture_thumb_file_key = decrypted.profile_picture_thumb_file_key;
         if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
         if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
         // Persist the derived file keys into the fkc_* media cache too.
         if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
             try { fileKeyCache.set(decrypted.profile_picture_file_id, decrypted.profile_picture_file_key); } catch (_) {}
+        }
+        if (decrypted.profile_picture_thumb_file_id && decrypted.profile_picture_thumb_file_key) {
+            try { fileKeyCache.set(decrypted.profile_picture_thumb_file_id, decrypted.profile_picture_thumb_file_key); } catch (_) {}
         }
         if (decrypted.profile_banner_file_id && decrypted.profile_banner_file_key) {
             try { fileKeyCache.set(decrypted.profile_banner_file_id, decrypted.profile_banner_file_key); } catch (_) {}
@@ -1035,11 +1049,16 @@ async function fetchDmConversationProfile(userId, dmChannelId) {
         // Use !== undefined so explicit null (field was removed) clears the cache.
         if (decrypted.profile_picture_file_id !== undefined) userDisplayNameCache[userId].profile_picture_file_id = decrypted.profile_picture_file_id;
         if (decrypted.profile_picture_file_key !== undefined) userDisplayNameCache[userId].profile_picture_file_key = decrypted.profile_picture_file_key;
+        if (decrypted.profile_picture_thumb_file_id !== undefined) userDisplayNameCache[userId].profile_picture_thumb_file_id = decrypted.profile_picture_thumb_file_id;
+        if (decrypted.profile_picture_thumb_file_key !== undefined) userDisplayNameCache[userId].profile_picture_thumb_file_key = decrypted.profile_picture_thumb_file_key;
         if (decrypted.profile_banner_file_id !== undefined) userDisplayNameCache[userId].profile_banner_file_id = decrypted.profile_banner_file_id;
         if (decrypted.profile_banner_file_key !== undefined) userDisplayNameCache[userId].profile_banner_file_key = decrypted.profile_banner_file_key;
         // Persist the derived file keys into the fkc_* media cache too.
         if (decrypted.profile_picture_file_id && decrypted.profile_picture_file_key) {
             try { fileKeyCache.set(decrypted.profile_picture_file_id, decrypted.profile_picture_file_key); } catch (_) {}
+        }
+        if (decrypted.profile_picture_thumb_file_id && decrypted.profile_picture_thumb_file_key) {
+            try { fileKeyCache.set(decrypted.profile_picture_thumb_file_id, decrypted.profile_picture_thumb_file_key); } catch (_) {}
         }
         if (decrypted.profile_banner_file_id && decrypted.profile_banner_file_key) {
             try { fileKeyCache.set(decrypted.profile_banner_file_id, decrypted.profile_banner_file_key); } catch (_) {}
@@ -1131,6 +1150,23 @@ async function sendProfileKeySync(dmChannelId, conv) {
             payload.encrypted_profile_key = encPicKey.ciphertext;
             payload.profile_key_nonce = encPicKey.nonce;
             payload.profile_key_message_nonce = encPicKey.messageNonce;
+        }
+        // Share the 360x360 preview's own key, so recipients render the small
+        // avatar without ever pulling the full-size picture.
+        if (myProfile && myProfile.profile_picture_thumb_file_id && myProfile.profile_picture_thumb_file_key) {
+            var rawThumbKey = myProfile.profile_picture_thumb_file_key;
+            if (rawThumbKey && rawThumbKey.indexOf(':') > 0) {
+                var dkT = E2ECrypto.decodeEncryptedFileKey(rawThumbKey, identity.privateKey);
+                if (dkT) rawThumbKey = dkT;
+            }
+            var encThumbKey = E2ECrypto.encryptDm(rawThumbKey, dmChannelId, identity.privateKey, otherPubKey);
+            if (encThumbKey) {
+                payload.profile_picture_thumb_file_id = myProfile.profile_picture_thumb_file_id;
+                payload.profile_picture_thumb_file_id_hash = myProfile.profile_picture_thumb_file_id_hash || null;
+                payload.encrypted_profile_thumb_key = encThumbKey.ciphertext;
+                payload.profile_thumb_key_nonce = encThumbKey.nonce;
+                payload.profile_thumb_key_message_nonce = encThumbKey.messageNonce;
+            }
         }
         // Also share banner key if available
         if (myProfile.profile_banner_file_id && myProfile.profile_banner_file_key) {
@@ -1225,6 +1261,20 @@ async function broadcastProfileKeySyncToServer(serverId) {
             payload.encrypted_profile_key = encPicKey.ciphertext;
             payload.profile_key_nonce = encPicKey.nonce;
         }
+
+        // Share the 360x360 preview's own key alongside the picture key.
+        if (myProfile.profile_picture_thumb_file_id && myProfile.profile_picture_thumb_file_key) {
+            var rawThumbKey2 = myProfile.profile_picture_thumb_file_key;
+            if (rawThumbKey2 && rawThumbKey2.indexOf(':') > 0) {
+                var dkT2 = E2ECrypto.decodeEncryptedFileKey(rawThumbKey2, identity.privateKey);
+                if (dkT2) rawThumbKey2 = dkT2;
+            }
+            var encThumbKey2 = E2ECrypto.aeadEncrypt(rawThumbKey2, serverKey);
+            payload.profile_picture_thumb_file_id = myProfile.profile_picture_thumb_file_id;
+            payload.profile_picture_thumb_file_id_hash = myProfile.profile_picture_thumb_file_id_hash || null;
+            payload.encrypted_profile_thumb_key = encThumbKey2.ciphertext;
+            payload.profile_thumb_key_nonce = encThumbKey2.nonce;
+        }
         
         // Also share banner key if available
         if (myProfile.profile_banner_file_id && myProfile.profile_banner_file_key) {
@@ -1251,7 +1301,7 @@ async function broadcastProfileKeySyncToServer(serverId) {
         }
         
         // Only send if there's something to share
-        if (payload.encrypted_profile_key || payload.encrypted_profile_data_key || payload.encrypted_display_name) {
+        if (payload.encrypted_profile_key || payload.encrypted_profile_thumb_key || payload.encrypted_profile_data_key || payload.encrypted_display_name) {
             ws.send(JSON.stringify(payload));
         }
     } catch (e) {
@@ -4872,6 +4922,17 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Profile-picture auto-load setting (separate from media previews)
+    const autoLoadPfpCheckbox = document.getElementById('auto-load-profile-pics');
+    if (autoLoadPfpCheckbox) {
+        autoLoadPfpCheckbox.checked = profilePicsAutoLoadEnabled();
+        autoLoadPfpCheckbox.addEventListener('change', () => {
+            localStorage.setItem('autoLoadProfilePics', autoLoadPfpCheckbox.checked);
+            setProfilePicsAutoLoad(autoLoadPfpCheckbox.checked);
+        });
+    }
+    if (!profilePicsAutoLoadEnabled()) setProfilePicsAutoLoad(false);
+
     // Show-message-timestamps setting: 'always' | 'hover' | 'off' (default
     // 'always', matching the original on-by-default behavior). Controls body
     // classes that reveal the .time-hover spans (rendered at the END of each
@@ -5003,20 +5064,62 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     })();
 
+    // ... and the floor under that window: how long the finger must be STILL
+    // before moving it is allowed to mean "drag". Without a floor, the first
+    // pixel of every scroll raced the drag — scrolling the rail picked servers
+    // up and threw them around under the thumb. 150 ms by default
+    // (Settings → Touch → Minimum Hold).
+    var TOUCH_HOLD_MIN_DEFAULT_MS = 150;
+    window.touchHoldMinMs = function () {
+        var stored = 0;
+        try { stored = parseInt(localStorage.getItem('touch_hold_min_ms'), 10); } catch (_) {}
+        if (isNaN(stored) || stored < 0) stored = TOUCH_HOLD_MIN_DEFAULT_MS;
+        if (stored > 400) stored = 400;
+        // There has to be room between arming and the menu: a minimum at or
+        // above the window would swallow its own drag phase (the menu fires
+        // while the gesture is still un-armed).
+        var max = window.touchHoldMs ? window.touchHoldMs() : TOUCH_HOLD_DEFAULT_MS;
+        if (stored >= max) stored = Math.max(0, max - 100);
+        return stored;
+    };
+    (function initTouchHoldMinMs() {
+        var sel = document.getElementById('touch-hold-min-ms');
+        if (!sel) return;
+        try {
+            var stored = localStorage.getItem('touch_hold_min_ms');
+            if (stored && sel.querySelector('option[value="' + stored + '"]')) sel.value = stored;
+            // Show what the code uses, never the first option in the list.
+            else sel.value = String(window.touchHoldMinMs());
+        } catch (_) {}
+        sel.addEventListener('change', function () {
+            try { localStorage.setItem('touch_hold_min_ms', sel.value); } catch (_) {}
+        });
+    })();
+
     /**
      * ONE touch gesture for every reorderable row in the app: the server rail
      * (icons and folders), the channel list (channels and categories), the DM
      * list and the roles list.
      *
-     * The rule is a single time window with a distance test inside it, and it
-     * is the whole of the mobile interaction now:
+     * The rule is two time bounds around one distance test, and it is the whole
+     * of the mobile interaction now:
      *
-     *   * the finger goes down and a `touchHoldMs` timer starts (500 ms default,
-     *     Settings → Touch);
-     *   * if the finger stays within the Touch Drag distance for that whole
-     *     window, the **right-click menu opens** — a hold IS a right-click;
-     *   * if it moves past that distance while the window is still open, the
-     *     **drag starts** right then, and the timer is dropped;
+     *   * the finger goes down and both timers start: the MINIMUM hold
+     *     (`window.touchHoldMinMs()`, 150 ms default, Settings → Touch) and the
+     *     menu window (`window.touchHoldMs()`, 500 ms default);
+     *   * **before the minimum**, moving past the Touch Drag distance means the
+     *     user is scrolling: the gesture is abandoned for that finger — nothing
+     *     drags, no menu opens, and `preventDefault` is never called, so the
+     *     browser scrolls exactly as it always did. This is the half that was
+     *     missing: without it the first pixel of a scroll raced the drag and
+     *     servers, channels and roles jumped around under the thumb;
+     *   * **after the minimum**, if the finger is still inside the distance, the
+     *     gesture is armed: moving past it now **starts the drag** and drops the
+     *     menu timer. If the OS already claimed the gesture as a scroll
+     *     (`e.cancelable === false`) it stays a scroll — fighting the system's
+     *     own slop is exactly the jumpiness the floor exists to stop;
+     *   * if it stays inside the distance for the whole window, the
+     *     **right-click menu opens** — a hold IS a right-click;
      *   * letting go without either is an ordinary tap, untouched (the click
      *     handler runs as usual).
      *
@@ -5037,19 +5140,24 @@ document.addEventListener('DOMContentLoaded', () => {
      *   onDragEnd(x, y)   only after onDragStart
      *   onCancel()        the browser cancelled a gesture that had opened a menu
      *
-     * `preventDefault` is applied only while dragging, so a plain tap still
-     * produces a click and the list can still be scrolled before the window
-     * elapses. Defined on `window` because the channel and role files load
-     * before this one and bind their rows lazily, at render time.
+     * `preventDefault` is applied only while dragging — never while the gesture
+     * is still deciding, and never once it has become a scroll — so a plain tap
+     * still produces a click and the list can be scrolled from the first frame.
+     * Defined on `window` because the channel and role files load before this
+     * one and bind their rows lazily, at render time.
      */
     window.attachHoldGesture = function (el, handlers) {
-        var st = { state: 'idle', timer: null, x0: 0, y0: 0, x: 0, y: 0 };
+        var st = { state: 'idle', timer: null, armTimer: null, x0: 0, y0: 0, x: 0, y: 0 };
         var dragEl = handlers.draggableEl || null;
         function clearTimer() {
             if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+            if (st.armTimer) { clearTimeout(st.armTimer); st.armTimer = null; }
         }
         function radius() {
             return window.touchDragMoveThreshold ? window.touchDragMoveThreshold() : 10;
+        }
+        function outside() {
+            return Math.abs(st.x - st.x0) > radius() || Math.abs(st.y - st.y0) > radius();
         }
         function settle() {
             clearTimer();
@@ -5074,9 +5182,20 @@ document.addEventListener('DOMContentLoaded', () => {
             st.x0 = st.x = t.clientX;
             st.y0 = st.y = t.clientY;
             clearTimer();
+            // The floor first: until it has elapsed, movement belongs to the
+            // browser's scroll and can never become a drag.
+            var minMs = window.touchHoldMinMs ? window.touchHoldMinMs() : 0;
+            if (minMs <= 0) {
+                st.state = 'armed';
+            } else {
+                st.armTimer = setTimeout(function () {
+                    st.armTimer = null;
+                    if (st.state === 'pending') st.state = 'armed';
+                }, minMs);
+            }
             st.timer = setTimeout(function () {
                 st.timer = null;
-                if (st.state !== 'pending') return;
+                if (st.state !== 'pending' && st.state !== 'armed') return;
                 st.state = 'held';
                 swallowNextClick();
                 if (handlers.onHold) handlers.onHold(st.x0, st.y0);
@@ -5088,9 +5207,23 @@ document.addEventListener('DOMContentLoaded', () => {
             st.x = t.clientX;
             st.y = t.clientY;
             if (st.state === 'pending') {
-                var limit = radius();
-                if (Math.abs(st.x - st.x0) <= limit && Math.abs(st.y - st.y0) <= limit) return;
-                // Past the distance inside the window: this is a drag after all.
+                if (!outside()) return;
+                // Before the minimum hold: a scroll is starting. Hand the gesture
+                // back to the browser — no drag, no menu, no preventDefault — and
+                // never take it up again for this finger.
+                st.state = 'scroll';
+                clearTimer();
+                return;
+            }
+            if (st.state === 'armed') {
+                if (!outside()) return;
+                if (e.cancelable === false) {
+                    // The OS already claimed it as a scroll (its own slop won).
+                    st.state = 'scroll';
+                    clearTimer();
+                    return;
+                }
+                // Past the distance after the floor elapsed: this is a drag.
                 st.state = 'drag';
                 clearTimer();
                 if (handlers.onDragStart) handlers.onDragStart(st.x, st.y);
@@ -9405,6 +9538,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('profile-avatar-remove-btn').addEventListener('click', function () {
             profilePfpFileId = null;
             profilePfpFileKey = null;
+            profilePfpThumbFileId = null;
+            profilePfpThumbFileKey = null;
             _removePfpFlag = true;
             var avatarEl = document.getElementById('profile-edit-avatar');
             // Show initial letter instead of removed PFP
@@ -11770,6 +11905,13 @@ document.addEventListener('DOMContentLoaded', () => {
         for (var i = 0; i < modals.length; i++) {
             var el = document.getElementById(modals[i]);
             if (!boxLayerOpen(el)) continue;
+            // The upload modal is not just a panel to hide: it owns a file list and
+            // a transfer that may be running. Escaping it has to be the same
+            // Cancel the button is, or the upload keeps going invisibly.
+            if (el.id === 'upload-modal') {
+                closeUploadModal();
+                return true;
+            }
             el.style.display = 'none';
             if (el.id === 'settings-modal') {
                 if (window._stopRingTrimPreview) window._stopRingTrimPreview();
@@ -11825,6 +11967,21 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
         boxCloseTopLayer();
+    });
+
+    // Enter confirms the upload while the upload modal is the open layer, so the
+    // whole flow can be a file picker, a look at the preview, and one key. The
+    // modal has no text field of its own, so Enter here can only mean "upload".
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        var modal = document.getElementById('upload-modal');
+        if (!modal || modal.style.display !== 'flex') return;
+        if (isUploading) return; // the button is disabled mid-transfer; so is this
+        var t = e.target;
+        if (t && t.closest && t.closest('textarea, [contenteditable="true"], [contenteditable=""]')) return;
+        if (e.target && e.target.id === 'add-more-file-input') return;
+        e.preventDefault();
+        startFileUpload();
     });
 
     // Server choice modal buttons
@@ -14976,6 +15133,23 @@ function connectWebSocket(t) {
                                     scheduleUserDisplayNameSave();
                                     getProfilePicUrl(cacheKeyId, data.user_id);
                                 }
+                                // 360x360 preview key: cached under the thumb's own id so
+                                // getProfilePicUrl can serve the small file to every avatar.
+                                if (data.encrypted_profile_thumb_key && data.profile_thumb_key_nonce && data.profile_picture_thumb_file_id) {
+                                    try {
+                                        var decThumbKey = E2ECrypto.decryptDm(data.encrypted_profile_thumb_key, data.profile_thumb_key_nonce, data.dm_channel_id, kpSync.privateKey, otherPubKeySync, data.profile_thumb_key_message_nonce || null);
+                                        if (decThumbKey) {
+                                            if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                            userDisplayNameCache[data.user_id].profile_picture_thumb_file_id = data.profile_picture_thumb_file_id;
+                                            userDisplayNameCache[data.user_id].profile_picture_thumb_file_key = decThumbKey;
+                                            profileKeyCache[data.user_id + ':' + data.profile_picture_thumb_file_id] = decThumbKey;
+                                            try { fileKeyCache.set(data.profile_picture_thumb_file_id, decThumbKey); } catch (_) {}
+                                            scheduleProfileKeySave();
+                                            scheduleUserDisplayNameSave();
+                                            getProfilePicUrl(cacheKeyId, data.user_id);
+                                        }
+                                    } catch (e) {}
+                                }
                             } catch (e) {
                                 console.warn('Failed to decrypt profile key sync:', e);
                             }
@@ -15081,6 +15255,21 @@ function connectWebSocket(t) {
                                     var picHash = data.profile_picture_file_id_hash || data.profile_picture_file_id;
                                     profileKeyCache[data.user_id + ':' + picHash] = decryptedPicKey;
                                     scheduleProfileKeySave();
+                                }
+                                // 360x360 preview key (same key the whole server shares).
+                                if (data.encrypted_profile_thumb_key && data.profile_thumb_key_nonce && data.profile_picture_thumb_file_id) {
+                                    try {
+                                        var decThumbKey2 = new TextDecoder().decode(E2ECrypto.aeadDecrypt(data.encrypted_profile_thumb_key, serverKeyForSync, data.profile_thumb_key_nonce));
+                                        if (decThumbKey2) {
+                                            if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
+                                            userDisplayNameCache[data.user_id].profile_picture_thumb_file_id = data.profile_picture_thumb_file_id;
+                                            userDisplayNameCache[data.user_id].profile_picture_thumb_file_key = decThumbKey2;
+                                            profileKeyCache[data.user_id + ':' + data.profile_picture_thumb_file_id] = decThumbKey2;
+                                            try { fileKeyCache.set(data.profile_picture_thumb_file_id, decThumbKey2); } catch (_) {}
+                                            scheduleProfileKeySave();
+                                            scheduleUserDisplayNameSave();
+                                        }
+                                    } catch (e) {}
                                 }
                                 // Also decrypt banner key if available
                                 if (data.encrypted_banner_key && data.banner_key_nonce && data.profile_banner_file_id) {
@@ -15224,6 +15413,11 @@ function connectWebSocket(t) {
                                 // Use !== undefined so explicit null (field was removed) clears myProfile.
                                 // The old if(value) check was falsy for null, making removals invisible.
                                 if (decryptedProfileUpdate.profile_picture_file_id !== undefined) myProfile.profile_picture_file_id = decryptedProfileUpdate.profile_picture_file_id;
+                                // The 360x360 preview rides along with the picture in the
+                                // decrypted blob (raw key included), so own avatars update
+                                // without a profile re-fetch.
+                                if (decryptedProfileUpdate.profile_picture_thumb_file_id !== undefined) myProfile.profile_picture_thumb_file_id = decryptedProfileUpdate.profile_picture_thumb_file_id;
+                                if (decryptedProfileUpdate.profile_picture_thumb_file_key !== undefined) myProfile.profile_picture_thumb_file_key = decryptedProfileUpdate.profile_picture_thumb_file_key;
                                 if (decryptedProfileUpdate.profile_banner_file_id !== undefined) myProfile.profile_banner_file_id = decryptedProfileUpdate.profile_banner_file_id;
                                 if (decryptedProfileUpdate.encrypted_pic_key) {
                                     myProfile.encrypted_pic_key = decryptedProfileUpdate.encrypted_pic_key;
@@ -15262,6 +15456,20 @@ function connectWebSocket(t) {
                             myProfile.profile_picture_file_id = data.profile_picture_file_id !== undefined ? data.profile_picture_file_id : myProfile.profile_picture_file_id;
                             myProfile.profile_picture_file_id_hash = data.profile_picture_file_id_hash !== undefined ? data.profile_picture_file_id_hash : myProfile.profile_picture_file_id_hash;
                             myProfile.profile_picture_file_key = data.profile_picture_file_key !== undefined ? data.profile_picture_file_key : myProfile.profile_picture_file_key;
+                            myProfile.profile_picture_thumb_file_id = data.profile_picture_thumb_file_id !== undefined ? data.profile_picture_thumb_file_id : myProfile.profile_picture_thumb_file_id;
+                        }
+                        // Own thumb key: the server only ever holds the identity-key
+                        // encrypted copy, so decrypt it here like the picture key.
+                        if (data.encrypted_pic_thumb_key && data.pic_thumb_key_nonce && profileIdentForDec) {
+                            try {
+                                var ownThumbRaw = E2ECrypto.decodeEncryptedFileKey(data.encrypted_pic_thumb_key + ':' + data.pic_thumb_key_nonce, profileIdentForDec.privateKey);
+                                if (ownThumbRaw) {
+                                    myProfile.profile_picture_thumb_file_key = ownThumbRaw;
+                                    if (myProfile.profile_picture_thumb_file_id) {
+                                        try { fileKeyCache.set(myProfile.profile_picture_thumb_file_id, ownThumbRaw); } catch (_) {}
+                                    }
+                                }
+                            } catch (e) {}
                         }
                         localStorage.setItem('user', JSON.stringify(user));
                         updateSidebarFooter();
@@ -15273,6 +15481,13 @@ function connectWebSocket(t) {
                     // (display_name, username_color, border_color are no longer sent as plaintext)
                     if (!userDisplayNameCache[data.user_id]) userDisplayNameCache[data.user_id] = {};
                     if (data.profile_picture_file_id !== undefined) userDisplayNameCache[data.user_id].profile_picture_file_id = data.profile_picture_file_id;
+                    if (data.profile_picture_thumb_file_id !== undefined) userDisplayNameCache[data.user_id].profile_picture_thumb_file_id = data.profile_picture_thumb_file_id;
+                    if (data.encrypted_pic_thumb_key && data.pic_thumb_key_nonce && data.user_id === user.id && profileIdentForDec) {
+                        try {
+                            var thumbRawKey = E2ECrypto.decodeEncryptedFileKey(data.encrypted_pic_thumb_key + ':' + data.pic_thumb_key_nonce, profileIdentForDec.privateKey);
+                            if (thumbRawKey) userDisplayNameCache[data.user_id].profile_picture_thumb_file_key = thumbRawKey;
+                        } catch (e) {}
+                    }
                     // Explicitly trigger PFP re-fetch for updated profile pictures
                     if (data.profile_picture_file_id && data.user_id) {
                         getProfilePicUrl(data.profile_picture_file_id, data.user_id);
@@ -15283,6 +15498,10 @@ function connectWebSocket(t) {
                         if (decryptedProfileUpdate.username_border_color !== undefined) userDisplayNameCache[data.user_id].username_border_color = decryptedProfileUpdate.username_border_color;
                         // Store pic/banner keys in userDisplayNameCache from decrypted profile data
                         if (decryptedProfileUpdate.profile_picture_file_id) userDisplayNameCache[data.user_id].profile_picture_file_id = decryptedProfileUpdate.profile_picture_file_id;
+                        // Raw thumb id + key ride in the same decrypted blob, so other
+                        // clients can render the small avatar without a profile fetch.
+                        if (decryptedProfileUpdate.profile_picture_thumb_file_id !== undefined) userDisplayNameCache[data.user_id].profile_picture_thumb_file_id = decryptedProfileUpdate.profile_picture_thumb_file_id;
+                        if (decryptedProfileUpdate.profile_picture_thumb_file_key !== undefined) userDisplayNameCache[data.user_id].profile_picture_thumb_file_key = decryptedProfileUpdate.profile_picture_thumb_file_key;
                         if (decryptedProfileUpdate.profile_banner_file_id) userDisplayNameCache[data.user_id].profile_banner_file_id = decryptedProfileUpdate.profile_banner_file_id;
                         // Decrypt and cache pic key in userDisplayNameCache
                         if (decryptedProfileUpdate.encrypted_pic_key && decryptedProfileUpdate.pic_key_nonce && data.user_id === user.id && profileIdentForDec) {
@@ -19438,8 +19657,45 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     } catch (_) {}
 })();
 
+/**
+ * The element a `selectstart` target belongs to.
+ *
+ * The event's `target` is **not** reliably an element. Chromium names the DIV
+ * the text lives in for a drag that runs one way and reports something without
+ * a `closest` (a text node, or the document) for the same drag running the
+ * other way — measured on a real message body. The guard used to hand whatever
+ * it got straight to `selectionAllowed`, whose first line is "`typeof
+ * target.closest !== 'function'` -> refuse", so a legitimate drag that started
+ * on message text selected nothing at all, while the same message selected fine
+ * when the drag began elsewhere in the line. That asymmetry is the "selection
+ * works sometimes" report.
+ *
+ * A text node is answered by its parent element, which is the element the
+ * selection would live in.
+ */
+function selectionElementFrom(node) {
+    if (!node) return null;
+    if (typeof node.closest === 'function') return node;
+    var parent = node.parentElement;
+    return parent && typeof parent.closest === 'function' ? parent : null;
+}
+
+/**
+ * Where the gesture that is running was **pressed**, remembered from the press
+ * itself: the fallback for a `selectstart` whose target resolves to no element
+ * at all (Chromium reports the document that way for a drag whose press landed
+ * just outside the text it then selects). The press is the honest answer to
+ * "did this gesture start on something selectable?" — and on a phone no press
+ * is ever remembered as selectable, so the touch rule is untouched.
+ */
+var selectionGestureTarget = null;
+document.addEventListener('pointerdown', function (e) {
+    selectionGestureTarget = e.target;
+}, true);
+
 function selectionAllowed(target) {
-    if (!target || typeof target.closest !== 'function') return false;
+    target = selectionElementFrom(target);
+    if (!target) return false;
     if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return true;
     if (target.closest('.identity-key-display, .friend-code-display, .identity-key-box .key-value')) return true;
     if (target.closest(SELECTABLE_TEXT_SELECTOR)) return selectionFinePointer();
@@ -19447,7 +19703,9 @@ function selectionAllowed(target) {
 }
 
 document.addEventListener('selectstart', function (e) {
-    if (!selectionAllowed(e.target)) e.preventDefault();
+    // Whichever of the two names an element: the event's own target, or the
+    // press that began the gesture (see `selectionElementFrom`).
+    if (!selectionAllowed(selectionElementFrom(e.target) || selectionGestureTarget)) e.preventDefault();
 });
 
 // Message Right-Click Context Menu
@@ -21152,12 +21410,28 @@ function renderDmSidebar() {
                         preview = parsed.files.length + ' files';
                     } else if (parsed && parsed.type === 'file') {
                         preview = getFileIcon(parsed.mime_type) + ' ' + (parsed.filename || 'File');
+                    } else if (parsed && parsed.type === 'gif') {
+                        preview = 'GIF';
+                    } else if (parsed && parsed.type === 'sticker') {
+                        preview = 'Sticker';
+                    } else if (parsed && parsed.type === 'forward') {
+                        preview = 'Forwarded message';
+                    } else if (parsed && parsed.type === 'poll') {
+                        preview = 'Poll: ' + (parsed.question || '');
+                    } else if (parsed && typeof parsed.text === 'string') {
+                        // A plain message is JSON on the wire — `{"type":"text",
+                        // "text":"hello"}` — so the preview has to unwrap it.
+                        // Printing `decrypted` here showed the raw JSON in the DM
+                        // list instead of the message.
+                        preview = parsed.text;
                     } else {
                         preview = decrypted.substring(0, 40);
                     }
                 } catch (_) {
                     preview = decrypted.substring(0, 40);
                 }
+                // One line, no runs of whitespace: a preview is a single row.
+                preview = String(preview).replace(/\s+/g, ' ').trim().substring(0, 40);
             } catch (e) {
                 preview = '[encrypted]';
             }
@@ -32705,87 +32979,259 @@ async function decryptProfilePicData(fileKey, data) {
     return result.subarray(0, offset);
 }
 
-function getProfilePicUrl(fileId, userId) {
+// ===== Profile-picture auto-load =====
+// Its own setting, independent of autoLoadPreviews: a long member list or DM
+// sidebar would otherwise fetch and decrypt every avatar the moment it renders.
+// With it off, placeholders stay as the user's initial until clicked, and every
+// fetch path goes through getProfilePicUrl(), so one gate covers all surfaces
+// (message avatars, DM rows, member list, mentions, search, hover cards).
+function profilePicsAutoLoadEnabled() {
+    return localStorage.getItem('autoLoadProfilePics') !== 'false';
+}
+
+// Cache keys of pictures a fetch is already running for. The mutation observer
+// below must never re-arm these as "click to load" while they are in flight.
+var _pfpLoading = {};
+var _pfpObserver = null;
+
+// Turn every placeholder waiting for a picture into a click-to-load avatar.
+// Idempotent, and skips in-flight fetches so a user-initiated load survives.
+function markProfilePicsManual(root) {
+    var scope = (root && root.querySelectorAll) ? root : document;
+    var nodes = scope.querySelectorAll('[data-profile-pic-load]');
+    for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        var key = el.getAttribute('data-profile-pic-load');
+        if (!key || _pfpLoading[key]) continue;
+        el.removeAttribute('data-profile-pic-load');
+        el.setAttribute('data-profile-pic-manual', key);
+        if (!el.getAttribute('title')) el.setAttribute('title', 'Click to load profile picture');
+        el.style.cursor = 'pointer';
+    }
+}
+
+function _pfpObserverPush(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+        var added = mutations[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+            var n = added[j];
+            if (!n || n.nodeType !== 1) continue;
+            // Mark the node itself plus everything under it.
+            if (n.getAttribute) {
+                var own = n.getAttribute('data-profile-pic-load');
+                if (own && !_pfpLoading[own]) {
+                    n.removeAttribute('data-profile-pic-load');
+                    n.setAttribute('data-profile-pic-manual', own);
+                    if (!n.getAttribute('title')) n.setAttribute('title', 'Click to load profile picture');
+                    n.style.cursor = 'pointer';
+                }
+            }
+            if (n.querySelectorAll) markProfilePicsManual(n);
+        }
+    }
+}
+
+// Apply the setting: with it off, watch for new placeholders and mark them;
+// with it on, stop watching and load everything that was waiting for a click.
+function setProfilePicsAutoLoad(enabled) {
+    if (enabled) {
+        if (_pfpObserver) { _pfpObserver.disconnect(); _pfpObserver = null; }
+        var pending = document.querySelectorAll('[data-profile-pic-manual]');
+        var seen = {};
+        for (var i = 0; i < pending.length; i++) {
+            var el = pending[i];
+            var key = el.getAttribute('data-profile-pic-manual');
+            el.removeAttribute('data-profile-pic-manual');
+            el.removeAttribute('title');
+            el.style.cursor = '';
+            if (!key) continue;
+            el.setAttribute('data-profile-pic-load', key);
+            if (seen[key]) continue;
+            seen[key] = true;
+            var idx = key.indexOf(':');
+            if (idx > 0) getProfilePicUrl(key.slice(idx + 1), key.slice(0, idx), { manual: true });
+        }
+    } else {
+        if (!_pfpObserver && typeof MutationObserver !== 'undefined') {
+            _pfpObserver = new MutationObserver(_pfpObserverPush);
+            _pfpObserver.observe(document.documentElement, { childList: true, subtree: true });
+        }
+        markProfilePicsManual(document);
+    }
+}
+
+// Clicking a marked avatar loads just that picture. No preventDefault: the
+// places that own the click (a message avatar opening the profile card, a DM
+// row opening the conversation) keep working, and those views load their own
+// copy anyway.
+document.addEventListener('click', function (e) {
+    if (profilePicsAutoLoadEnabled()) return;
+    var el = e.target && e.target.closest ? e.target.closest('[data-profile-pic-manual]') : null;
+    if (!el) return;
+    var key = el.getAttribute('data-profile-pic-manual');
+    if (!key) return;
+    var idx = key.indexOf(':');
+    if (idx <= 0) return;
+    el.removeAttribute('data-profile-pic-manual');
+    el.removeAttribute('title');
+    el.style.cursor = '';
+    el.setAttribute('data-profile-pic-load', key);
+    getProfilePicUrl(key.slice(idx + 1), key.slice(0, idx), { manual: true });
+});
+
+// Some render paths only carry the sender's HMAC hash, but userDisplayNameCache
+// (and everything else keyed by user) uses the raw UUID. Resolve it back through
+// the DM list, the open server's member list, or our own id.
+function resolveRawUserId(userId) {
+    if (!userId || userId.length !== 64 || !/^[a-f0-9]{64}$/i.test(userId)) return userId;
+    var _hk = localStorage.getItem('e2e_hmac_key');
+    if (!_hk) return userId;
+    var resolved = userId;
+    // Try DM conversations to find the raw UUID
+    for (var _ci = 0; _ci < (dmConversations || []).length; _ci++) {
+        var _c = dmConversations[_ci];
+        if (_c && _c.other_user_id && E2ECrypto.hmacHex(_hk, _c.other_user_id) === userId) {
+            return _c.other_user_id;
+        }
+    }
+    // If not found in DMs, try the server member list
+    if (currentServerMemberList && currentServerMemberList.length > 0) {
+        for (var _mi = 0; _mi < currentServerMemberList.length; _mi++) {
+            var _m = currentServerMemberList[_mi];
+            if (_m && _m.id && E2ECrypto.hmacHex(_hk, _m.id) === userId) {
+                return _m.id;
+            }
+        }
+    }
+    // Check if it's our own HMAC hash
+    if (user && E2ECrypto.hmacHex(_hk, user.id) === userId) return user.id;
+    return resolved;
+}
+
+// The 360x360 preview that belongs to the picture identified by (userId, fileId),
+// if this client holds one: { fileId, key } where key may be null (id known,
+// key still missing). Both the resolved UUID and the raw id are tried, because
+// callers pass either.
+function _pfpThumbFor(fileId, uidA, uidB) {
+    try {
+        var entries = [];
+        var push = function (uid) {
+            if (!uid) return;
+            if (user && uid === user.id) {
+                if (!myProfile) return;
+                if (entries.indexOf(myProfile) === -1) entries.push(myProfile);
+            }
+            if (userDisplayNameCache[uid] && entries.indexOf(userDisplayNameCache[uid]) === -1) {
+                entries.push(userDisplayNameCache[uid]);
+            }
+        };
+        push(uidA);
+        push(uidB);
+        for (var i = 0; i < entries.length; i++) {
+            var e = entries[i];
+            if (!e || !e.profile_picture_thumb_file_id) continue;
+            // Only trust a preview that claims to belong to the picture we are
+            // about to render — a stale entry must never show the wrong person.
+            var ePic = e.profile_picture_file_id;
+            if (ePic && ePic !== fileId && e.profile_picture_file_id_hash !== fileId) continue;
+            var key = e.profile_picture_thumb_file_key || null;
+            if (!key) {
+                try { key = fileKeyCache.get(e.profile_picture_thumb_file_id); } catch (_) {}
+            }
+            // Without the preview's own key we cannot decrypt it, so it is not
+            // used at all: the caller falls back to the full-size picture.
+            if (!key) continue;
+            return { fileId: e.profile_picture_thumb_file_id, key: key };
+        }
+    } catch (_) {}
+    return null;
+}
+
+function getProfilePicUrl(fileId, userId, opts) {
     if (!fileId || !userId) return null;
     var cacheKey = userId + ':' + fileId;
     if (profilePicCache[cacheKey]) return profilePicCache[cacheKey];
+    // Auto-load off: this call is a render-time prefetch, not a user request,
+    // so leave the picture alone and let the placeholder ask for a click.
+    if (!(opts && opts.manual) && !profilePicsAutoLoadEnabled()) {
+        markProfilePicsManual(document);
+        return null;
+    }
+    _pfpLoading[cacheKey] = true;
     
-    // Use hash-based URL if fileId looks like a SHA-256 hex hash (64 hex chars)
+    // Prefer the 360x360 preview when we hold it: avatars are 32-64px, so they
+    // should never download (or decode) the full-size original. The cache key
+    // stays the full-size id, so every placeholder already in the DOM keeps
+    // matching without a single change at the render sites.
+    var _resolvedUserId = resolveRawUserId(userId);
+    var _thumb = (opts && opts.noThumb) ? null : _pfpThumbFor(fileId, _resolvedUserId, userId);
+    var fetchId = _thumb ? _thumb.fileId : fileId;
+    var _fetchIsThumb = !!_thumb;
+
+    // Use hash-based URL if fetchId looks like a SHA-256 hex hash (64 hex chars)
     // Otherwise use the raw file_id URL (for backward compatibility)
-    var isHash = /^[a-f0-9]{64}$/i.test(fileId);
-    var urlPath = isHash ? '/api/files/by-hash/' + fileId + '/download' : '/api/files/' + fileId + '/download';
+    var isHash = /^[a-f0-9]{64}$/i.test(fetchId);
+    var urlPath = isHash ? '/api/files/by-hash/' + fetchId + '/download' : '/api/files/' + fetchId + '/download';
     
     // Fetch encrypted file and update DOM when done (or fail cleanly)
     authFetch(urlPath).then(async function (res) {
         var cacheKeyForLoad = cacheKey;
+        // A preview that cannot be fetched, keyed or decrypted must never cost
+        // this render: fall back to the full-size picture (this is exactly what
+        // accounts without a preview do from the start).
+        var retryWithFullSize = function () {
+            if (!_fetchIsThumb || (opts && opts.noThumb)) return;
+            setTimeout(function () {
+                getProfilePicUrl(fileId, userId, { manual: opts && opts.manual, noThumb: true });
+            }, 0);
+        };
         try {
-            if (!res.ok) return;
+            if (!res.ok) {
+                retryWithFullSize();
+                return;
+            }
             var encryptedArray = new Uint8Array(await res.arrayBuffer());
-            
-            // Get the file key from cache, own profile, or fetch user's profile
-            var fileKeyB64 = null;
-            
-            // Resolve userId to a raw UUID if it looks like an HMAC hash (64 hex chars)
-            // userDisplayNameCache is keyed by raw UUID, so HMAC-hashed lookups fail silently
-            var _resolvedUserId = userId;
-            if (userId && userId.length === 64 && /^[a-f0-9]{64}$/i.test(userId)) {
-                var _hk = localStorage.getItem('e2e_hmac_key');
-                if (_hk) {
-                    // Try DM conversations to find the raw UUID
-                    for (var _ci = 0; _ci < (dmConversations || []).length; _ci++) {
-                        var _c = dmConversations[_ci];
-                        if (_c && _c.other_user_id && E2ECrypto.hmacHex(_hk, _c.other_user_id) === userId) {
-                            _resolvedUserId = _c.other_user_id;
-                            break;
-                        }
-                    }
-                    // If not found in DMs, try server member list
-                    if (_resolvedUserId === userId && currentServerMemberList && currentServerMemberList.length > 0) {
-                        for (var _mi = 0; _mi < currentServerMemberList.length; _mi++) {
-                            var _m = currentServerMemberList[_mi];
-                            if (_m && _m.id && E2ECrypto.hmacHex(_hk, _m.id) === userId) {
-                                _resolvedUserId = _m.id;
-                                break;
-                            }
-                        }
-                    }
-                    // Check if it's our own HMAC hash
-                    if (_resolvedUserId === userId && user) {
-                        var _myHmac = E2ECrypto.hmacHex(_hk, user.id);
-                        if (_myHmac === userId) _resolvedUserId = user.id;
-                    }
-                }
-            }
-            
+
+            // Get the file key from cache, own profile, or fetch user's profile.
+            // A preview's key is resolved together with its id, so it is already here.
+            var fileKeyB64 = (_thumb && _thumb.key) ? _thumb.key : null;
+
             // Try own profile first
-            if (myProfile && myProfile.profile_picture_file_id === fileId && myProfile.profile_picture_file_key) {
-                fileKeyB64 = myProfile.profile_picture_file_key;
+            if (!fileKeyB64 && myProfile && myProfile.profile_picture_file_id === fileId) {
+                fileKeyB64 = _fetchIsThumb
+                    ? (myProfile.profile_picture_thumb_file_key || null)
+                    : (myProfile.profile_picture_file_key || null);
             }
-            
+
             // Try userDisplayNameCache using resolved UUID
-            if (!fileKeyB64 && userDisplayNameCache[_resolvedUserId] && userDisplayNameCache[_resolvedUserId].profile_picture_file_key) {
-                fileKeyB64 = userDisplayNameCache[_resolvedUserId].profile_picture_file_key;
+            if (!fileKeyB64 && userDisplayNameCache[_resolvedUserId]) {
+                fileKeyB64 = _fetchIsThumb
+                    ? (userDisplayNameCache[_resolvedUserId].profile_picture_thumb_file_key || null)
+                    : (userDisplayNameCache[_resolvedUserId].profile_picture_file_key || null);
             }
             // Also try with the raw userId (for cases where it's already a UUID)
-            if (!fileKeyB64 && userId !== _resolvedUserId && userDisplayNameCache[userId] && userDisplayNameCache[userId].profile_picture_file_key) {
-                fileKeyB64 = userDisplayNameCache[userId].profile_picture_file_key;
+            if (!fileKeyB64 && userId !== _resolvedUserId && userDisplayNameCache[userId]) {
+                fileKeyB64 = _fetchIsThumb
+                    ? (userDisplayNameCache[userId].profile_picture_thumb_file_key || null)
+                    : (userDisplayNameCache[userId].profile_picture_file_key || null);
             }
-            
+
             // Try fileKeyCache (for file attachment keys, not profile pics)
             if (!fileKeyB64) {
-                fileKeyB64 = fileKeyCache.get(fileId);
+                fileKeyB64 = fileKeyCache.get(fetchId);
             }
-            
-            // Fallback: try legacy profileKeyCache for backward compatibility
-            if (!fileKeyB64) {
+
+            // Fallback: try legacy profileKeyCache for backward compatibility.
+            // Full-size only: a picture key can never decrypt a preview.
+            if (!fileKeyB64 && !_fetchIsThumb) {
                 fileKeyB64 = profileKeyCache[cacheKeyForLoad];
             }
-            
+
             // Persist a resolved key into the fkc_* media cache so it survives
             // the next page load even if profile_key_cache / display-name cache
             // are later evicted.
             if (fileKeyB64) {
-                try { fileKeyCache.set(fileId, fileKeyB64); } catch (_) {}
+                try { fileKeyCache.set(fetchId, fileKeyB64); } catch (_) {}
             }
             
             // Fetch user's profile to get the file key
@@ -32797,24 +33243,31 @@ function getProfilePicUrl(fileId, userId) {
                         // For own user: decrypt encrypted_pic_key with identity key
                         if (profileData && _resolvedUserId === (user && user.id)) {
                             var identForDec = E2ECrypto.getIdentityKeyPair();
-                            if (identForDec && profileData.encrypted_pic_key && profileData.pic_key_nonce) {
+                            // Own profile: the server holds the identity-key encrypted
+                            // copy of whichever file we are fetching (preview or full).
+                            var encKeyField = _fetchIsThumb ? 'encrypted_pic_thumb_key' : 'encrypted_pic_key';
+                            var encNonceField = _fetchIsThumb ? 'pic_thumb_key_nonce' : 'pic_key_nonce';
+                            if (identForDec && profileData[encKeyField] && profileData[encNonceField]) {
                                 try {
-                                    var decB64 = E2ECrypto.decodeEncryptedFileKey(profileData.encrypted_pic_key + ':' + profileData.pic_key_nonce, identForDec.privateKey);
+                                    var decB64 = E2ECrypto.decodeEncryptedFileKey(profileData[encKeyField] + ':' + profileData[encNonceField], identForDec.privateKey);
                                     if (decB64) {
                                         fileKeyB64 = decB64;
-                                        fileKeyCache.set(fileId, fileKeyB64);
+                                        fileKeyCache.set(fetchId, fileKeyB64);
                                         if (!userDisplayNameCache[_resolvedUserId]) userDisplayNameCache[_resolvedUserId] = {};
-                                        userDisplayNameCache[_resolvedUserId].profile_picture_file_key = fileKeyB64;
+                                        if (_fetchIsThumb) userDisplayNameCache[_resolvedUserId].profile_picture_thumb_file_key = fileKeyB64;
+                                        else userDisplayNameCache[_resolvedUserId].profile_picture_file_key = fileKeyB64;
                                     }
                                 } catch (e) {}
                             }
                             if (!fileKeyB64) {
                                 decryptOwnProfileFileKeys(profileData);
-                                if (profileData.profile_picture_file_key) {
-                                    fileKeyB64 = profileData.profile_picture_file_key;
-                                    fileKeyCache.set(fileId, fileKeyB64);
+                                var ownRawKey = _fetchIsThumb ? profileData.profile_picture_thumb_file_key : profileData.profile_picture_file_key;
+                                if (ownRawKey) {
+                                    fileKeyB64 = ownRawKey;
+                                    fileKeyCache.set(fetchId, fileKeyB64);
                                     if (!userDisplayNameCache[_resolvedUserId]) userDisplayNameCache[_resolvedUserId] = {};
-                                    userDisplayNameCache[_resolvedUserId].profile_picture_file_key = fileKeyB64;
+                                    if (_fetchIsThumb) userDisplayNameCache[_resolvedUserId].profile_picture_thumb_file_key = fileKeyB64;
+                                    else userDisplayNameCache[_resolvedUserId].profile_picture_file_key = fileKeyB64;
                                 }
                             }
                         } else if (profileData && _resolvedUserId !== (user && user.id)) {
@@ -32840,16 +33293,19 @@ function getProfilePicUrl(fileId, userId) {
             }
             
             var blob;
-            if (!fileKeyB64) return;
+            if (!fileKeyB64) {
+                retryWithFullSize();
+                return;
+            }
             try {
                 var actualKeyB64 = fileKeyB64;
                 var identity = E2ECrypto.getIdentityKeyPair();
-                var isOwnPic = myProfile && myProfile.profile_picture_file_id === fileId;
+                var isOwnPic = myProfile && (myProfile.profile_picture_file_id === fileId || (_fetchIsThumb && myProfile.profile_picture_thumb_file_id === fetchId));
                 if (identity && fileKeyB64.indexOf(':') > 0 && isOwnPic) {
                     var decryptedKey = E2ECrypto.decodeEncryptedFileKey(fileKeyB64, identity.privateKey);
                     if (decryptedKey) actualKeyB64 = decryptedKey;
                 }
-                if (actualKeyB64.indexOf(':') > 0) {
+                if (actualKeyB64.indexOf(':') > 0 && !_fetchIsThumb) {
                     var cachedKey = profileKeyCache[cacheKeyForLoad];
                     if (cachedKey && cachedKey.indexOf(':') === -1) {
                         actualKeyB64 = cachedKey;
@@ -32858,10 +33314,14 @@ function getProfilePicUrl(fileId, userId) {
                 if (actualKeyB64.indexOf(':') > 0) return;
                 var fileKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(actualKeyB64));
                 var decrypted = await decryptProfilePicData(fileKey, encryptedArray);
-                if (!decrypted) return;
+                if (!decrypted) {
+                    retryWithFullSize();
+                    return;
+                }
                 blob = new Blob([decrypted], { type: 'image/png' });
             } catch (e) {
                 console.warn('Profile pic decrypt failed:', e);
+                retryWithFullSize();
                 return;
             }
             
@@ -32877,11 +33337,21 @@ function getProfilePicUrl(fileId, userId) {
                 el.style.background = 'transparent';
                 el.removeAttribute('data-profile-pic-load');
             });
+            // Avatars that were armed as click-to-load (auto-load off) while this
+            // fetch was already running: the bytes are here, so show them.
+            document.querySelectorAll('[data-profile-pic-manual="' + cacheKeyForLoad + '"]').forEach(function (el) {
+                el.innerHTML = '<img class="avatar-img" src="' + url + '" alt="" data-profile-pic="' + cacheKeyForLoad + '">';
+                el.style.background = 'transparent';
+                el.style.cursor = '';
+                el.removeAttribute('title');
+                el.removeAttribute('data-profile-pic-manual');
+            });
             // Update forward sender placeholders
             document.querySelectorAll('[data-fwd-pic-load="' + cacheKeyForLoad + '"]').forEach(function (el) {
                 el.outerHTML = '<img class="forward-sender-pic" src="' + url + '" alt="">';
             });
         } finally {
+            delete _pfpLoading[cacheKeyForLoad];
             // Always remove the loading indicator so pulse stops, even if fetch/decrypt fails
             document.querySelectorAll('[data-profile-pic-load="' + cacheKeyForLoad + '"]').forEach(function (el) {
                 el.removeAttribute('data-profile-pic-load');
@@ -32891,7 +33361,7 @@ function getProfilePicUrl(fileId, userId) {
                 el.removeAttribute('data-fwd-pic-load');
             });
         }
-    }).catch(function () {});
+    }).catch(function () { delete _pfpLoading[cacheKeyForLoad]; });
     return null; // Will be updated async when fetch completes
 }
 
@@ -33094,6 +33564,14 @@ async function uploadCurrentProfileToConversations() {
         profile_picture_file_key: myProfile.profile_picture_file_key || null,
         profile_banner_file_key: myProfile.profile_banner_file_key || null,
     };
+    // The 360x360 preview travels in the same blob, so the profiles everyone else
+    // reads keep pointing at the small file. Only added when this device holds it:
+    // this is a NON-authoritative re-upload, so a device that only knows about
+    // the full-size picture must omit the fields rather than null them out.
+    if (myProfile.profile_picture_thumb_file_id && myProfile.profile_picture_thumb_file_key) {
+        profileData.profile_picture_thumb_file_id = myProfile.profile_picture_thumb_file_id;
+        profileData.profile_picture_thumb_file_key = myProfile.profile_picture_thumb_file_key;
+    }
     var profileDataJson = JSON.stringify(profileData);
     // authoritative=false: a background re-upload. The server rejects it if it
     // would DROP a banner/PFP the user currently has — a second line of
@@ -33132,9 +33610,12 @@ async function loadMyProfile() {
                                     if (decrypted.profile_background_color) data.profile_background_color = decrypted.profile_background_color;
                                     // Extract pic/banner fields from encrypted_profile_data
                                     if (decrypted.profile_picture_file_id) data.profile_picture_file_id = decrypted.profile_picture_file_id;
+                                    // The 360x360 preview → small avatars, full picture → profile view.
+                                    if (decrypted.profile_picture_thumb_file_id) data.profile_picture_thumb_file_id = decrypted.profile_picture_thumb_file_id;
                                     if (decrypted.profile_banner_file_id) data.profile_banner_file_id = decrypted.profile_banner_file_id;
                                     // Raw keys are stored directly in profileData (not identity-key-encrypted)
                                     if (decrypted.profile_picture_file_key) data.profile_picture_file_key = decrypted.profile_picture_file_key;
+                                    if (decrypted.profile_picture_thumb_file_key) data.profile_picture_thumb_file_key = decrypted.profile_picture_thumb_file_key;
                                     if (decrypted.profile_banner_file_key) data.profile_banner_file_key = decrypted.profile_banner_file_key;
                                 }
                             }
@@ -33173,6 +33654,11 @@ async function loadMyProfile() {
         // (chat, server popup, DM panel, channel-list chips) can load them.
         if (data.profile_picture_file_id !== undefined) userDisplayNameCache[user.id].profile_picture_file_id = data.profile_picture_file_id;
         if (data.profile_picture_file_key) userDisplayNameCache[user.id].profile_picture_file_key = data.profile_picture_file_key;
+        if (data.profile_picture_thumb_file_id !== undefined) userDisplayNameCache[user.id].profile_picture_thumb_file_id = data.profile_picture_thumb_file_id;
+        if (data.profile_picture_thumb_file_key) {
+            userDisplayNameCache[user.id].profile_picture_thumb_file_key = data.profile_picture_thumb_file_key;
+            try { fileKeyCache.set(data.profile_picture_thumb_file_id, data.profile_picture_thumb_file_key); } catch (_) {}
+        }
         if (data.profile_banner_file_id !== undefined) userDisplayNameCache[user.id].profile_banner_file_id = data.profile_banner_file_id;
         if (data.profile_banner_file_key) userDisplayNameCache[user.id].profile_banner_file_key = data.profile_banner_file_key;
         scheduleUserDisplayNameSave();
@@ -34285,6 +34771,12 @@ let profileBannerFileId = null;
 let profileBannerFileKey = null;
 let profilePfpFileId = null;
 let profilePfpFileKey = null;
+// 360x360 preview of the same crop, uploaded as its own encrypted file. It is
+// what every avatar slot renders from; the full-size picture is only used by the
+// profile view. Null whenever the thumbnail upload failed or the picture was
+// set by an older client — every reader falls back to the original.
+let profilePfpThumbFileId = null;
+let profilePfpThumbFileKey = null;
 var _removePfpFlag = false;
 var _removeBannerFlag = false;
 let bannerCropState = null;
@@ -34302,6 +34794,14 @@ function decryptOwnProfileFileKeys(data) {
             var combined = data.pic_key_nonce + ':' + data.encrypted_pic_key;
             var rawKey = E2ECrypto.decodeEncryptedFileKey(combined, identity.privateKey);
             if (rawKey) data.profile_picture_file_key = rawKey;
+        } catch (e) {}
+    }
+    // The 360x360 preview has its own key, encrypted with the same identity key.
+    if (data.encrypted_pic_thumb_key && data.pic_thumb_key_nonce) {
+        try {
+            var combinedThumb = data.pic_thumb_key_nonce + ':' + data.encrypted_pic_thumb_key;
+            var rawThumbKey = E2ECrypto.decodeEncryptedFileKey(combinedThumb, identity.privateKey);
+            if (rawThumbKey) data.profile_picture_thumb_file_key = rawThumbKey;
         } catch (e) {}
     }
     if (data.encrypted_banner_key && data.banner_key_nonce) {
@@ -34425,6 +34925,8 @@ async function openProfileModal(userId) {
     profileBannerFileKey = null;
     profilePfpFileId = null;
     profilePfpFileKey = null;
+    profilePfpThumbFileId = null;
+    profilePfpThumbFileKey = null;
     _removePfpFlag = false;
     _removeBannerFlag = false;
     
@@ -35325,6 +35827,9 @@ async function saveProfile() {
             // When _removePfpFlag/_removeBannerFlag is true, explicitly null the
             // field to signal removal — bypassing the myProfile fallback.
             profile_picture_file_id: _removePfpFlag ? null : (profilePfpFileId || _curProfile.profile_picture_file_id || null),
+            // The 360x360 preview travels with the picture it belongs to: a thumb
+            // without its picture (or the other way round) would mislead readers.
+            profile_picture_thumb_file_id: _removePfpFlag ? null : (profilePfpThumbFileId || _curProfile.profile_picture_thumb_file_id || null),
             profile_banner_file_id: _removeBannerFlag ? null : (profileBannerFileId || _curProfile.profile_banner_file_id || null),
             // Store RAW file keys here — not identity-key-encrypted.
             // The entire profileData is encrypted with profileDataKey before storage,
@@ -35332,6 +35837,7 @@ async function saveProfile() {
             // Other users get profileDataKey via shared_profile_data_keys or conversation
             // profiles, so they can decrypt profileData and get the raw keys directly.
             profile_picture_file_key: _removePfpFlag ? null : (profilePfpFileKey || _curProfile.profile_picture_file_key || null),
+            profile_picture_thumb_file_key: _removePfpFlag ? null : (profilePfpThumbFileKey || _curProfile.profile_picture_thumb_file_key || null),
             profile_banner_file_key: _removeBannerFlag ? null : (profileBannerFileKey || _curProfile.profile_banner_file_key || null)
         };
         
@@ -35377,6 +35883,13 @@ async function saveProfile() {
                 var pfpParts = encPfp.split(':');
                 body.encrypted_pic_key = pfpParts[1] || null;
                 body.pic_key_nonce = pfpParts[0] || null;
+            }
+            if (profilePfpThumbFileId && profilePfpThumbFileKey) {
+                body.profile_picture_thumb_file_id = profilePfpThumbFileId;
+                var encThumb = E2ECrypto.encodeEncryptedFileKey(profilePfpThumbFileKey, identityForKeys.privateKey);
+                var thumbParts = encThumb.split(':');
+                body.encrypted_pic_thumb_key = thumbParts[1] || null;
+                body.pic_thumb_key_nonce = thumbParts[0] || null;
             }
         } else if (_removePfpFlag) {
             body.remove_picture = true;
@@ -35438,6 +35951,8 @@ async function saveProfile() {
         // dropped the whole PATCH (the banner-loss bug).
         profilePfpFileId = null;
         profilePfpFileKey = null;
+        profilePfpThumbFileId = null;
+        profilePfpThumbFileKey = null;
         profileBannerFileId = null;
         profileBannerFileKey = null;
         _removePfpFlag = false;
@@ -36026,6 +36541,24 @@ async function processPfpCrop() {
         
         profilePfpFileId = uploadResult.fileId;
         profilePfpFileKey = uploadResult.fileKey;
+        profilePfpThumbFileId = null;
+        profilePfpThumbFileKey = null;
+        // Upload the 360x360 preview as its own encrypted file. Avatars render at
+        // 32-64px all over the app, so they should never pull (or decode) the
+        // full-size picture. Best-effort: if it fails, readers fall back to the
+        // original, which is exactly today's behaviour.
+        try {
+            var thumbBlob = await makePfpThumbBlob(s.img, natX, natY, natSize);
+            if (thumbBlob) {
+                var thumbUpload = await uploadBannerImage(new File([thumbBlob], 'avatar_thumb.png', { type: 'image/png' }));
+                if (thumbUpload) {
+                    profilePfpThumbFileId = thumbUpload.fileId;
+                    profilePfpThumbFileKey = thumbUpload.fileKey;
+                }
+            }
+        } catch (e) {
+            console.warn('PFP thumbnail upload failed (avatars will use the full picture):', e);
+        }
         _removePfpFlag = false;
         document.getElementById('profile-pfp-crop-container').style.display = 'none';
         if (pfpCropState && pfpCropState._cleanup) pfpCropState._cleanup();
@@ -36038,6 +36571,27 @@ async function processPfpCrop() {
     } catch (e) {
         alert('PFP crop failed: ' + e.message);
     }
+}
+
+// Longest edge of the avatar thumbnail. Big enough for the largest avatar in
+// the app (the 96px profile header in a DM call / voice tile at 3x DPR) and for
+// the 288px profile-view avatar on a retina screen, small enough that a whole
+// member list costs a few hundred KB instead of tens of MB.
+var PFP_THUMB_SIZE = 360;
+
+// Draw the SAME square crop the user chose, at 360x360, so the thumbnail is the
+// full picture scaled down and nothing about framing changes.
+async function makePfpThumbBlob(srcImg, natX, natY, natSize) {
+    var size = Math.min(PFP_THUMB_SIZE, Math.max(1, Math.round(natSize || 0)));
+    var c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    var ctx = c.getContext('2d');
+    ctx.drawImage(srcImg, natX, natY, natSize, natSize, 0, 0, size, size);
+    var blob = await new Promise(function (resolve) { c.toBlob(resolve, 'image/png'); });
+    c.width = 0;
+    c.height = 0;
+    return blob;
 }
 
 // Upload a processed image file with encryption, return { fileId, fileKey }

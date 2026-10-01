@@ -8,6 +8,16 @@ function unique(b: string): string {
     return `${b}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 }
 
+async function signIn(page: Page, username: string) {
+    await page.goto(`${BASE}/login.html`);
+    await page.waitForSelector('#login-form', { timeout: 20000 });
+    await page.fill('#login-username', username);
+    await page.fill('#login-password', PASSWORD);
+    await page.click('#login-form button[type="submit"]');
+    await page.waitForURL('**/index.html', { timeout: 60000 });
+    await page.waitForSelector('#current-user', { timeout: 30000 });
+}
+
 async function register(page: Page, username: string) {
     await page.goto(`${BASE}/login.html`);
     await page.evaluate(() => { localStorage.clear(); });
@@ -246,7 +256,10 @@ async function touchDragRoleTo(page: Page, roleName: string, tierIndex: number, 
             });
         }
         row.dispatchEvent(ev('touchstart', sx, sy));
-        await new Promise((res) => setTimeout(res, 500));      // longer than the 320ms long-press
+        // Past the minimum hold (150 ms) so the press is ours, but well before
+        // the hold window (500 ms) — a still finger at 500 ms opens the row's
+        // menu instead, and an open menu swallows the move below.
+        await new Promise((res) => setTimeout(res, 250));
         row.dispatchEvent(ev('touchmove', tx, ty));
         await new Promise((res) => setTimeout(res, 60));
         row.dispatchEvent(ev('touchend', tx, ty));
@@ -264,12 +277,14 @@ test.describe.serial('Server role tiers', () => {
     // The drag/join tests need every tier on screen, so they disable the list's
     // 190px scroll clamp. The auto-scroll test removes that override again.
     let noScrollStyle: any = null;
+    let username = '';
 
     test.beforeAll(async ({ browser }) => {
         test.setTimeout(180000);
         ctx = await browser.newContext({ ignoreHTTPSErrors: true, serviceWorkers: 'block' });
         page = await ctx.newPage();
-        await register(page, unique('tier_owner'));
+        username = unique('tier_owner');
+        await register(page, username);
         sid = await createServer(page, 'Tier Lab');
         await openRoles(page, sid);
         // The roles list is a 190px scroll container in the real UI. For drag
@@ -596,10 +611,12 @@ test.describe.serial('Server role tiers', () => {
             viewport: { width: 390, height: 780 },
             hasTouch: true,
             isMobile: true,
-            // Reuse the owner's session so the phone sees the same account.
-            storageState: await ctx.storageState(),
         });
         const mpage = await mctx.newPage();
+        // Sign in as the owner on the phone: copied storageState carries a
+        // token this context cannot read, so the phone would render an empty
+        // rail and time out before any gesture.
+        await signIn(mpage, username);
         await mpage.goto(`${BASE}/index.html`);
         await mpage.waitForSelector(`.server-icon[data-id="${sid}"]`, { timeout: 30000 });
         await mpage.click(`.server-icon[data-id="${sid}"]`);

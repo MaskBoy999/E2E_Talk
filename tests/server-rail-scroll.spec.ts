@@ -8,6 +8,24 @@ function unique(b: string): string {
     return `${b}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 }
 
+/**
+ * Sign in on the phone itself.
+ *
+ * The phone tests used to copy the desktop context's `storageState`. That
+ * carries the token but not the key this context derives for it, so the phone
+ * booted holding a session it could not read: the rail rendered nothing and
+ * every selector timed out. A real phone signs in on the phone.
+ */
+async function signIn(page: Page, username: string) {
+    await page.goto(`${BASE}/login.html`);
+    await page.waitForSelector('#login-form', { timeout: 20000 });
+    await page.fill('#login-username', username);
+    await page.fill('#login-password', PASSWORD);
+    await page.click('#login-form button[type="submit"]');
+    await page.waitForURL('**/index.html', { timeout: 60000 });
+    await page.waitForSelector('#current-user', { timeout: 30000 });
+}
+
 async function register(page: Page, username: string) {
     await page.goto(`${BASE}/login.html`);
     await page.evaluate(() => { localStorage.clear(); });
@@ -165,6 +183,7 @@ async function holdDragAtEdge(page: Page, edge: 'top' | 'bottom', ms: number) {
 test.describe.serial('Server rail drag auto-scroll', () => {
     let ctx: BrowserContext;
     let page: Page;
+    let username = '';
 
     test.beforeAll(async ({ browser }) => {
         test.setTimeout(240000);
@@ -174,7 +193,8 @@ test.describe.serial('Server rail drag auto-scroll', () => {
         // scrollable — and dragging to an off-screen folder the reason for
         // auto-scroll in the first place.
         await page.setViewportSize({ width: 1100, height: 560 });
-        await register(page, unique('rail'));
+        username = unique('rail');
+        await register(page, username);
         const ids = await makeServers(page, 15);
         const failed = ids.filter((id) => id.startsWith('ERR'));
         expect(failed, `server creation failed: ${failed.join(',')}`).toEqual([]);
@@ -306,9 +326,11 @@ test.describe.serial('Server rail drag auto-scroll', () => {
             viewport: { width: 390, height: 620 },
             hasTouch: true,
             isMobile: true,
-            storageState: await ctx.storageState(),
         });
         const mpage = await mctx.newPage();
+        // Sign in on the phone: copied storageState carries a token this
+        // context cannot read, and an empty rail makes the whole test time out.
+        await signIn(mpage, username);
         await loadRail(mpage, 15);
 
         const before = await railMetrics(mpage);
@@ -340,7 +362,10 @@ test.describe.serial('Server rail drag auto-scroll', () => {
             strip.scrollTop = 0;
             const at = strip.scrollTop;
             icon.dispatchEvent(ev('touchstart', startX, startY));
-            await new Promise((res) => setTimeout(res, 550));   // past the 350ms long-press
+            // Hold past the minimum (150 ms) so the press is ours, then move —
+            // but well before the hold window (500 ms) turns a still finger into
+            // a menu, which would swallow every move that follows.
+            await new Promise((res) => setTimeout(res, 250));
             // Hold the finger in the bottom edge band so the rail scrolls.
             for (let i = 0; i < 14; i++) {
                 icon.dispatchEvent(ev('touchmove', startX, edgeY));

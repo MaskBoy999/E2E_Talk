@@ -418,6 +418,36 @@
         // resume re-decorates the document).
         document.addEventListener('visibilitychange', ensureButton);
         window.addEventListener('pageshow', ensureButton);
+
+        // Tell the shell this page is alive (see PAGE_ALIVE_EVENT in
+        // src-tauri/src/lib.rs). The one state the shell cannot see from Rust on
+        // its own is a window showing the WebView's *own* error page: that page
+        // is not HTML the app served, it runs no script, so this file never
+        // boots there and the wipe button is missing exactly when the saved
+        // server has died for good. Silence from here is what makes the shell put
+        // the address screen back — a local page, which therefore does have the
+        // button. A hidden page says so instead, because a minimized desktop
+        // window and a backgrounded Android activity stop their timers for
+        // perfectly good reasons and must not be mistaken for a crash.
+        (function heartbeat() {
+            function visible() {
+                try { return document.visibilityState !== 'hidden'; } catch (_) { return true; }
+            }
+            function tell(name) {
+                var t = tauri();
+                try { if (t && t.event && t.event.emit) t.event.emit(name); } catch (_) {}
+            }
+            function beat() {
+                if (!visible()) return; // the listener below already said `hidden`
+                tell('box:page-alive');
+            }
+            beat();
+            setInterval(beat, 5000);
+            document.addEventListener('visibilitychange', function () {
+                if (visible()) beat();
+                else tell('box:page-hidden');
+            });
+        })();
     }
 
     if (document.readyState === 'loading') {

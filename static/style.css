@@ -7441,6 +7441,28 @@ body.show-msg-status-always .message .content .msg-status,
 body.show-msg-status-hover .message:hover .content .msg-status {
     display: block;
 }
+/* …and in hover mode it must not *move* the message when it appears.
+
+   It is a float, and a float that appears grows `.content`'s height. The
+   message list pins its content to the bottom (`.message-list::before {
+   flex: 1 }`), so growing the hovered message pushes the message **up** by the
+   receipt line's whole height — measured: the message text sat at y=546 at rest
+   and at y=527 with the pointer on it. A reader aiming at the first line to
+   start a selection therefore pressed 19 px lower than they aimed, which lands
+   mid-message: the gesture works "if you start somewhere in the middle" and not
+   when you start at the beginning, and it is decided by whether the pointer was
+   already over the message. Hover-revealed chrome must not reflow text — the
+   timestamp above is absolutely positioned for the same reason.
+
+   Taken out of flow the receipt stays exactly where it was (the bottom of the
+   content box, right-aligned) and nothing moves. `always` mode is unchanged: it
+   is on for every message at once, so there is no state to jump between. */
+body.show-msg-status-hover .message .content .msg-status {
+    float: none;
+    position: absolute;
+    right: 0;
+    top: 100%;
+}
 .msg-status.read {
     color: var(--accent, #4fc3f7);
 }
