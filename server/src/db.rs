@@ -1411,6 +1411,20 @@ impl Database {
         // have not signed in since the upgrade keep working.
         let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN identity_pq_public_key BLOB");
 
+        // Migration 096 (B5 follow-up): scrub raw IPs from admin_audit rows
+        // written by older builds, before log_admin_action switched to
+        // server-keyed HMAC pseudonyms. Those rows still hold the client
+        // address verbatim; the audit log itself is worth keeping, the raw
+        // address is not. Anything that is not already a pseudonym (`h1_` +
+        // 32 hex chars) or the constant mask is rewritten to the mask — the
+        // log's display contract. Idempotent: scrubbed rows match no branch
+        // of the WHERE, so every boot is a no-op after the first.
+        let _ = conn.execute_batch(
+            "UPDATE admin_audit SET ip = '*.*.*.*' \
+             WHERE ip IS NOT NULL AND ip <> '*.*.*.*' \
+               AND ip NOT LIKE 'h1\\_%' ESCAPE '\\';",
+        );
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -9887,5 +9901,76 @@ mod recursive_delete_tests {
         // Deleting the message releases it.
         fx.db.delete_message(&msg, "a").unwrap();
         assert_shredded(&fx, &file);
+    }
+}
+
+// ── Admin-audit IP scrub (B5 follow-up) ──────────────────────────────────
+// Older builds wrote the client address into admin_audit.ip verbatim. The
+// server now only writes a keyed HMAC pseudonym (`h1_…`) or the mask, so
+// opening an existing database must rewrite the legacy rows — and must leave
+// the pseudonyms and masks written since untouched.
+#[cfg(test)]
+mod admin_audit_ip_scrub_tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> String {
+        let root = std::env::temp_dir()
+            .join(format!("e2e-ip-scrub-{}-{}", tag, Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn audit_ips(db: &Database) -> Vec<String> {
+        db.list_admin_audit(50).unwrap().into_iter().map(|r| r.5).collect()
+    }
+
+    #[test]
+    fn opening_the_database_masks_legacy_raw_audit_ips() {
+        let root = temp_root("mask");
+        let path = format!("{}/test.db", root);
+        let uploads = format!("{}/uploads", root);
+
+        // First boot creates the schema; the rows are written by hand the way
+        // the old server did (verbatim address), next to what it writes today.
+        let db = Database::new(&path, &uploads).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO admin_audit (actor, action, target, ip) VALUES
+                   ('admin', 'login', NULL, '203.0.113.9'),
+                   ('admin', 'login', NULL, '::1'),
+                   ('admin', 'login', NULL, 'unknown'),
+                   ('admin', 'login', NULL, 'h1_00112233445566778899aabbccddeeff'),
+                   ('admin', 'login', NULL, '*.*.*.*')",
+                [],
+            )
+            .unwrap();
+        }
+        drop(db);
+
+        // Second boot runs the migration: a raw address (or the old
+        // "unknown" fallback) becomes the mask; pseudonyms/masks survive.
+        let db = Database::new(&path, &uploads).unwrap();
+        let mut got = audit_ips(&db);
+        got.sort();
+        let mut want = vec![
+            "*.*.*.*".to_string(),
+            "*.*.*.*".to_string(),
+            "*.*.*.*".to_string(),
+            "h1_00112233445566778899aabbccddeeff".to_string(),
+            "*.*.*.*".to_string(),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+
+        // Idempotent: a third boot changes nothing.
+        drop(db);
+        let db = Database::new(&path, &uploads).unwrap();
+        let mut again = audit_ips(&db);
+        again.sort();
+        assert_eq!(again, want);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
