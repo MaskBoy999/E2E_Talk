@@ -498,11 +498,17 @@ its fix, including the transport leg that is already hybrid
 1. **Version the envelope first.** Every encrypted envelope gains (or already
    has) a scheme byte; new algorithms are added as a new version and old ones
    stay readable for a deprecation window.
-2. **Hybrid identity envelopes.** Identity/`crypto_box`-style envelopes migrate
-   to X25519 + ML-KEM-768: both public keys travel in the envelope and both
-   shared secrets are concatenated before the existing KDF. Security then holds
-   unless *both* algorithms are broken, and envelopes without the ML-KEM part
-   still verify under the old version.
+2. **Hybrid identity envelopes — shipped in 0.2.44.** Identity/`crypto_box`-style
+   envelopes are now X25519 + ML-KEM-768: the envelope carries the ML-KEM
+   ciphertext and the KDF consumes both shared secrets (plus both public keys
+   and the ciphertext) so security holds unless *both* algorithms are broken;
+   envelopes without the ML-KEM part still verify under the old version. The
+   deterministic ML-KEM identity key publishes at registration / first app
+   load, the server's offline-notification escrow uses the same hybrid KEM,
+   and login signatures are hybrid Ed25519 + ML-DSA-65 (verify both, re-key on
+   registration and password change). Full status and remaining coverage (DM
+   message envelopes, voice frame keys, ratchet/MLS) in
+   `POST_QUANTUM_AUDIT.md` §1–§2.
 3. **Forward secrecy for new conversations.** A Signal-style double ratchet
    (per-message keys, deleted after use) for 1:1, MLS (RFC 9420) for groups —
    MLS's epoch keys also give post-compromise security and a natural home for

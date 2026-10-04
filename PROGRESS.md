@@ -1,5 +1,88 @@
 # PROGRESS
 
+## Hybrid PQ envelopes and logins, IP-hash rate-limit keys, every remaining limit on the panel (0.2.44)
+
+**Post-quantum phases 0–2 shipped: hybrid envelopes, hybrid escrow, hybrid logins.**
+`POST_QUANTUM_AUDIT.md`'s application-layer gap is closed for the flows that
+carry keys. Envelope v2 packs `E2EPQv2|` magic + ML-KEM-768 ciphertext +
+nonce + AEAD ciphertext into the existing ciphertext field (no schema change)
+and derives the key from HKDF over
+`dh || ss || kem_ct || sender_pub || recipient_pub` under `e2e-envelope-v2`;
+the magic lives inside the bytes, so deleting a marker fails the AEAD tag
+instead of downgrading, and recorded v1 envelopes stay byte-identical and
+readable. A recipient with no published PQ key keeps the v1 path, and
+self-encryption (own server/channel keys, notification sound, soundboard
+clips) upgrades automatically. ML-KEM-768 identity keys are deterministic —
+HKDF of the identity private key under `e2e:pq-identity-seed:v1` — so every
+device of one account publishes identical bytes: at registration and
+idempotently via `POST /api/identity/pq-key` on app load; `/api/identity/{id}`
+serves the key and `/api/client-config` advertises `pq_envelope: true` /
+`pq_kem: ML-KEM-768`. The server's offline-notification escrow emits
+`v2:epk:kem_ct:nonce:ct` keyed by the byte-identical
+`SHA-256("e2e-escrow-v2|" || dh || ss || kem_ct || epk || recipient_pub)` the
+client decrypts with. Phase 2 turns `login_public_key` into a v2 JSON blob
+(`{v,ed25519,ml_dsa_65}`; legacy bare Ed25519 keys still verify): registration
+and password change require the hybrid blob, and a v2 account's login must
+carry both signatures over `e2e-login-v1|username|nonce` — a missing or wrong
+ML-DSA half is a hard refusal, never a fallback, while pre-rollout accounts
+keep signing in with Ed25519 until their next change re-keys them. The
+vendored `@noble/post-quantum` 0.7.1 closure (10 files) is checksum-pinned;
+`tools/gen-pq-kat.mjs` generates a cross-language fixture that `cargo test`
+re-derives and `tests/pq-envelopes.spec.ts` re-checks in the browser —
+including a live `openssl` assertion that the server still negotiates
+X25519MLKEM768. Scope note: DM message envelopes still call the same function
+without a PQ key and stay v1 (the next step, with ratchet/MLS, in the audit's
+phase list).
+
+**Rate-limit buckets never key on a raw IP.** Every per-IP limiter (login,
+registration, kill-switch, 2FA, reauth, admin login, friend request, join,
+mutation, search, WS auth, document/auth-params fetches) and the admin usage +
+audit views now use `h1_<32 hex>` — an HMAC of the client address under the
+server's master key. The hash is computed server-side from the request; a
+client-supplied hash header is never read, so it cannot choose or share a
+bucket. Raw addresses are not stored and do not appear in the usage view; the
+admin test sends spoofed `X-Client-IP-Hash` / `X-Rate-Limit-IP` headers on
+every request and proves the server buckets by its own hash anyway.
+
+**The last hardcoded limits joined `RuntimeTuning`.** The voice-signal frame
+budget + window, the failed-password window, the login-nonce TTL and
+live-nonce cap, and the session-lifetime cap are now DB → env → default fields
+editable from the admin panel (58 tuning fields, all rendered — the four G2
+fields keep their dedicated inputs). `session_duration_secs` reads the tunable
+cap, the nonce store trims to the tunable cap with the tunable TTL, and the
+round-trip test covers every new value; invalid ones are rejected.
+
+**Stale tests repaired to the current protocol.** `heartbeat-reauth`'s API
+registration now sends the required hybrid login key; the rate-limiting spec
+drives the raw `friend_code` protocol, and its 10-attempt budget tests moved
+to an isolated server with production defaults — the suite-wide raised limits
+(`FRIEND_REQUEST_IP_MAX=100000`) meant the old 429 assertions could never
+trip. `security.spec`'s duplicate-registration and `security-hardening-f`'s F2
+register test get the same hybrid key shape, `admin-panel-complete`'s XSS
+registration too, and `vault-upload` now spawns the release binary like every
+other isolated-server spec (its debug path was never built).
+
+**Verified locally:** `cd server && cargo test` 25/25 (ML-KEM/ML-DSA KATs,
+hybrid escrow round-trip, hybrid login verification);
+`tests/pq-envelopes.spec.ts` 6/6; `tests/admin-runtime-config.spec.ts` 14/14;
+`tests/rate-limiting.spec.ts` 3/3; `tests/heartbeat-reauth.spec.ts` 8/8;
+`tests/admin-panel-complete.spec.ts` 2/2; `tests/vendor-integrity.spec.ts`
+2/2; security batch 51 passed (security-hardening-f, security-hardening,
+security-review-fixes, security-fixes) + vault/security rerun 19/19 after the
+register-shape fixes; auth/admin batch 46 passed + 1 skipped (pretest-gated).
+Release builds: `server` release clean; desktop + mobile workflows checked
+after the tag.
+
+**Files:** `static/{crypto,auth,chat,sw}.js`, `static/{index,login,admin}.html`,
+`static/libs/noble-post-quantum-0.7.1-{ml-dsa,ml-kem}.js`,
+`static/libs/noble/*`, `static/libs/noble-post-quantum.pin.json`,
+`server/src/{main,handlers,db}.rs`, `server/Cargo.{toml,lock}`,
+`server/tests/fixtures/pq-kat.json`,
+`tools/{gen-pq-kat,vendor-noble-pq,vendor-checksums}.mjs`,
+`tools/vendor-checksums.json`,
+`tests/{pq-envelopes,admin-runtime-config,rate-limiting,heartbeat-reauth,security,security-hardening-f,vault-upload,admin-panel-complete}.spec.ts`,
+`POST_QUANTUM_AUDIT.md`, `SECURITY_REVIEW_FIXES.md`, `PROGRESS.md`
+
 ## Raw-password lockdown, legacy fallbacks removed, post-quantum audit (0.2.43)
 
 **Post-quantum audit: the transport is already hybrid, the E2EE layer is not.**

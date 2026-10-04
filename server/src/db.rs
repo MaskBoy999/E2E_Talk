@@ -1404,6 +1404,13 @@ impl Database {
         // required at registration and rotated on every password change.
         let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN login_public_key TEXT");
 
+        // Migration 095 (PQ): ML-KEM-768 identity public key (1184 bytes, FIPS
+        // 203) published by the client, used to hybridize the offline
+        // notification escrow. NULL until a client publishes one; while it is
+        // NULL the escrow stays on the v1 X25519-only path, so accounts that
+        // have not signed in since the upgrade keep working.
+        let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN identity_pq_public_key BLOB");
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -1479,13 +1486,13 @@ impl Database {
     /// only accepts a nonce-bound signature made with the matching private key —
     /// the transmitted credential can never be replayed.
     #[allow(clippy::too_many_arguments)]
-    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, friend_code_hash: Option<&str>, friend_code_hash_salt: Option<&str>, encrypted_friend_code: Option<&str>, friend_code_salt: Option<&str>, friend_code_nonce: Option<&str>, encrypted_hash_key: Option<&str>, hash_key_salt: Option<&str>, hash_key_nonce: Option<&str>, login_public_key: Option<&str>) -> Result<User, String> {
+    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, identity_pq_public_key: Option<&[u8]>, friend_code_hash: Option<&str>, friend_code_hash_salt: Option<&str>, encrypted_friend_code: Option<&str>, friend_code_salt: Option<&str>, friend_code_nonce: Option<&str>, encrypted_hash_key: Option<&str>, hash_key_salt: Option<&str>, hash_key_nonce: Option<&str>, login_public_key: Option<&str>) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO users (id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce, login_public_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce, login_public_key],
+            "INSERT INTO users (id, username, password_hash, identity_public_key, identity_pq_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce, login_public_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![id, username, password_hash, identity_public_key, identity_pq_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce, login_public_key],
         )
         .map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -1873,9 +1880,26 @@ impl Database {
     // This matches the notification sound pattern: data encrypted with identity key.
     // The server generates a fresh ephemeral key pair per notification.
 
+    /// Encapsulate a shared secret to a published ML-KEM-768 public key
+    /// (FIPS 203). Returns (ciphertext, shared_secret) — 1088 and 32 bytes.
+    fn ml_kem_encapsulate(pq_pub: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+        use ml_kem::kem::Encapsulate;
+        use ml_kem::{EncapsulationKey, MlKem768};
+        let key_ref = <&ml_kem::Key<EncapsulationKey<MlKem768>>>::try_from(pq_pub)
+            .map_err(|_| "ML-KEM public key must be 1184 bytes".to_string())?;
+        let ek = EncapsulationKey::<MlKem768>::new(key_ref)
+            .map_err(|_| "Invalid ML-KEM public key".to_string())?;
+        let (ct, ss) = ek.encapsulate();
+        Ok((ct.as_slice().to_vec(), ss.as_slice().to_vec()))
+    }
+
     /// Encrypt a notification payload using ECDH + XChaCha20-Poly1305
     /// Returns "epk_b64:nonce_b64:ciphertext_b64" composite string
-    fn encrypt_notification_payload(payload: &str, identity_pub_key: &[u8]) -> Result<String, String> {
+    pub(crate) fn encrypt_notification_payload(
+        payload: &str,
+        identity_pub_key: &[u8],
+        identity_pq_pub_key: Option<&[u8]>,
+    ) -> Result<String, String> {
         // Generate ephemeral X25519 key pair
         let mut rng = OsRng;
         let ephemeral_secret = EphemeralSecret::random_from_rng(&mut rng);
@@ -1888,8 +1912,40 @@ impl Database {
         
         // ECDH: shared secret = ephemeral_private * user_public
         let shared_secret = ephemeral_secret.diffie_hellman(&user_pub);
+
+        // Hybrid v2 whenever the account has published an ML-KEM-768 identity
+        // key: encapsulate to it and bind both halves into the KDF. The KEM
+        // ciphertext travels inside the existing payload string, so no schema
+        // change was needed for the PQ half and v1 payloads stay readable.
+        let hybrid = identity_pq_pub_key.and_then(|pq| Self::ml_kem_encapsulate(pq).ok());
         
-        // Derive XChaCha20 key: SHA-256(shared_secret)
+        // v2 key: SHA-256(label || dh || ss || kem_ct || epk || recipient_pub)
+        // — the exact expression the client computes in
+        // E2ECrypto.decryptEscrowPayload, and the reason both halves are bound
+        // together (a mixed-and-matched KEM ciphertext fails the AEAD tag).
+        if let Some((kem_ct, ss)) = hybrid.as_ref() {
+            let mut hasher = Sha256::new();
+            hasher.update(b"e2e-escrow-v2|");
+            hasher.update(shared_secret.as_bytes());
+            hasher.update(ss);
+            hasher.update(kem_ct);
+            hasher.update(ephemeral_pub.as_bytes());
+            hasher.update(&user_pub_bytes);
+            let key_bytes = hasher.finalize();
+            let cipher = XChaCha20Poly1305::new(GenericArray::<u8, U32>::from_slice(&key_bytes));
+            let nonce_bytes = XChaCha20Poly1305::generate_nonce(&mut rng);
+            let ciphertext = cipher
+                .encrypt(&nonce_bytes, payload.as_bytes())
+                .map_err(|e| format!("XChaCha20Poly1305 encrypt failed: {:?}", e))?;
+            let epk_b64 = base64::engine::general_purpose::STANDARD.encode(ephemeral_pub.as_bytes());
+            let kem_b64 = base64::engine::general_purpose::STANDARD.encode(kem_ct);
+            let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(&nonce_bytes);
+            let ct_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
+            return Ok(format!("v2:{}:{}:{}:{}", epk_b64, kem_b64, nonce_b64, ct_b64));
+        }
+
+        // v1 key: SHA-256(shared_secret) — unchanged for accounts that have not
+        // published a PQ key yet (their client would not be able to decrypt v2).
         let chacha_key_bytes = Sha256::digest(shared_secret.as_bytes());
         let chacha_key = GenericArray::<u8, U32>::from_slice(&chacha_key_bytes);
         let cipher = XChaCha20Poly1305::new(chacha_key);
@@ -1976,7 +2032,9 @@ impl Database {
         let identity_pub = self.get_identity_public_key(user_id)
             .map_err(|_| "User has no identity public key".to_string())?;
         
-        let encrypted_payload = Self::encrypt_notification_payload(payload, &identity_pub)?;
+        let identity_pq_pub = self.get_identity_pq_public_key(user_id).ok().flatten();
+        let encrypted_payload =
+            Self::encrypt_notification_payload(payload, &identity_pub, identity_pq_pub.as_deref())?;
         // B4: blind the notification_type column — the real type already rides
         // inside the encrypted payload (mention/reply/friend payloads carry
         // "type"; dm_new is wrapped with one at the save site), so the client
@@ -1998,7 +2056,8 @@ impl Database {
     pub fn encrypt_notification_for_user(&self, user_id: &str, payload: &str) -> Result<String, String> {
         let identity_pub = self.get_identity_public_key(user_id)
             .map_err(|_| "User has no identity public key".to_string())?;
-        Self::encrypt_notification_payload(payload, &identity_pub)
+        let identity_pq_pub = self.get_identity_pq_public_key(user_id).ok().flatten();
+        Self::encrypt_notification_payload(payload, &identity_pub, identity_pq_pub.as_deref())
     }
 
     pub fn get_and_delete_pending_notifications(&self, user_id: &str) -> Result<Vec<(String, String)>, String> {
@@ -3173,6 +3232,31 @@ impl Database {
             |row| row.get(0),
         )
         .map_err(|_| "User not found or no public key".to_string())
+    }
+
+    /// Published ML-KEM-768 identity key (1184 bytes). Ok(None) when the
+    /// account has never published one — the escrow then uses the v1 path.
+    pub fn get_identity_pq_public_key(&self, user_id: &str) -> Result<Option<Vec<u8>>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT identity_pq_public_key FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Store/replace the published ML-KEM-768 identity key (idempotent; clients
+    /// derive it deterministically from their identity private key, so every
+    /// device of one account publishes the same bytes).
+    pub fn set_identity_pq_public_key(&self, user_id: &str, key: &[u8]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE users SET identity_pq_public_key = ?1 WHERE id = ?2",
+            params![key, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn update_identity_public_key(&self, user_id: &str, key: &[u8]) -> Result<(), String> {

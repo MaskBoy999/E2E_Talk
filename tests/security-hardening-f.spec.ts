@@ -84,6 +84,18 @@ function api(port: number, method: string, path: string, token: string | null, b
     });
 }
 
+// A structurally valid v2 login key (Ed25519 + ML-DSA-65 halves). These tests
+// register accounts only to exercise limiters and admin paths — they never log
+// in — so synthetic bytes are enough: registration validates the key shape
+// (32-byte Ed25519, 1952-byte ML-DSA-65) and never checks ownership.
+function syntheticHybridLoginKey(): string {
+    return JSON.stringify({
+        v: 2,
+        ed25519: Buffer.alloc(32, 7).toString('base64'),
+        ml_dsa_65: Buffer.alloc(1952, 11).toString('base64'),
+    });
+}
+
 async function adminLogin(password: string) {
     let { status, json } = await api(HTTPS_PORT, 'POST', '/api/admin/login', null, { password });
     if (status !== 200 || !json || !json.token) {
@@ -176,6 +188,7 @@ test.describe('F-series security hardening', () => {
             const r = await api(HTTPS_PORT, 'POST', '/api/register', null, {
                 username: `f2user_${i}_${Date.now()}`,
                 password: 'x'.repeat(64),
+                login_public_key: syntheticHybridLoginKey(),
             });
             return r.status;
         };

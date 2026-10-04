@@ -8808,10 +8808,14 @@ document.addEventListener('DOMContentLoaded', () => {
             old_password: E2ECrypto.hmacHex(hashKeyBytes, oldPw),
             new_password: E2ECrypto.hmacHex(hashKeyBytes, newPw)
         };
-        // F3 — the signed-login key is derived from (hash_key, password), so it
-        // rotates with the password; send the new public key so the server can
-        // keep enforcing nonce-signed logins for this account.
-        payload.login_public_key = E2ECrypto.deriveLoginPublicKey(hashKeyBytes, newPw);
+        // F3/PQ — the signed-login key is derived from (hash_key, password), so
+        // it rotates with the password; send the new HYBRID public key
+        // (Ed25519 + ML-DSA-65) so the server keeps enforcing nonce-signed
+        // logins and a pre-hybrid account upgrades on its next change. The
+        // server refuses an Ed25519-only key here, so load the PQ library
+        // first rather than downgrade.
+        await E2ECrypto.pqReady();
+        payload.login_public_key = E2ECrypto.deriveLoginPublicKeyBundle(hashKeyBytes, newPw);
 
         // 3. Re-encrypt everything with the NEW password.
         var encHashKey = E2ECrypto.encryptWithPassword(hashKeyB64, newPw);
@@ -9569,6 +9573,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }).then(hideLoadingOverlay).catch(hideLoadingOverlay);
     loadFriendRequestBadge();
+    // PQ: best-effort publication of this account's ML-KEM-768 identity key
+    // (hybrid envelopes + hybrid offline-notification escrow).
+    publishIdentityPqKeyIfNeeded();
     loadBlockedUsers();
     loadEmojiCache(); // Load custom emojis
     loadMyProfile(); // Load own profile for sidebar footer
@@ -16222,7 +16229,7 @@ async function rotateServerKey(serverId) {
                 const recipientData = await recipientRes.json();
                 if (!recipientData.identity_public_key) continue;
                 const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
-                const encrypted = E2ECrypto.envelopeEncrypt(keyToUpload, recipientPub, identity.privateKey);
+                const encrypted = E2ECrypto.envelopeEncrypt(keyToUpload, recipientPub, identity.privateKey, E2ECrypto.pqPublicKeyFromB64(recipientData.identity_pq_public_key));
                 const keyRes = await authFetch(`/api/servers/${serverId}/keys`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -16334,7 +16341,7 @@ async function uploadServerKeyForUser(serverId, targetUserId) {
     var anySuccess = false;
     for (var vi = 0; vi < allKeys.length; vi++) {
         try {
-            const encrypted = E2ECrypto.envelopeEncrypt(allKeys[vi], recipientPubKey, identity.privateKey);
+            const encrypted = E2ECrypto.envelopeEncrypt(allKeys[vi], recipientPubKey, identity.privateKey, E2ECrypto.pqPublicKeyFromB64(recipientData.identity_pq_public_key));
             const res = await authFetch(`/api/servers/${serverId}/keys`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -16382,7 +16389,7 @@ async function uploadServerKeysForOwnedServers() {
                     const recipientData = await recipientRes.json();
                     if (!recipientData.identity_public_key) continue;
                     const recipientPub = new Uint8Array(E2ECrypto.base64ToArrayBuffer(recipientData.identity_public_key));
-                    const encrypted = E2ECrypto.envelopeEncrypt(serverKey, recipientPub, identity.privateKey);
+                    const encrypted = E2ECrypto.envelopeEncrypt(serverKey, recipientPub, identity.privateKey, E2ECrypto.pqPublicKeyFromB64(recipientData.identity_pq_public_key));
                     await authFetch(`/api/servers/${s.id}/keys`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -34079,13 +34086,47 @@ function handleDecryptedNotification(notifData) {
     }
 }
 
+// Publish the account's ML-KEM-768 identity public key so peers can address
+// hybrid (v2) envelopes to us and the server can hybrid-encrypt offline
+// notifications. Derived deterministically from the identity private key, so
+// every device of one account publishes identical bytes — idempotent and
+// best-effort: the v1 path stays available until it succeeds.
+async function publishIdentityPqKeyIfNeeded() {
+    try {
+        var identity = E2ECrypto.getIdentityKeyPair();
+        if (!identity || !identity.privateKey || !user || !user.id) return;
+        await E2ECrypto.pqReady();
+        var myPqB64 = E2ECrypto.getIdentityPqPublicKeyB64(identity.privateKey);
+        var res = await authFetch('/api/identity/' + user.id);
+        if (res.ok) {
+            var data = await res.json();
+            if (data.identity_pq_public_key === myPqB64) return;
+        }
+        await authFetch('/api/identity/pq-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identity_pq_public_key: myPqB64 }),
+        });
+    } catch (_) {}
+}
+
 function decryptEncryptedNotificationPayload(encryptedPayload) {
     if (!encryptedPayload || typeof encryptedPayload !== 'string') return null;
     var parts = encryptedPayload.split(':');
-    // ECDH-encrypted payloads have 3+ parts, each long base64
-    if (parts.length < 3 || parts[0].length < 40 || parts[1].length < 30 || parts[2].length < 20) return null;
+    // v2 (hybrid, first element is the 'v2' tag) or the legacy v1 shape
+    // (3+ parts, each long base64).
+    var isV2 = parts[0] === 'v2';
+    if (!isV2 && (parts.length < 3 || parts[0].length < 40 || parts[1].length < 30 || parts[2].length < 20)) return null;
     var identity = E2ECrypto.getIdentityKeyPair();
     if (!identity || !identity.privateKey) return null;
+    if (isV2) {
+        // The PQ secret is derived from the same identity private key; when
+        // the vendored library is not loaded yet the notification is skipped
+        // (the offline replay happens again on the next connect).
+        var pqSecret = null;
+        try { pqSecret = E2ECrypto.getIdentityPqSecretKey(identity.privateKey); } catch (_) { return null; }
+        return E2ECrypto.decryptEscrowPayload(encryptedPayload, identity, pqSecret);
+    }
     try {
         var epkB64 = parts[0];
         var nonceB64 = parts[1];

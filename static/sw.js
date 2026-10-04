@@ -32,7 +32,11 @@
 // v24: `crypto.js?v=12` — login only ever sends the raw password for an
 // account the server flags as pre-hash legacy; typos and auth-params outages
 // fail closed.
-const CACHE_NAME = 'e2e-chat-v24';
+// v25: `crypto.js?v=13`, `auth.js?v=14`, `chat.js?v=83`, `admin.js?v=9` —
+// hybrid (X25519 + ML-KEM-768) envelopes and hybrid (Ed25519 + ML-DSA-65)
+// login signatures, IP-hash-only rate-limit buckets, and the newly tunable
+// limits in the admin panel.
+const CACHE_NAME = 'e2e-chat-v25';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

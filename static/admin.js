@@ -1223,6 +1223,8 @@ const RT_MISC_SIZE_FIELDS = [
 const RT_SECONDS_FIELDS = [
     { key: 'ws_socket_budget_window_secs', label: 'WebSocket: inbound budget window (seconds)' },
     { key: 'request_timeout_secs', label: 'Whole-request timeout (seconds)' },
+    { key: 'login_nonce_ttl_secs', label: 'Login nonce lifetime (seconds)' },
+    { key: 'max_session_secs', label: 'Max session lifetime (seconds, min 60)' },
 ];
 // Every rate limit is a (max, window) pair; the window half is tunable too, so
 // a "10 per 5 min" can become "10 per hour" without a rebuild.
@@ -1243,6 +1245,8 @@ const RT_WINDOW_FIELDS = [
     { key: 'create_server_window_secs', label: 'Server-creation window (default 3600s)' },
     { key: 'admin_login_window_secs', label: 'Admin login window (default 300s)' },
     { key: 'login_fail_notify_window_secs', label: 'Failed-login notify window (default 600s)' },
+    { key: 'login_user_fail_window_secs', label: 'Failed-password window (default 900s)' },
+    { key: 'voice_signal_window_secs', label: 'Voice signal window (default 10s)' },
 ];
 const RT_COUNT_FIELDS = [
     { key: 'ws_auth_max', label: 'WS auth attempts / IP / minute' },
@@ -1267,6 +1271,8 @@ const RT_COUNT_FIELDS = [
     { key: 'register_user_max', label: 'Registrations / username / 5 min' },
     { key: 'join_server_user_max', label: 'Server joins / account / 10 min' },
     { key: 'voice_media_max', label: 'Voice media frames / account / 10 s' },
+    { key: 'voice_signal_max', label: 'Voice signal frames / account / 10 s' },
+    { key: 'login_nonce_max_per_user', label: 'Live login nonces / account' },
 ];
 // Seconds + windows + counts all render as plain number inputs.
 const RT_GENERIC_FIELDS = RT_SECONDS_FIELDS.concat(RT_WINDOW_FIELDS, RT_COUNT_FIELDS);
@@ -1313,7 +1319,7 @@ function rtSectionHtml(title, fields, kind) {
         rtSectionHtml('WebSocket protection', RT_SIZE_FIELDS.slice(0, 3), 'size') +
         rtSectionHtml('Request bodies', RT_SIZE_FIELDS.slice(3), 'size') +
         rtSectionHtml('Icons & upload chunks', RT_MISC_SIZE_FIELDS, 'size') +
-        rtSectionHtml('Timeouts', RT_SECONDS_FIELDS, 'count') +
+        rtSectionHtml('Timeouts & session lifetimes', RT_SECONDS_FIELDS, 'count') +
         rtSectionHtml('Auth rate limits', RT_COUNT_FIELDS, 'count') +
         rtSectionHtml('Rate-limit windows', RT_WINDOW_FIELDS, 'count');
 })();

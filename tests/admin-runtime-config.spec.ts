@@ -397,19 +397,164 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
     expect(myRow.limit).toBe(2);
     expect(myRow.window_remaining_s).toBeLessThanOrEqual(10);
 
-    // The IP bucket exists too.
+    // The IP bucket exists too — keyed by the server-computed `h1_…` hash,
+    // never by a raw IP (the usage view is one of the places the hash shows).
     expect(data.ips.length).toBeGreaterThanOrEqual(1);
     expect(data.ips[0].count).toBeGreaterThanOrEqual(1);
+    expect(data.ips[0].ip).toMatch(/^h1_[0-9a-f]{32}$/);
+    // Nothing in the response may leak the raw client address.
+    expect(JSON.stringify(data)).not.toContain('127.0.0.1');
+    expect(JSON.stringify(data)).not.toContain('::1');
+    expect(JSON.stringify(data)).not.toContain('localhost');
 
     // The 429 was recorded with the username + ip + timestamp.
     expect((data.recent_429s as any[]).some((h) => h.username === uname)).toBeTruthy();
     expect((data.recent_429s as any[]).some((h) => h.ip.length > 0)).toBeTruthy();
+    expect((data.recent_429s as any[]).every((h) => /^h1_[0-9a-f]{32}$/.test(h.ip))).toBeTruthy();
+    expect((data.recent_429s as any[]).some((h) => h.username === uname && h.ip.startsWith('h1_'))).toBeTruthy();
     expect((data.recent_429s as any[]).some((h) => h.ts > 0)).toBeTruthy();
 
     // Restore the budget so later tests are unaffected.
     await page.request.put(`${ALT}/api/admin/runtime-config`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
       data: { mutation_user_max: 100000 },
+    });
+  });
+
+  test('per-IP limits key on a server-side hash; client-supplied hashes are ignored', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+    await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { mutation_user_max: 100000, mutation_ip_max: 2 },
+    });
+
+    const uname = 'rthash_' + Date.now();
+    const token = await registerUser(page, uname);
+    const ipA = '203.0.113.77';
+    const ipB = '203.0.113.78';
+
+    // Five mutations from ONE IP. Every request claims a different client-side
+    // hash; the server must ignore all of them and bucket by its own hash of
+    // the IP it derived — so the per-IP budget trips anyway.
+    const statuses: number[] = [];
+    const spoofHeaders = ['h1_' + 'aa'.repeat(16), 'h1_' + 'bb'.repeat(16)];
+    for (let i = 0; i < 5; i++) {
+      const res = await page.request.post(`${ALT}/api/friend-code/regenerate`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'X-Forwarded-For': ipA,
+          'X-Client-IP-Hash': spoofHeaders[i % 2],
+          'X-Rate-Limit-IP': spoofHeaders[(i + 1) % 2],
+        },
+      });
+      statuses.push(res.status());
+    }
+    expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(1);
+
+    const usage = await (
+      await page.request.get(`${ALT}/api/admin/rate-limit-usage`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+    ).json();
+    const rowA = (usage.ips as any[]).find((r) => r.count >= 2);
+    expect(rowA, 'bucket for the exhausted IP exists').toBeTruthy();
+    expect(rowA.ip).toMatch(/^h1_[0-9a-f]{32}$/);
+    expect(usage.ips.length).toBeGreaterThanOrEqual(1);
+    // The hashes the client made up must never appear as buckets.
+    expect((usage.ips as any[]).some((r) => spoofHeaders.includes(r.ip))).toBeFalsy();
+
+    // A different IP is NOT blocked by that budget, even when it presents the
+    // exhausted bucket's hash: the header is ignored. (And the exhausted IP
+    // stays blocked even when it presents a fresh-looking hash, above.)
+    const other = await page.request.post(`${ALT}/api/friend-code/regenerate`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Forwarded-For': ipB,
+        'X-Client-IP-Hash': rowA.ip,
+      },
+    });
+    expect(other.status()).toBe(200);
+    const stillBlocked = await page.request.post(`${ALT}/api/friend-code/regenerate`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Forwarded-For': ipA,
+        'X-Client-IP-Hash': 'h1_' + '00'.repeat(16),
+      },
+    });
+    expect(stillBlocked.status()).toBe(429);
+
+    await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { mutation_ip_max: 100000 },
+    });
+  });
+
+  test('newly exposed limits round-trip: voice signal, nonce TTL/cap, session cap, fail window', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+    const put = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: {
+        voice_signal_max: 111,
+        voice_signal_window_secs: 22,
+        login_user_fail_window_secs: 333,
+        login_nonce_ttl_secs: 44,
+        login_nonce_max_per_user: 5,
+        max_session_secs: 86400,
+      },
+    });
+    expect(put.status()).toBe(200);
+
+    const cfg = await (
+      await page.request.get(`${ALT}/api/admin/runtime-config`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+    ).json();
+    expect(cfg.voice_signal_max).toBe(111);
+    expect(cfg.voice_signal_window_secs).toBe(22);
+    expect(cfg.login_user_fail_window_secs).toBe(333);
+    expect(cfg.login_nonce_ttl_secs).toBe(44);
+    expect(cfg.login_nonce_max_per_user).toBe(5);
+    expect(cfg.max_session_secs).toBe(86400);
+    for (const key of [
+      'voice_signal_max',
+      'voice_signal_window_secs',
+      'login_user_fail_window_secs',
+      'login_nonce_ttl_secs',
+      'login_nonce_max_per_user',
+      'max_session_secs',
+    ]) {
+      expect(cfg.sources[key]).toBe('db');
+    }
+
+    // Every one of them is persisted in admin_config (survives a restart).
+    const rows = (await (
+      await page.request.get(`${ALT}/api/admin/admin-config`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+    ).json()) as Array<{ key: string; value: string }>;
+    expect(rows.some((r) => r.key === 'voice_signal_max' && r.value === '111')).toBeTruthy();
+    expect(rows.some((r) => r.key === 'max_session_secs' && r.value === '86400')).toBeTruthy();
+
+    // A zero-second window/TTL is still rejected.
+    for (const key of ['voice_signal_window_secs', 'login_user_fail_window_secs', 'login_nonce_ttl_secs', 'max_session_secs']) {
+      const bad = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        data: { [key]: 0 },
+      });
+      expect(bad.status(), key + '=0 is rejected').toBe(400);
+    }
+
+    // Restore defaults.
+    await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: {
+        voice_signal_max: 300,
+        voice_signal_window_secs: 10,
+        login_user_fail_window_secs: 900,
+        login_nonce_ttl_secs: 120,
+        login_nonce_max_per_user: 8,
+        max_session_secs: 30 * 24 * 60 * 60,
+      },
     });
   });
 

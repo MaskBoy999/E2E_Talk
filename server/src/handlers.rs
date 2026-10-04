@@ -261,14 +261,14 @@ pub(crate) fn check_mutation_rate_limit(
     let key = format!("mut_user:{}", user_id);
     if user_max > 0 && !MUTATION_USER_RATE_LIMITER.check_and_increment(&key, user_max, window)
     {
-        record_mutation_429(Some(&user_id), &get_client_ip(headers));
+        record_mutation_429(Some(&user_id), &client_ip_hash(headers, state));
         return Some((
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Slow down."})),
         ));
     }
 
-    let ip = get_client_ip(headers);
+    let ip = client_ip_hash(headers, state);
     let ip_key = format!("mut_ip:{}", ip);
     if ip_max > 0
         && !MUTATION_IP_RATE_LIMITER.check_and_increment(&ip_key, ip_max, window)
@@ -753,6 +753,13 @@ fn get_client_ip(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Rate-limit bucket for this request's IP: `hash_client_ip(server_master, ip)`.
+/// See `crate::hash_client_ip` for the guarantees (server-computed, 128-bit
+/// HMAC, `h1_` prefix). Every per-IP limiter must use this — never the raw IP.
+fn client_ip_hash(headers: &HeaderMap, state: &AppState) -> String {
+    crate::hash_client_ip(&state.config.hmac_key, &get_client_ip(headers))
+}
+
 fn extract_admin_token(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let token = headers
         .get("authorization")
@@ -789,6 +796,11 @@ pub struct RegisterRequest {
     pub username: String,
     pub password: String,  // Client-computed hash: HMAC-SHA256(hash_key, raw_password)
     pub identity_public_key: Option<String>,
+    /// ML-KEM-768 identity public key (1184 bytes, base64) for the hybrid
+    /// notification escrow. Optional here: a client that cannot derive one yet
+    /// can publish later via POST /api/identity/pq-key.
+    #[serde(default)]
+    pub identity_pq_public_key: Option<String>,
     pub friend_code: Option<String>,
     pub encrypted_friend_code: Option<String>,
     pub friend_code_salt: Option<String>,
@@ -826,6 +838,11 @@ pub struct LoginRequest {
     pub login_nonce: Option<String>,
     #[serde(default)]
     pub login_signature: Option<String>,
+    // PQ Phase 2 — ML-DSA-65 signature over the same nonce-bound message.
+    // Required when the stored key set is hybrid (v2); ignored for legacy
+    // Ed25519-only accounts.
+    #[serde(default)]
+    pub login_pq_signature: Option<String>,
     // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
     #[serde(default)]
     pub duration_seconds: Option<u64>,
@@ -843,10 +860,19 @@ pub struct LoginRequest {
 // Session lifetime clamp shared by register/login/reauth. Clients may request a
 // custom duration; the server floors it at 1 minute and caps it at 30 days so a
 // malformed request can never mint an over-long token.
-const MAX_SESSION_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+// Default session cap (30 days) lives in RuntimeTuning::max_session_secs.
 const MIN_SESSION_SECS: u64 = 60; // 1 minute
-fn session_duration_secs(dur: Option<u64>) -> u64 {
-    dur.unwrap_or(MAX_SESSION_SECS).clamp(MIN_SESSION_SECS, MAX_SESSION_SECS)
+fn session_duration_secs(dur: Option<u64>, state: &AppState) -> u64 {
+    // Cap is admin-tunable (Runtime Limits → max_session_secs), floored at
+    // MIN_SESSION_SECS so a bad value can never make `clamp` panic or mint
+    // a one-second session.
+    let max = state
+        .runtime_tuning
+        .read()
+        .unwrap()
+        .max_session_secs
+        .max(MIN_SESSION_SECS);
+    dur.unwrap_or(max).clamp(MIN_SESSION_SECS, max)
 }
 
 /// Mint a session row + JWT for a (user, device) sign-in. Every login,
@@ -913,7 +939,7 @@ pub async fn register(
     // F2 — Per-IP account-spam budget (default 5 accounts / 10 min per IP).
     // Automated suites that register many users from one IP can raise or
     // disable it with REGISTER_IP_MAX (same pattern as LOGIN_IP_MAX).
-    let reg_ip = get_client_ip(&headers);
+    let reg_ip = client_ip_hash(&headers, &state);
     let reg_ip_key = format!("register_ip:{}", reg_ip);
     let (reg_ip_max, reg_ip_window): (u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -945,11 +971,18 @@ pub async fn register(
             .into_response();
     }
 
-    // F3 — the replay-resistant login key is required. There is no credential
-    // fallback, so an account without one could never sign in; a malformed key
-    // would break verification the same way. Both are rejected outright.
+    // F3/PQ — the replay-resistant login key is required, and since the hybrid
+    // rollout a NEW registration must carry both halves (Ed25519 + ML-DSA-65).
+    // There is no credential fallback, so an account without one could never
+    // sign in; a malformed or Ed25519-only key would leave a new account on the
+    // weaker path forever.
     let login_public_key = match req.login_public_key.as_deref().map(str::trim) {
-        Some(pk) if !pk.is_empty() && crate::decode_login_public_key(pk).is_some() => pk.to_string(),
+        Some(pk)
+            if !pk.is_empty()
+                && crate::decode_login_key_set(pk).map_or(false, |s| s.ml_dsa_65.is_some()) =>
+        {
+            pk.to_string()
+        }
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -971,6 +1004,24 @@ pub async fn register(
         base64::engine::general_purpose::STANDARD.decode(k).ok()
     });
 
+    // PQ identity key (optional at register time, but when present it must be
+    // exactly an ML-KEM-768 encapsulation key).
+    let identity_pq_bytes = req
+        .identity_pq_public_key
+        .as_ref()
+        .and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok());
+    if let Some(pq) = identity_pq_bytes.as_ref() {
+        if pq.len() != 1184 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "identity_pq_public_key must be an ML-KEM-768 public key (1184 bytes)"
+                })),
+            )
+                .into_response();
+        }
+    }
+
     // Compute salted friend code hash if raw friend code provided
     let (friend_code_hash, friend_code_hash_salt) = if let Some(fc) = &req.friend_code {
         use rand::Rng;
@@ -983,7 +1034,7 @@ pub async fn register(
         (None, None)
     };
 
-    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), friend_code_hash.as_deref(), friend_code_hash_salt.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref(), req.encrypted_hash_key.as_deref(), req.hash_key_salt.as_deref(), req.hash_key_nonce.as_deref(), Some(login_public_key.as_str())) {
+    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), identity_pq_bytes.as_deref(), friend_code_hash.as_deref(), friend_code_hash_salt.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref(), req.encrypted_hash_key.as_deref(), req.hash_key_salt.as_deref(), req.hash_key_nonce.as_deref(), Some(login_public_key.as_str())) {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -1015,7 +1066,7 @@ pub async fn register(
         }
     }
 
-    let session_secs = session_duration_secs(req.duration_seconds);
+    let session_secs = session_duration_secs(req.duration_seconds, &state);
     let token = match mint_session_token(
         &state,
         &user.id,
@@ -1068,7 +1119,7 @@ pub async fn login(
     // Env-overridable so automated test suites (which log in dozens of users
     // from one IP) can raise/disable the budget: set LOGIN_IP_MAX=0 to
     // disable, or a number to raise it (same pattern as FRIEND_REQUEST_IP_MAX).
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let ip_rate_key = format!("login_ip:{}", ip);
     let (ip_max, user_max, login_window): (u32, u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -1102,8 +1153,11 @@ pub async fn login(
     // passwords so legitimate users are unaffected. Checked before the
     // expensive Argon2 verification; bumped after a confirmed failure.
     let fail_rate_key = format!("login_fail:{}", req.username);
-    let user_fail_max: u32 = state.runtime_tuning.read().unwrap().login_user_fail_max;
-    if user_fail_max > 0 && LOGIN_USER_FAIL_RATE_LIMITER.is_blocked(&fail_rate_key, user_fail_max, Duration::from_secs(900)) {
+    let (user_fail_max, user_fail_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.login_user_fail_max, tuning.login_user_fail_window_secs)
+    };
+    if user_fail_max > 0 && LOGIN_USER_FAIL_RATE_LIMITER.is_blocked(&fail_rate_key, user_fail_max, Duration::from_secs(user_fail_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many failed attempts for this account. Try again in 15 minutes."})),
@@ -1174,8 +1228,13 @@ pub async fn login(
         {
             // Verify first, consume second: a garbage request must not burn a
             // legitimate user's live nonce.
-            valid = crate::verify_login_signature(stored_key, &req.username, nonce, signature)
-                && state.consume_login_nonce(&req.username, nonce);
+            valid = crate::verify_login_signature(
+                stored_key,
+                &req.username,
+                nonce,
+                signature,
+                req.login_pq_signature.as_deref(),
+            ) && state.consume_login_nonce(&req.username, nonce);
         }
     }
 
@@ -1195,7 +1254,7 @@ pub async fn login(
                     // happens on the verified code step. Otherwise delete now.
                     if let Ok(user) = state.db.get_user_by_username(&req.username) {
                         if state.db.totp_enabled(&user.id).unwrap_or(false) {
-                            let session_secs = session_duration_secs(req.duration_seconds);
+                            let session_secs = session_duration_secs(req.duration_seconds, &state);
                             return match auth::create_pending_2fa_token(
                                 &user.id,
                                 &user.username,
@@ -1236,7 +1295,10 @@ pub async fn login(
         // password, never on success or kill-switch paths, so legitimate
         // users and kill-switch attempts are unaffected).
         if user_fail_max > 0 {
-            LOGIN_USER_FAIL_RATE_LIMITER.increment(&fail_rate_key, Duration::from_secs(900));
+            LOGIN_USER_FAIL_RATE_LIMITER.increment(
+                &fail_rate_key,
+                Duration::from_secs(state.runtime_tuning.read().unwrap().login_user_fail_window_secs),
+            );
         }
 
         // S3: Login attempt notification — when the per-username failure count
@@ -1302,7 +1364,7 @@ pub async fn login(
     // 2FA (TOTP): the password stage only earns a short-lived pending token;
     // the real session is minted by /api/login/2fa after a valid code.
     if state.db.totp_enabled(&user.id).unwrap_or(false) {
-        let session_secs = session_duration_secs(req.duration_seconds);
+        let session_secs = session_duration_secs(req.duration_seconds, &state);
         return match auth::create_pending_2fa_token(
             &user.id,
             &user.username,
@@ -1327,7 +1389,7 @@ pub async fn login(
         };
     }
 
-    let session_secs = session_duration_secs(req.duration_seconds);
+    let session_secs = session_duration_secs(req.duration_seconds, &state);
     let token = match mint_session_token(
         &state,
         &user.id,
@@ -1390,7 +1452,7 @@ pub async fn login_2fa(
 ) -> impl IntoResponse {
     // 6-digit codes need brute-force protection: per-IP budget (env-overridable
     // for tests, same pattern as LOGIN_IP_MAX).
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let ip_rate_key = format!("login2fa_ip:{}", ip);
     // Read through RuntimeTuning (admin_config → env → default) like every
     // other limit: reading the env var directly here meant the admin panel's
@@ -1540,7 +1602,7 @@ pub async fn login_2fa(
                 .into_response();
         }
     };
-    let session_secs = session_duration_secs(claims.duration_secs);
+    let session_secs = session_duration_secs(claims.duration_secs, &state);
     let token = match mint_session_token(&state, &user.id, &user.username, None, None, session_secs) {
         Ok(t) => t,
         Err(e) => {
@@ -1832,7 +1894,7 @@ pub async fn get_auth_params(
     // Per-IP rate limiting: 10 requests per minute.
     // Env-overridable for test suites (same pattern as LOGIN_IP_MAX): set
     // AUTH_PARAMS_IP_MAX=0 to disable, or a number to raise it.
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let ip_rate_key = format!("auth_params_ip:{}", ip);
     let (ip_max, ap_window): (u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -2017,12 +2079,14 @@ pub async fn change_password(
         }
     };
 
-    // F3 — rotate the signed-login public key together with the password (the
-    // signing key is derived from hash_key + password, so it changes). The key
-    // is required: there is no credential fallback, so an account whose key
+    // F3/PQ — rotate the signed-login public key together with the password
+    // (the signing key is derived from hash_key + password, so it changes). The
+    // key is required and must be hybrid (v2): a change is how an Ed25519-only
+    // account upgrades, and leaving a changed account on the weaker path is
+    // not allowed. There is no credential fallback, so an account whose key
     // didn't rotate could not sign in again.
     let new_login_key = req.login_public_key.trim();
-    if crate::decode_login_public_key(new_login_key).is_none() {
+    if crate::decode_login_key_set(new_login_key).map_or(true, |s| s.ml_dsa_65.is_none()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Invalid login public key"})),
@@ -2236,7 +2300,7 @@ pub async fn reauth(
     // Env-overridable so automated test suites (which re-auth dozens of users
     // from one IP) can raise/disable the budget: REAUTH_IP_MAX=0 disables,
     // or a number raises it (same pattern as LOGIN_IP_MAX/LOGIN_USER_MAX).
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let ip_rate_key = format!("reauth_ip:{}", ip);
     let (ip_max, user_max, reauth_window): (u32, u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -2303,7 +2367,7 @@ pub async fn reauth(
 
     // Custom session duration chosen by the user in settings (clamped to
     // [1 minute, 30 days]). Missing/invalid falls back to 30 days.
-    let duration_secs = session_duration_secs(req.duration_seconds);
+    let duration_secs = session_duration_secs(req.duration_seconds, &state);
 
     let token = match mint_session_token(
         &state,
@@ -4748,16 +4812,74 @@ pub async fn get_identity_key(
             .into_response();
     }
 
+    // Published ML-KEM-768 identity key, when the account has one (null
+    // otherwise; senders then stay on v1 envelopes for that recipient).
+    let pq_key = state
+        .db
+        .get_identity_pq_public_key(&user_id)
+        .ok()
+        .flatten()
+        .map(|k| base64::engine::general_purpose::STANDARD.encode(&k));
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "user_id": user_id,
             "identity_public_key": all_keys[0],
             "identity_public_keys": all_keys,
+            "identity_pq_public_key": pq_key,
         })),
     )
         .into_response()
-}// --- Per-Device Key Escrow ---
+}
+
+/// POST /api/identity/pq-key — publish (or refresh) the account's ML-KEM-768
+/// identity public key for the hybrid notification escrow. The key is bound to
+/// the authenticated caller (never to a body-supplied user id), and clients
+/// derive it deterministically, so every device publishes the same bytes.
+#[derive(Deserialize)]
+pub struct PublishPqKeyRequest {
+    pub identity_pq_public_key: String,
+}
+
+pub async fn publish_identity_pq_key(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PublishPqKeyRequest>,
+) -> impl IntoResponse {
+    let user_id = match extract_user(&headers, &state) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let key = match base64::engine::general_purpose::STANDARD.decode(req.identity_pq_public_key.trim()) {
+        Ok(k) => k,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "identity_pq_public_key must be base64"})),
+            )
+                .into_response()
+        }
+    };
+    if key.len() != 1184 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "identity_pq_public_key must be an ML-KEM-768 public key (1184 bytes)"
+            })),
+        )
+            .into_response();
+    }
+    match state.db.set_identity_pq_public_key(&user_id, &key) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e})))
+                .into_response()
+        }
+    }
+}
+
+// --- Per-Device Key Escrow ---
 
 
 
@@ -5099,7 +5221,7 @@ pub async fn admin_login(
     // Per-IP rate limiting: 10 attempts per 5 minutes. Env-overridable for test
     // suites (ADMIN_LOGIN_IP_MAX / ADMIN_LOGIN_IP_WINDOW_SECS), same pattern as
     // the login/friend-request limiters; ADMIN_LOGIN_IP_MAX=0 disables it.
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let ip_rate_key = format!("admin_login_ip:{}", ip);
     let (admin_ip_max, admin_ip_window): (u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -5986,6 +6108,7 @@ fn runtime_tuning_json(tuning: &crate::RuntimeTuning, redact: bool) -> serde_jso
         "register_user_max": tuning.register_user_max,
         "join_server_user_max": tuning.join_server_user_max,
         "voice_media_max": tuning.voice_media_max,
+        "voice_signal_max": tuning.voice_signal_max,
         "icon_slot_max_bytes": tuning.icon_slot_max_bytes,
         "upload_chunk_max_bytes": tuning.upload_chunk_max_bytes,
         "mutation_window_secs": tuning.mutation_window_secs,
@@ -6001,9 +6124,14 @@ fn runtime_tuning_json(tuning: &crate::RuntimeTuning, redact: bool) -> serde_jso
         "search_window_secs": tuning.search_window_secs,
         "ws_auth_window_secs": tuning.ws_auth_window_secs,
         "voice_media_window_secs": tuning.voice_media_window_secs,
+        "voice_signal_window_secs": tuning.voice_signal_window_secs,
         "create_server_window_secs": tuning.create_server_window_secs,
         "admin_login_window_secs": tuning.admin_login_window_secs,
         "login_fail_notify_window_secs": tuning.login_fail_notify_window_secs,
+        "login_user_fail_window_secs": tuning.login_user_fail_window_secs,
+        "login_nonce_ttl_secs": tuning.login_nonce_ttl_secs,
+        "login_nonce_max_per_user": tuning.login_nonce_max_per_user,
+        "max_session_secs": tuning.max_session_secs,
         "admin_audit_redact_ips": redact,
         "sources": tuning.sources,
     })
@@ -6098,6 +6226,9 @@ pub struct AdminSetRuntimeConfigRequest {
     pub join_server_user_max: Option<u64>,
     #[serde(default)]
     pub voice_media_max: Option<u64>,
+    /// Voice signaling frames (ICE/SDP) per account.
+    #[serde(default)]
+    pub voice_signal_max: Option<u64>,
     /// Largest accepted ciphertext for one icon slot, in bytes.
     #[serde(default)]
     pub icon_slot_max_bytes: Option<u64>,
@@ -6132,12 +6263,28 @@ pub struct AdminSetRuntimeConfigRequest {
     pub ws_auth_window_secs: Option<u64>,
     #[serde(default)]
     pub voice_media_window_secs: Option<u64>,
+    /// Voice signaling budget window in seconds.
+    #[serde(default)]
+    pub voice_signal_window_secs: Option<u64>,
     #[serde(default)]
     pub create_server_window_secs: Option<u64>,
     #[serde(default)]
     pub admin_login_window_secs: Option<u64>,
     #[serde(default)]
     pub login_fail_notify_window_secs: Option<u64>,
+    /// Failed-password window in seconds (default 900).
+    #[serde(default)]
+    pub login_user_fail_window_secs: Option<u64>,
+    /// Login-nonce lifetime in seconds (default 120).
+    #[serde(default)]
+    pub login_nonce_ttl_secs: Option<u64>,
+    /// Live login nonces per account (default 8).
+    #[serde(default)]
+    pub login_nonce_max_per_user: Option<u64>,
+    /// Hard cap on a requested session lifetime, in seconds (default 30 days;
+    /// values below 60 are raised to 60 at use time).
+    #[serde(default)]
+    pub max_session_secs: Option<u64>,
     /// F5 — when true, admin audit entries store a redacted placeholder
     /// instead of the raw client IP (privacy toggle, live-applied).
     #[serde(default)]
@@ -6190,6 +6337,7 @@ pub async fn admin_set_runtime_config(
         && req.register_user_max.is_none()
         && req.join_server_user_max.is_none()
         && req.voice_media_max.is_none()
+        && req.voice_signal_max.is_none()
         && req.icon_slot_max_bytes.is_none()
         && req.upload_chunk_max_bytes.is_none()
         && req.mutation_window_secs.is_none()
@@ -6205,9 +6353,14 @@ pub async fn admin_set_runtime_config(
         && req.search_window_secs.is_none()
         && req.ws_auth_window_secs.is_none()
         && req.voice_media_window_secs.is_none()
+        && req.voice_signal_window_secs.is_none()
         && req.create_server_window_secs.is_none()
         && req.admin_login_window_secs.is_none()
         && req.login_fail_notify_window_secs.is_none()
+        && req.login_user_fail_window_secs.is_none()
+        && req.login_nonce_ttl_secs.is_none()
+        && req.login_nonce_max_per_user.is_none()
+        && req.max_session_secs.is_none()
         && req.admin_audit_redact_ips.is_none()
     {
         return (
@@ -6335,6 +6488,8 @@ pub async fn admin_set_runtime_config(
     set_u32!(register_user_max);
     set_u32!(join_server_user_max);
     set_u32!(voice_media_max);
+    set_u32!(voice_signal_max);
+    set_u32!(login_nonce_max_per_user);
     set_u64!(icon_slot_max_bytes);
     set_u64!(upload_chunk_max_bytes);
     set_win!(mutation_window_secs);
@@ -6350,6 +6505,10 @@ pub async fn admin_set_runtime_config(
     set_win!(search_window_secs);
     set_win!(ws_auth_window_secs);
     set_win!(voice_media_window_secs);
+    set_win!(voice_signal_window_secs);
+    set_win!(login_user_fail_window_secs);
+    set_win!(login_nonce_ttl_secs);
+    set_win!(max_session_secs);
     set_win!(create_server_window_secs);
     set_win!(admin_login_window_secs);
     set_win!(login_fail_notify_window_secs);
@@ -8607,7 +8766,7 @@ pub async fn get_hmac_key(
     // Rate limited per-IP to prevent offline brute-force of friend codes.
     // Env-overridable for test suites (same pattern as LOGIN_IP_MAX): set
     // HMAC_KEY_IP_MAX=0 to disable, or a number to raise it.
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let rate_key = format!("hmac_key:{}", ip);
     let (ip_max, hk_window): (u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -8637,7 +8796,7 @@ pub async fn client_config(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let rate_key = format!("client_config_ip:{}", ip);
     let (ip_max, cc_window): (u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -8659,6 +8818,11 @@ pub async fn client_config(
         // The page caps its icon packs at the same number the server accepts,
         // so a raised limit in the admin panel does not need a client release.
         "icon_slot_max_bytes": icon_slot_max_bytes,
+        // Capability advertisement: a peer that sees this (and an
+        // identity_pq_public_key on /api/identity/{id}) can be addressed with
+        // hybrid v2 envelopes. v1-only peers keep working unchanged.
+        "pq_envelope": true,
+        "pq_kem": "ML-KEM-768",
     }))).into_response()
 }
 
@@ -8777,7 +8941,7 @@ pub async fn search_messages_handler(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let rate_key = format!("search_ip:{}", ip);
     let (ip_max, search_window): (u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -8934,7 +9098,7 @@ pub async fn index_search_tokens(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let rate_key = format!("search_index_ip:{}", ip);
     let (ip_max, search_window): (u32, u64) = {
         let tuning = state.runtime_tuning.read().unwrap();
@@ -9254,7 +9418,7 @@ pub async fn send_friend_request(
             tuning.friend_request_window_secs,
         )
     };
-    let ip = get_client_ip(&headers);
+    let ip = client_ip_hash(&headers, &state);
     let ip_rate_key = format!("friend_request_ip:{}", ip);
     if ip_max > 0 && !FRIEND_REQUEST_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(fr_window)) {
         return (

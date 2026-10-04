@@ -69,6 +69,34 @@ pub struct AppState {
     pub allowed_hosts: Vec<String>,
 }
 
+/// Server-side pseudonym for a client IP, used as the bucket key for every
+/// per-IP rate limit. HMAC-SHA256(master_key, "e2e:rate-limit-ip:v1:" || ip),
+/// truncated to 128 bits and prefixed `h1_`.
+///
+/// The value is ALWAYS computed here from the IP the server itself derived
+/// (`get_client_ip`: X-Forwarded-For → X-Real-IP → "unknown"). No request
+/// header or body field is ever read as a hash, so a client cannot send a
+/// hash of its choosing to move itself into someone else's bucket. Raw IPs
+/// never enter limiter state and never appear in the admin usage view.
+///
+/// The master HMAC key is stable across restarts (persisted in `.env`), so
+/// buckets survive a restart exactly like the raw-IP keys used to.
+pub fn hash_client_ip(hmac_key: &str, ip: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(hmac_key.as_bytes())
+        .expect("HMAC accepts keys of any length");
+    mac.update(b"e2e:rate-limit-ip:v1:");
+    mac.update(ip.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    let mut out = String::with_capacity(35);
+    out.push_str("h1_");
+    for b in digest.iter().take(16) {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
 /// Hostnames/Host-ports this server is allowed to answer for. A DNS-rebinding
 /// attack hits the server's IP with the attacker's *hostname* in Host; the
 /// only reliable defence is a list of names the server actually owns.
@@ -138,17 +166,25 @@ impl AppState {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let nonce: String = (0..32).map(|_| format!("{:02x}", rng.gen::<u8>())).collect();
+        // Live-tunable from the admin panel (Runtime Limits): TTL + per-account cap.
+        let (ttl, max_per_user) = {
+            let t = self.runtime_tuning.read().unwrap();
+            (
+                std::time::Duration::from_secs(t.login_nonce_ttl_secs.max(1)),
+                (t.login_nonce_max_per_user as usize).max(1),
+            )
+        };
         let mut map = self.login_nonces.lock().unwrap();
         // Bound the map: drop expired entries when it grows past a sane cap.
         if map.len() > 10_000 {
             map.retain(|_, v| {
-                v.retain(|(_, t)| t.elapsed() < LOGIN_NONCE_TTL);
+                v.retain(|(_, t)| t.elapsed() < ttl);
                 !v.is_empty()
             });
         }
         let entry = map.entry(username.to_string()).or_default();
-        entry.retain(|(_, t)| t.elapsed() < LOGIN_NONCE_TTL);
-        if entry.len() >= LOGIN_NONCE_MAX_PER_USER {
+        entry.retain(|(_, t)| t.elapsed() < ttl);
+        if entry.len() >= max_per_user {
             entry.remove(0);
         }
         entry.push((nonce.clone(), std::time::Instant::now()));
@@ -158,11 +194,15 @@ impl AppState {
     /// F3 — verify and consume a login nonce. True only for a live, unused
     /// nonce of that exact account; a replay finds it already gone.
     pub fn consume_login_nonce(&self, username: &str, nonce: &str) -> bool {
+        let ttl = {
+            let t = self.runtime_tuning.read().unwrap();
+            std::time::Duration::from_secs(t.login_nonce_ttl_secs.max(1))
+        };
         let mut map = self.login_nonces.lock().unwrap();
         let Some(entry) = map.get_mut(username) else { return false };
         let Some(pos) = entry
             .iter()
-            .position(|(n, t)| n == nonce && t.elapsed() < LOGIN_NONCE_TTL)
+            .position(|(n, t)| n == nonce && t.elapsed() < ttl)
         else {
             return false;
         };
@@ -174,10 +214,11 @@ impl AppState {
     }
 }
 
-/// F3 — lifetime and per-account cap of login nonces handed out by
-/// `/api/auth-params` (multi-device safe: several live nonces per account).
-const LOGIN_NONCE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
-const LOGIN_NONCE_MAX_PER_USER: usize = 8;
+// F3 — login-nonce lifetime and per-account cap are RuntimeTuning fields
+// now (login_nonce_ttl_secs / login_nonce_max_per_user), live-tunable from
+// the admin panel. Multi-device safe: several live nonces per account.
+
+
 
 /// F3 — derivation label for the Ed25519 login signing key the client derives
 /// from the same secret as the legacy login credential. Both sides must agree
@@ -197,23 +238,91 @@ pub fn decode_login_public_key(public_key_b64: &str) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
-/// F3 — verify a nonce-bound Ed25519 login signature. Failure (bad length,
-/// bad point, bad signature) is a plain `false`, never a server error.
+/// ML-DSA-65 (FIPS 204) sizes, matching the vendored @noble library the
+/// client signs with.
+pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
+
+/// A decoded `login_public_key` column value.
+///
+/// v2 (hybrid, stored as JSON): `{"v":2,"ed25519":"<b64>","ml_dsa_65":"<b64>"}`
+/// v1 (legacy, bare base64): the Ed25519 half only. Accounts registered
+/// before the hybrid rollout keep signing in with Ed25519 alone; every
+/// registration and password change from a current client writes v2.
+pub struct LoginKeySet {
+    pub ed25519: [u8; 32],
+    pub ml_dsa_65: Option<Vec<u8>>,
+}
+
+/// Parse the stored login key: a v2 JSON blob or a legacy bare Ed25519 key.
+/// Malformed blobs, wrong-size keys and unknown versions are all `None` — an
+/// account with an unparseable key can never authenticate.
+pub fn decode_login_key_set(stored: &str) -> Option<LoginKeySet> {
+    use base64::Engine as _;
+    let trimmed = stored.trim();
+    if trimmed.starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        if v.get("v").and_then(|x| x.as_u64()) != Some(2) {
+            return None;
+        }
+        let ed_b64 = v.get("ed25519")?.as_str()?;
+        let ed25519 = decode_login_public_key(ed_b64)?;
+        let pq_b64 = v.get("ml_dsa_65")?.as_str()?;
+        let pq = base64::engine::general_purpose::STANDARD.decode(pq_b64.trim()).ok()?;
+        if pq.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
+            return None;
+        }
+        return Some(LoginKeySet { ed25519, ml_dsa_65: Some(pq) });
+    }
+    Some(LoginKeySet { ed25519: decode_login_public_key(trimmed)?, ml_dsa_65: None })
+}
+
+/// Verify an ML-DSA-65 signature produced by the vendored @noble library.
+fn verify_ml_dsa_65(public_key: &[u8], message: &[u8], signature_b64: &str) -> bool {
+    use base64::Engine as _;
+    use ml_dsa::{EncodedVerifyingKey, KeyInit as _, MlDsa65, Signature, Verifier, VerifyingKey};
+    let Ok(vk_enc) = <&EncodedVerifyingKey<MlDsa65>>::try_from(public_key) else { return false };
+    let vk = VerifyingKey::<MlDsa65>::new(vk_enc);
+    let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(signature_b64.trim()) else {
+        return false;
+    };
+    let Ok(sig) = Signature::<MlDsa65>::try_from(sig_bytes.as_slice()) else { return false };
+    vk.verify(message, &sig).is_ok()
+}
+
+/// F3/PQ — verify the nonce-bound login signature. For a v2 (hybrid) account
+/// BOTH halves are required: the Ed25519 signature and the ML-DSA-65
+/// signature over the same message. A legacy Ed25519-only account verifies
+/// with its single signature. Failure (bad length, bad point, missing or bad
+/// signature) is a plain `false`, never a server error.
 pub fn verify_login_signature(
-    public_key_b64: &str,
+    stored_key: &str,
     username: &str,
     nonce: &str,
     signature_b64: &str,
+    pq_signature_b64: Option<&str>,
 ) -> bool {
     use base64::Engine as _;
-    let Some(pk) = decode_login_public_key(public_key_b64) else { return false };
-    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pk) else { return false };
+    let Some(key_set) = decode_login_key_set(stored_key) else { return false };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key_set.ed25519) else { return false };
     let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(signature_b64.trim()) else {
         return false;
     };
     let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig_bytes) else { return false };
-    vk.verify_strict(login_signing_message(username, nonce).as_bytes(), &sig)
-        .is_ok()
+    let message = login_signing_message(username, nonce);
+    if vk.verify_strict(message.as_bytes(), &sig).is_err() {
+        return false;
+    }
+    match key_set.ml_dsa_65.as_deref() {
+        // v2: the PQ half must be present and verify over the same message.
+        // Missing it is a hard refusal, not a fallback — otherwise a
+        // recorded login request could be replayed after Ed25519 falls.
+        Some(pq_public) => {
+            let Some(pq_signature) = pq_signature_b64 else { return false };
+            verify_ml_dsa_65(pq_public, message.as_bytes(), pq_signature)
+        }
+        // Legacy account (registered before hybrids): Ed25519 alone.
+        None => true,
+    }
 }
 
 /// Runtime-tunable limits, editable live from the admin panel (the
@@ -300,6 +409,8 @@ pub struct RuntimeTuning {
     pub join_server_user_max: u32,
     /// Voice media frames/signals per account (default 3000).
     pub voice_media_max: u32,
+    /// Voice signaling frames (ICE candidates / SDP) per account (default 300).
+    pub voice_signal_max: u32,
     /// Largest accepted ciphertext for one icon slot, in bytes (default 4 MiB).
     /// Must match the client's cap, so the value is also served from
     /// /api/client-config.
@@ -338,6 +449,8 @@ pub struct RuntimeTuning {
     pub ws_auth_window_secs: u64,
     /// Voice media budget window in seconds (default 10).
     pub voice_media_window_secs: u64,
+    /// Voice signaling budget window in seconds (default 10).
+    pub voice_signal_window_secs: u64,
     /// Server-creation window in seconds (default 3600).
     pub create_server_window_secs: u64,
     /// Admin-panel login window in seconds (default 300; keeps accepting the
@@ -345,6 +458,16 @@ pub struct RuntimeTuning {
     pub admin_login_window_secs: u64,
     /// Failed-login notification window in seconds (default 600).
     pub login_fail_notify_window_secs: u64,
+    /// Failed-password window in seconds (default 900): the window
+    /// `login_user_fail_max` is counted in (previously hardcoded to 900).
+    pub login_user_fail_window_secs: u64,
+    /// Login-nonce lifetime in seconds (default 120).
+    pub login_nonce_ttl_secs: u64,
+    /// Live login nonces per account (default 8).
+    pub login_nonce_max_per_user: u32,
+    /// Hard cap on a client-requested session lifetime in seconds (default
+    /// 30 days). Never applied below `MIN_SESSION_SECS` (1 minute).
+    pub max_session_secs: u64,
     /// Where each value came from: field name → "db" | "env" | "default".
     pub sources: std::collections::HashMap<&'static str, &'static str>,
 }
@@ -438,6 +561,7 @@ impl RuntimeTuning {
         let join_server_user_max =
             tuned!("join_server_user_max", "JOIN_SERVER_USER_MAX", 10) as u32;
         let voice_media_max = tuned!("voice_media_max", "VOICE_MEDIA_MAX", 3000) as u32;
+        let voice_signal_max = tuned!("voice_signal_max", "VOICE_SIGNAL_MAX", 300) as u32;
         // Default lives next to the upload handler so the two cannot drift;
         // the panel/env can raise or lower it live.
         let icon_slot_max_bytes = tuned!(
@@ -449,6 +573,13 @@ impl RuntimeTuning {
             tuned!("upload_chunk_max_bytes", "UPLOAD_CHUNK_MAX_BYTES", 1024 * 1024);
         let mutation_window_secs = tuned!("mutation_window_secs", "MUTATION_WINDOW_SECS", 10);
         let login_window_secs = tuned!("login_window_secs", "LOGIN_WINDOW_SECS", 300);
+        let login_user_fail_window_secs =
+            tuned!("login_user_fail_window_secs", "LOGIN_USER_FAIL_WINDOW_SECS", 900);
+        let login_nonce_ttl_secs = tuned!("login_nonce_ttl_secs", "LOGIN_NONCE_TTL_SECS", 120);
+        let login_nonce_max_per_user =
+            tuned!("login_nonce_max_per_user", "LOGIN_NONCE_MAX_PER_USER", 8) as u32;
+        let max_session_secs =
+            tuned!("max_session_secs", "MAX_SESSION_SECS", 30 * 24 * 60 * 60);
         let kill_switch_window_secs =
             tuned!("kill_switch_window_secs", "KILL_SWITCH_WINDOW_SECS", 300);
         let reauth_window_secs = tuned!("reauth_window_secs", "REAUTH_WINDOW_SECS", 300);
@@ -467,6 +598,8 @@ impl RuntimeTuning {
         let ws_auth_window_secs = tuned!("ws_auth_window_secs", "WS_AUTH_WINDOW_SECS", 60);
         let voice_media_window_secs =
             tuned!("voice_media_window_secs", "VOICE_MEDIA_WINDOW_SECS", 10);
+        let voice_signal_window_secs =
+            tuned!("voice_signal_window_secs", "VOICE_SIGNAL_WINDOW_SECS", 10);
         let create_server_window_secs =
             tuned!("create_server_window_secs", "CREATE_SERVER_WINDOW_SECS", 3600);
         let admin_login_window_secs = tuned!(
@@ -515,6 +648,7 @@ impl RuntimeTuning {
             register_user_max,
             join_server_user_max,
             voice_media_max,
+            voice_signal_max,
             icon_slot_max_bytes,
             upload_chunk_max_bytes,
             mutation_window_secs,
@@ -530,9 +664,14 @@ impl RuntimeTuning {
             search_window_secs,
             ws_auth_window_secs,
             voice_media_window_secs,
+            voice_signal_window_secs,
             create_server_window_secs,
             admin_login_window_secs,
             login_fail_notify_window_secs,
+            login_user_fail_window_secs,
+            login_nonce_ttl_secs,
+            login_nonce_max_per_user,
+            max_session_secs,
             sources,
         }
     }
@@ -1359,6 +1498,7 @@ async fn main() {
         .route("/api/search", get(handlers::search_messages_handler).post(handlers::index_search_tokens))
         .route("/api/invites/join", post(handlers::join_server))
         .route("/api/identity/{user_id}", get(handlers::get_identity_key))
+        .route("/api/identity/pq-key", post(handlers::publish_identity_pq_key))
         // Voice: TURN server config for WebRTC calls (strict NAT traversal)
         .route("/api/voice/turn-config", get(handlers::get_turn_config))
         // Device management routes
@@ -1602,7 +1742,253 @@ async fn main() {
 
 #[cfg(test)]
 mod static_path_tests {
-    use super::{percent_decode_path, static_subpath};
+    use super::{hash_client_ip, percent_decode_path, static_subpath};
+
+    // ---- Cross-language post-quantum KATs ----
+    // tests/fixtures/pq-kat.json is generated by tools/gen-pq-kat.mjs with the
+    // VENDORED @noble JS the client runs. The Rust side must reproduce the same
+    // values (independent implementation of FIPS 203/204), and
+    // tests/pq-envelopes.spec.ts checks the browser still does too. Drift in
+    // either half fails here instead of on the wire.
+    fn pq_kat_hex(s: &str) -> Vec<u8> {
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
+    }
+    fn pq_kat_json() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/pq-kat.json")).unwrap()
+    }
+
+    #[test]
+    fn pq_ml_kem_768_matches_the_client_fixture() {
+        use ml_kem::kem::{Decapsulate, KeyExport};
+        use ml_kem::{Ciphertext, DecapsulationKey, MlKem768, Seed};
+        let kat = pq_kat_json();
+        let k = &kat["ml_kem_768"];
+        let seed_bytes = pq_kat_hex(k["seed_hex"].as_str().unwrap());
+        let seed = <&Seed>::try_from(seed_bytes.as_slice()).expect("seed is 64 bytes");
+        let dk = DecapsulationKey::<MlKem768>::from_seed(*seed);
+        let derived_pub = dk.encapsulation_key().to_bytes();
+        assert_eq!(
+            derived_pub.as_slice(),
+            pq_kat_hex(k["public_key_hex"].as_str().unwrap()).as_slice(),
+            "Rust and the vendored JS must derive the same public key from the same seed"
+        );
+        let ct_bytes = pq_kat_hex(k["ciphertext_hex"].as_str().unwrap());
+        let ct = <&Ciphertext<MlKem768>>::try_from(ct_bytes.as_slice())
+            .expect("1088-byte ML-KEM-768 ciphertext");
+        let ss = dk.decapsulate(ct);
+        assert_eq!(
+            ss.as_slice(),
+            pq_kat_hex(k["shared_secret_hex"].as_str().unwrap()).as_slice(),
+            "Rust must decapsulate the JS-produced ciphertext to the same secret"
+        );
+    }
+
+    #[test]
+    fn pq_hybrid_escrow_kdf_matches_the_client_fixture() {
+        use sha2::{Digest, Sha256};
+        let kat = pq_kat_json();
+        let e = &kat["escrow_v2"];
+        let mut hasher = Sha256::new();
+        hasher.update(b"e2e-escrow-v2|");
+        for key in [
+            "dh_hex",
+            "shared_secret_hex",
+            "kem_ciphertext_hex",
+            "epk_hex",
+            "recipient_public_hex",
+        ] {
+            hasher.update(pq_kat_hex(e[key].as_str().unwrap()));
+        }
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        assert_eq!(digest, e["key_sha256_hex"].as_str().unwrap());
+    }
+
+    #[test]
+    fn pq_hybrid_escrow_payload_decrypts_with_the_client_algorithm() {
+        use base64::Engine as _;
+        use chacha20poly1305::aead::{Aead, KeyInit as _};
+        use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+        use ml_kem::kem::{Decapsulate, KeyExport as _};
+        use ml_kem::{DecapsulationKey, MlKem768, Seed};
+        use sha2::{Digest, Sha256};
+        use x25519_dalek::{PublicKey, StaticSecret};
+
+        let identity_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let identity_pub = PublicKey::from(&identity_secret);
+
+        // v1 stays available when no PQ key is published.
+        let v1 = crate::db::Database::encrypt_notification_payload(
+            "old", identity_pub.as_bytes(), None,
+        )
+        .expect("v1 escrow encrypt");
+        assert_eq!(v1.split(':').count(), 3, "no PQ key → 3-part v1 shape");
+
+        // v2: encrypt to the fixture ML-KEM key and decrypt with the exact
+        // client algorithm (DH + decapsulate + KDF + XChaCha20-Poly1305).
+        let kat = pq_kat_json();
+        let k = &kat["ml_kem_768"];
+        let seed_bytes = pq_kat_hex(k["seed_hex"].as_str().unwrap());
+        let seed = <&Seed>::try_from(seed_bytes.as_slice()).unwrap();
+        let dk = DecapsulationKey::<MlKem768>::from_seed(*seed);
+        let ek = dk.encapsulation_key().to_bytes();
+
+        let out = crate::db::Database::encrypt_notification_payload(
+            "hello pq", identity_pub.as_bytes(), Some(ek.as_slice()),
+        )
+        .expect("hybrid escrow encrypt");
+        let parts: Vec<&str> = out.split(':').collect();
+        assert_eq!(parts.len(), 5, "v2 payload shape");
+        assert_eq!(parts[0], "v2");
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let epk_bytes = b64.decode(parts[1]).unwrap();
+        let kem_ct_bytes = b64.decode(parts[2]).unwrap();
+        let nonce = b64.decode(parts[3]).unwrap();
+        let ct = b64.decode(parts[4]).unwrap();
+
+        let epk_arr: [u8; 32] = epk_bytes.as_slice().try_into().unwrap();
+        let dh = identity_secret.diffie_hellman(&PublicKey::from(epk_arr));
+        let ct_arr = <&ml_kem::Ciphertext<MlKem768>>::try_from(kem_ct_bytes.as_slice()).unwrap();
+        let ss = dk.decapsulate(ct_arr);
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"e2e-escrow-v2|");
+        hasher.update(dh.as_bytes());
+        hasher.update(ss.as_slice());
+        hasher.update(&kem_ct_bytes);
+        hasher.update(&epk_bytes);
+        hasher.update(identity_pub.as_bytes());
+        let key = hasher.finalize();
+
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let plain = cipher
+            .decrypt(XNonce::from_slice(&nonce), ct.as_slice())
+            .expect("client-side decrypt of the server payload");
+        assert_eq!(plain, b"hello pq");
+    }
+
+    #[test]
+    fn hybrid_login_key_set_selects_the_right_verification_path() {
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let ed_pub_b64 = b64.encode(signing.verifying_key().to_bytes());
+        let message = crate::login_signing_message("alice", "fixture-nonce");
+        let ed_sig_b64 = b64.encode(signing.sign(message.as_bytes()).to_bytes());
+
+        // Legacy account: bare base64 Ed25519 key, single signature accepted.
+        assert!(crate::verify_login_signature(
+            &ed_pub_b64,
+            "alice",
+            "fixture-nonce",
+            &ed_sig_b64,
+            None
+        ));
+        let legacy = crate::decode_login_key_set(&ed_pub_b64).expect("legacy key decodes");
+        assert!(legacy.ml_dsa_65.is_none());
+
+        // v2 blob carrying the fixture ML-DSA-65 half. The fixture message is
+        // byte-identical to what verify_login_signature builds.
+        let kat = pq_kat_json();
+        let d = &kat["ml_dsa_65"];
+        assert_eq!(d["message_utf8"].as_str().unwrap(), message);
+        let pq_pub_b64 = b64.encode(pq_kat_hex(d["public_key_hex"].as_str().unwrap()));
+        let pq_sig_b64 = b64.encode(pq_kat_hex(d["signature_hex"].as_str().unwrap()));
+        let v2 = serde_json::json!({
+            "v": 2,
+            "ed25519": ed_pub_b64,
+            "ml_dsa_65": pq_pub_b64,
+        })
+        .to_string();
+        assert!(crate::decode_login_key_set(&v2).unwrap().ml_dsa_65.is_some());
+
+        // Both halves valid → accepted.
+        assert!(crate::verify_login_signature(
+            &v2,
+            "alice",
+            "fixture-nonce",
+            &ed_sig_b64,
+            Some(&pq_sig_b64)
+        ));
+        // A v2 account is refused when the PQ half is missing, wrong, or made
+        // for a different nonce — no silent Ed25519-only fallback.
+        assert!(!crate::verify_login_signature(&v2, "alice", "fixture-nonce", &ed_sig_b64, None));
+        let wrong_pq = b64.encode(vec![0u8; 3309]);
+        assert!(!crate::verify_login_signature(
+            &v2,
+            "alice",
+            "fixture-nonce",
+            &ed_sig_b64,
+            Some(&wrong_pq)
+        ));
+        assert!(!crate::verify_login_signature(
+            &v2,
+            "alice",
+            "other-nonce",
+            &ed_sig_b64,
+            Some(&pq_sig_b64)
+        ));
+
+        // Malformed / unknown-version / wrong-size blobs are rejected outright.
+        let short_pq = serde_json::json!({
+            "v": 2,
+            "ed25519": b64.encode(signing.verifying_key().to_bytes()),
+            "ml_dsa_65": b64.encode(vec![1u8; 32]),
+        })
+        .to_string();
+        for bad in ["not base64!!", "{}", r#"{"v":3,"ed25519":"AA==","ml_dsa_65":"AA=="}"#, short_pq.as_str()] {
+            assert!(crate::decode_login_key_set(bad).is_none(), "must reject {bad}");
+            assert!(!crate::verify_login_signature(bad, "alice", "fixture-nonce", &ed_sig_b64, Some(&pq_sig_b64)));
+        }
+    }
+
+    #[test]
+    fn pq_ml_dsa_65_verifies_the_client_fixture() {
+        use ml_dsa::{EncodedVerifyingKey, KeyInit as _, MlDsa65, Signature, Verifier, VerifyingKey};
+        let kat = pq_kat_json();
+        let d = &kat["ml_dsa_65"];
+        let pub_bytes = pq_kat_hex(d["public_key_hex"].as_str().unwrap());
+        let vk_enc = <&EncodedVerifyingKey<MlDsa65>>::try_from(pub_bytes.as_slice())
+            .expect("1952-byte ML-DSA-65 verifying key");
+        let vk = VerifyingKey::<MlDsa65>::new(vk_enc);
+        let sig_bytes = pq_kat_hex(d["signature_hex"].as_str().unwrap());
+        let sig = Signature::<MlDsa65>::try_from(sig_bytes.as_slice())
+            .expect("signature decodes");
+        vk.verify(d["message_utf8"].as_str().unwrap().as_bytes(), &sig)
+            .expect("a JS-produced ML-DSA signature must verify in Rust");
+        assert!(
+            vk.verify(d["tampered_message_utf8"].as_str().unwrap().as_bytes(), &sig)
+                .is_err(),
+            "a tampered message must be rejected"
+        );
+    }
+
+    #[test]
+    fn client_ip_hash_is_a_server_computed_pseudonym() {
+        let key = "test-master-key";
+        let a = hash_client_ip(key, "203.0.113.7");
+        let b = hash_client_ip(key, "203.0.113.7");
+        let c = hash_client_ip(key, "203.0.113.8");
+        // Same IP + same server key → same bucket, across restarts.
+        assert_eq!(a, b);
+        // Different IPs never collide into one bucket.
+        assert_ne!(a, c);
+        // Versioned, fixed-width marker the admin UI and tests can recognize.
+        assert!(a.starts_with("h1_"));
+        assert_eq!(a.len(), 3 + 32);
+        // The raw IP must never be recoverable from the key string itself.
+        assert!(!a.contains("203.0.113.7"));
+        // The server master key is what makes the pseudonym unguessable.
+        assert_ne!(a, hash_client_ip("other-key", "203.0.113.7"));
+    }
 
     #[test]
     fn rejects_traversal_in_every_separator_and_encoding() {

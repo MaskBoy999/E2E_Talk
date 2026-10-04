@@ -485,7 +485,10 @@ pub async fn ws_handler(
             return StatusCode::FORBIDDEN.into_response();
         }
     }
-    let client_ip = get_client_ip(&headers);
+    // Server-computed IP pseudonym (never the raw IP, never client-supplied):
+    // the WS auth limiter below keys on this, so limiter state and the admin
+    // usage view only ever contain `h1_…` hashes.
+    let client_ip = crate::hash_client_ip(&state.config.hmac_key, &get_client_ip(&headers));
     // Finding 7 — message/frame caps + the per-socket inbound budget are
     // admin-configurable (KB/MB/GB in the panel), so one socket can neither
     // make the server buffer megabytes per message nor have a broadcast
@@ -3284,7 +3287,19 @@ async fn handle_voice_signal(
     let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
 
     // Rate limit signaling per user (burst of ICE candidates is normal, cap it)
-    if !VOICE_SIGNAL_LIMITER.check_and_increment(&format!("voice_signal:{}", user_id), 300, Duration::from_secs(10)) {
+    // Signaling budget is admin-tunable (Runtime Limits → voice signal budget);
+    // 0 disables it. Replaces the previously hardcoded 300 / 10s.
+    let (signal_max, signal_window): (u32, u64) = {
+        let t = state.runtime_tuning.read().unwrap();
+        (t.voice_signal_max, t.voice_signal_window_secs)
+    };
+    if signal_max > 0
+        && !VOICE_SIGNAL_LIMITER.check_and_increment(
+            &format!("voice_signal:{}", user_id),
+            signal_max,
+            Duration::from_secs(signal_window),
+        )
+    {
         return;
     }
 

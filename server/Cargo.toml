@@ -36,3 +36,8 @@ p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 aes-gcm = "0.10"
 hmac = "0.12"
 ed25519-dalek = "2"
+# Post-quantum (FIPS 203/204): ML-KEM-768 for the hybrid offline-notification
+# escrow and ML-DSA-65 for the hybrid login signature (client signs with the
+# vendored @noble/post-quantum, server verifies both halves).
+ml-kem = { version = "0.3", features = ["getrandom"] }
+ml-dsa = "0.1"

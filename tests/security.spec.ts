@@ -212,15 +212,22 @@ await page2.click('#register-form button[type="submit"]');
     test('duplicate username registration is rejected', async ({ request }) => {
         const username = 'dup_test_' + Date.now();
         // The register endpoint requires a 64+ char client-side HMAC hash (the
-        // server never sees the raw password) — send a valid-length hash.
+        // server never sees the raw password) and a hybrid login key shape
+        // (32-byte Ed25519 + 1952-byte ML-DSA-65 halves). This test never logs
+        // in, so structurally valid synthetic bytes are enough.
         const pwHash = 'h'.repeat(64);
+        const loginPublicKey = JSON.stringify({
+            v: 2,
+            ed25519: Buffer.alloc(32, 7).toString('base64'),
+            ml_dsa_65: Buffer.alloc(1952, 11).toString('base64'),
+        });
         const res1 = await request.post(`${BASE}/api/register`, {
-            data: { username, password: pwHash },
+            data: { username, password: pwHash, login_public_key: loginPublicKey },
         });
         expect(res1.ok()).toBeTruthy();
 
         const res2 = await request.post(`${BASE}/api/register`, {
-            data: { username, password: pwHash },
+            data: { username, password: pwHash, login_public_key: loginPublicKey },
         });
         expect(res2.ok()).toBeFalsy();
     });

@@ -574,10 +574,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const hashKeyB64 = E2ECrypto.arrayBufferToBase64(hashKey);
             const encryptedHashKey = E2ECrypto.encryptWithPassword(hashKeyB64, password);
             const hashedPassword = E2ECrypto.hmacHex(hashKey, password);
-            // F3 — derive the deterministic Ed25519 login key from the same
-            // secret. The server stores only the public half; logins sign a
-            // fresh nonce instead of transmitting the credential.
-            const loginPublicKey = E2ECrypto.deriveLoginPublicKey(hashKey, password);
+            // F3/PQ — derive the deterministic hybrid login key (Ed25519 +
+            // ML-DSA-65) from the same secret. The server stores only the
+            // public halves; logins sign a fresh nonce with both instead of
+            // transmitting the credential. Registration REQUIRES the hybrid
+            // key (the server refuses Ed25519-only), so a failed library load
+            // is a hard error, never a silent downgrade.
+            await E2ECrypto.pqReady();
+            const loginPublicKey = E2ECrypto.deriveLoginPublicKeyBundle(hashKey, password);
 
             // Cache for later use (reauth, etc.) — stored AFTER _secReKey below
             // so secure-storage encrypts with the password-derived key.
@@ -599,6 +603,18 @@ document.addEventListener('DOMContentLoaded', () => {
             // Generate identity keypair for E2E
             const keypair = E2ECrypto.x25519GenerateKeyPair();
             const publicKeyB64 = E2ECrypto.arrayBufferToBase64(keypair.publicKey);
+
+            // PQ identity public key (ML-KEM-768, FIPS 203) derived from the
+            // identity private key. Published at registration so the server can
+            // hybrid-encrypt offline notifications and peers can address v2
+            // envelopes to this account. Best-effort: if the vendored library
+            // fails to load the account registers without it and the client
+            // publishes on the next app load.
+            let identityPqPublicKey = null;
+            try {
+                await E2ECrypto.pqReady();
+                identityPqPublicKey = E2ECrypto.getIdentityPqPublicKeyB64(keypair.privateKey);
+            } catch (_) {}
 
             // Encrypt identity private key for escrow (using Argon2id encryptWithPassword)
             const privB64 = E2ECrypto.arrayBufferToBase64(keypair.privateKey);
@@ -624,6 +640,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     hash_key_salt: encryptedHashKey.salt,
                     hash_key_nonce: encryptedHashKey.nonce,
                     identity_public_key: publicKeyB64,
+                    identity_pq_public_key: identityPqPublicKey,
                     friend_code: friendCode,
                     encrypted_friend_code: encryptedFC.encrypted_private_key,
                     friend_code_salt: encryptedFC.salt,

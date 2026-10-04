@@ -228,13 +228,18 @@ test.describe('Heartbeat refresh options + reauth custom duration', () => {
         await page.waitForSelector('#login-form');
 
         const result = await page.evaluate(async (uname) => {
-            // Mirror the auth.js register flow: random 32-byte hash key → HMAC password
+            // Mirror the auth.js register flow: random 32-byte hash key → HMAC password,
+            // plus the hybrid (Ed25519 + ML-DSA-65) login key derived from the same
+            // secret. Registration requires the hybrid key; an Ed25519-only account
+            // is refused since the PQ rollout.
             const hashKey = E2ECrypto.randomBytes(32);
             const hashedPassword = E2ECrypto.hmacHex(hashKey, 'password123');
+            await E2ECrypto.pqReady();
+            const loginPublicKey = E2ECrypto.deriveLoginPublicKeyBundle(hashKey, 'password123');
             const res = await fetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: uname, password: hashedPassword, duration_seconds: 3600 }),
+                body: JSON.stringify({ username: uname, password: hashedPassword, login_public_key: loginPublicKey, duration_seconds: 3600 }),
             });
             if (!res.ok) return { ok: false, status: res.status, body: await res.text() };
             const data = await res.json();

@@ -1,0 +1,19 @@
+{
+  "package": "@noble/post-quantum",
+  "version": "0.7.1",
+  "license": "MIT",
+  "implementations": "FIPS 203 (ML-KEM) and FIPS 204 (ML-DSA), pure JS",
+  "source": [
+    "https://cdn.jsdelivr.net/npm/@noble/post-quantum@0.7.1/ml-kem.js/+esm",
+    "https://cdn.jsdelivr.net/npm/@noble/post-quantum@0.7.1/ml-dsa.js/+esm"
+  ],
+  "files": {
+    "static/libs/noble-post-quantum-0.7.1-ml-kem.js": "e9165d8ea6b3e2dcdcc6a82257328f5ffd05e9be9677e5ef2077631cd23bbdc9",
+    "static/libs/noble-post-quantum-0.7.1-ml-dsa.js": "f7bc1be6c9acc8a961d32383ea4d41501da6e5a7b7c301a02d24dfb8f4a1bff7",
+    "static/libs/noble/noble-hashes-2.4.0-sha3.js": "befb60ee628cafe1c74af63ff360042056fcd83ae0ac77ef90fadb5e935aa4ad",
+    "static/libs/noble/noble-hashes-2.4.0-utils.js": "138368b6522314c21206ac4fcd96d762d61e019365306ef8ed5bafa75e92e89d",
+    "static/libs/noble/noble-curves-2.4.0-abstract-fft.js": "edf64778591336679c1c74d9da9b5186b169596b7adeb8b58470a130d4609d70",
+    "static/libs/noble/noble-curves-2.4.0-utils.js": "64d7664963bb5a3e850be5b9f7c42b856a9561be1f142430a3e580a0fea1d02b"
+  },
+  "vendoring": "tools/vendor-noble-pq.mjs downloads the +esm closure and rewrites every absolute /npm/ specifier to a relative sibling path, because jsDelivr's bundles would otherwise fetch dependencies from the CDN at runtime. tools/gen-pq-kat.mjs then pins cross-language KAT values; server/src tests assert RustCrypto reproduces them and tests/pq-envelopes.spec.ts asserts the browser does. tools/vendor-checksums.mjs records these hashes for tests/vendor-integrity.spec.ts."
+}

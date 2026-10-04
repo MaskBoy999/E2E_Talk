@@ -22,10 +22,18 @@ let child: ChildProcess;
 let tmpDb: string;
 
 async function registerUser(request: any, uname: string): Promise<string> {
-  // The server expects a client-computed HMAC-SHA256 hash (64 hex chars)
+  // The server expects a client-computed HMAC-SHA256 hash (64 hex chars) and,
+  // since the hybrid login rollout, a v2 login key (32-byte Ed25519 half +
+  // 1952-byte ML-DSA-65 half). These tests never log in, so structurally
+  // valid synthetic bytes are enough.
   const hashedPw = 'a'.repeat(64);
+  const loginPublicKey = JSON.stringify({
+    v: 2,
+    ed25519: Buffer.alloc(32, 7).toString('base64'),
+    ml_dsa_65: Buffer.alloc(1952, 11).toString('base64'),
+  });
   const res = await request.post(`${ALT}/api/register`, {
-    data: { username: uname, password: hashedPw },
+    data: { username: uname, password: hashedPw, login_public_key: loginPublicKey },
   });
   expect(res.ok()).toBeTruthy();
   const data = await res.json();
@@ -106,10 +114,12 @@ test.describe('Vault upload — quota enforcement (isolated server)', () => {
 
   test.beforeAll(async ({ request }) => {
     const serverDir = path.join(__dirname, '..', 'server');
+    // The release binary, like every other isolated-server spec (the debug
+    // build is not a prerequisite of the suite).
     const bin = path.join(
       serverDir,
       'target',
-      'debug',
+      'release',
       process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat',
     );
     if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);

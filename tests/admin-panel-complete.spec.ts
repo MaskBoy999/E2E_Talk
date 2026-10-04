@@ -150,10 +150,19 @@ test.describe('Admin panel: every tab renders and XSS payloads stay escaped', ()
         const payload = '<img src=x onerror="window.__adminXss=1"><script>window.__adminXss2=1</script>';
         const xssUser = payload + ts;
 
+        // Structurally valid hybrid login key (32-byte Ed25519 + 1952-byte
+        // ML-DSA-65 halves): registration requires the v2 shape, and this test
+        // never logs in, so synthetic bytes are enough.
+        const loginPublicKey = JSON.stringify({
+            v: 2,
+            ed25519: Buffer.alloc(32, 7).toString('base64'),
+            ml_dsa_65: Buffer.alloc(1952, 11).toString('base64'),
+        });
         const reg = await request.post(`${BASE}/api/register`, {
             data: {
                 username: xssUser,
                 password: 'x'.repeat(64),
+                login_public_key: loginPublicKey,
                 friend_code: 'XSS' + ts.slice(0, 6),
             },
         });

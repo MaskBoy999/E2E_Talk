@@ -160,7 +160,25 @@ var E2ECrypto = (() => {
     }
 
     // NEW: Authenticated envelope (static ECDH)
-    function envelopeEncrypt(plaintext, recipientPublicKey, senderPrivateKey) {
+    function envelopeEncrypt(plaintext, recipientPublicKey, senderPrivateKey, recipientPqPublicKey) {
+        // Envelope v2 (hybrid X25519 + ML-KEM-768) when the caller knows the
+        // recipient's PQ public key — or when we are encrypting to ourselves
+        // (recipient == sender): the PQ identity is derived deterministically
+        // from the identity private key, so self-wrapped keys (notification
+        // sound, ringtone, own server/channel key, soundboard clips) upgrade
+        // without touching their call sites. Peers with no published PQ key
+        // and recorded v1 data keep producing byte-identical v1 envelopes.
+        if (pqAvailable() && !recipientPqPublicKey) {
+            try {
+                var ownPub = x25519DerivePublicKey(senderPrivateKey);
+                if (equalBytes(ownPub, new Uint8Array(recipientPublicKey))) {
+                    recipientPqPublicKey = getIdentityPqKeyPair(senderPrivateKey).publicKey;
+                }
+            } catch (_) {}
+        }
+        if (recipientPqPublicKey && pqAvailable()) {
+            return envelopeEncryptV2(plaintext, recipientPublicKey, senderPrivateKey, recipientPqPublicKey);
+        }
         const shared = x25519SharedSecret(senderPrivateKey, recipientPublicKey);
         const key = hkdf(shared, shared, 'e2e-envelope-v1', 32);
         _secureZero(shared);
@@ -170,7 +188,21 @@ var E2ECrypto = (() => {
         return { ciphertext: arrayBufferToBase64(enc.ciphertext), nonce: arrayBufferToBase64(enc.nonce) };
     }
 
-    function envelopeDecrypt(ciphertextB64, recipientPrivateKey, senderPublicKey, nonceB64) {
+    function envelopeDecrypt(ciphertextB64, recipientPrivateKey, senderPublicKey, nonceB64, recipientPqSecretKey) {
+        // v2 detection is in the bytes, not in a header a proxy could strip:
+        // the packed ciphertext starts with the PQ magic. Everything else is
+        // the v1 path below, so recorded v1 envelopes keep decrypting.
+        var packed = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
+        if (isPqEnvelope(packed)) {
+            // The recipient PQ secret is derived from the same identity private
+            // key the caller already passes, so no decrypt call site needs to
+            // know the envelope was hybrid (getIdentityPqSecretKey throws when
+            // the vendored library is not loaded; callers already handle that).
+            if (!recipientPqSecretKey) {
+                recipientPqSecretKey = getIdentityPqSecretKey(recipientPrivateKey);
+            }
+            return envelopeDecryptV2(packed, recipientPrivateKey, senderPublicKey, recipientPqSecretKey);
+        }
         const ct = new Uint8Array(base64ToArrayBuffer(ciphertextB64));
         const n = new Uint8Array(base64ToArrayBuffer(nonceB64));
         const shared = x25519SharedSecret(recipientPrivateKey, senderPublicKey);
@@ -179,6 +211,207 @@ var E2ECrypto = (() => {
         const pt = _aeadDecryptRaw(ct, key, null, n);
         _secureZero(key);
         return pt;
+    }
+
+    // ================= Post-quantum hybrid layer (FIPS 203 ML-KEM-768) =================
+    // The vendored @noble/post-quantum modules are ES modules, so they are
+    // loaded with a dynamic import() (allowed in classic scripts) and cached
+    // on window.NoblePQ. They are served from this origin (static/libs/*), so
+    // the page CSP applies and no third-party origin ever sees a key
+    // operation. The import is kicked off at load time and re-tried on use.
+    var PQ_IDENTITY_LABEL = 'e2e:pq-identity-seed:v1';
+    var PQ_ENVELOPE_MAGIC = new Uint8Array([0x45, 0x32, 0x45, 0x50, 0x51, 0x76, 0x32, 0x7c]); // "E2EPQv2|"
+    var PQ_MLKEM768_CT_BYTES = 1088;
+    var _pqImportPromise = null;
+    var _pqIdentityCacheKey = null;
+    var _pqIdentityCache = null;
+
+    function pqReady() {
+        if (window.NoblePQ && window.NoblePQ.ml_kem768) return Promise.resolve(window.NoblePQ);
+        if (!_pqImportPromise) {
+            _pqImportPromise = Promise.all([
+                import('./libs/noble-post-quantum-0.7.1-ml-kem.js'),
+                import('./libs/noble-post-quantum-0.7.1-ml-dsa.js')
+            ]).then(function (mods) {
+                window.NoblePQ = { ml_kem768: mods[0].ml_kem768, ml_dsa65: mods[1].ml_dsa65 };
+                return window.NoblePQ;
+            }).catch(function (e) {
+                _pqImportPromise = null;
+                throw e;
+            });
+        }
+        return _pqImportPromise;
+    }
+    function pqAvailable() {
+        return !!(window.NoblePQ && window.NoblePQ.ml_kem768);
+    }
+    try { pqReady().catch(function () {}); } catch (_) {}
+
+    // Deterministic ML-KEM identity keypair. The 64-byte seed is regenerated
+    // from the account's X25519 identity private key on every device, so all
+    // devices of one account derive the same PQ identity (nothing new to sync)
+    // and senders only need the public half published by /api/identity/{id}.
+    function pqIdentitySeed(identityPrivateKey) {
+        var priv = new Uint8Array(identityPrivateKey);
+        return hkdf(priv, priv, PQ_IDENTITY_LABEL, 64);
+    }
+    function getIdentityPqKeyPair(identityPrivateKey) {
+        if (!pqAvailable()) throw new Error('Post-quantum library not loaded yet');
+        var priv = new Uint8Array(identityPrivateKey);
+        var cacheKey = arrayBufferToBase64(priv);
+        if (_pqIdentityCacheKey === cacheKey && _pqIdentityCache) return _pqIdentityCache;
+        var seed = pqIdentitySeed(priv);
+        var kp = window.NoblePQ.ml_kem768.keygen(seed);
+        _secureZero(seed);
+        _pqIdentityCacheKey = cacheKey;
+        _pqIdentityCache = {
+            publicKey: new Uint8Array(kp.publicKey),
+            secretKey: new Uint8Array(kp.secretKey)
+        };
+        return _pqIdentityCache;
+    }
+    function getIdentityPqPublicKeyB64(identityPrivateKey) {
+        return arrayBufferToBase64(getIdentityPqKeyPair(identityPrivateKey).publicKey);
+    }
+    function getIdentityPqSecretKey(identityPrivateKey) {
+        return getIdentityPqKeyPair(identityPrivateKey).secretKey;
+    }
+
+    function isPqEnvelope(packed) {
+        if (!packed || packed.length < PQ_ENVELOPE_MAGIC.length + PQ_MLKEM768_CT_BYTES + 24 + 16) return false;
+        for (var i = 0; i < PQ_ENVELOPE_MAGIC.length; i++) {
+            if (packed[i] !== PQ_ENVELOPE_MAGIC[i]) return false;
+        }
+        return true;
+    }
+
+    // Hybrid envelope key. Both sides compute:
+    //   dh = X25519 leg (sender static private × recipient static public) —
+    //        this is what authenticates the sender
+    //   ss = ML-KEM-768 encapsulation to the recipient's PQ public key —
+    //        this is what keeps a recorded envelope safe from a future
+    //        quantum computer that breaks X25519 alone
+    //   ikm = dh || ss || kemCiphertext || senderPub || recipientPub
+    // The KEM ciphertext and both public keys are bound into the KDF, so the
+    // halves cannot be mixed and matched between envelopes.
+    function _pqEnvelopeKey(dh, ss, kemCt, senderPub, recipientPub) {
+        var ikm = concatBuffers(dh, ss, kemCt, senderPub, recipientPub);
+        var salt = new TextEncoder().encode('e2e-envelope-v2');
+        var key = hkdf(ikm, salt, 'e2e-envelope-v2', 32);
+        _secureZero(ikm);
+        return key;
+    }
+
+    // v2 wire format (all inside the existing ciphertext field, so no schema
+    // changes anywhere and old storage shapes keep working):
+    //   magic(8) || ML-KEM-768 ciphertext(1088) || nonce(24) || AEAD ciphertext
+    function envelopeEncryptV2(plaintext, recipientPublicKey, senderPrivateKey, recipientPqPublicKey) {
+        if (!pqAvailable()) throw new Error('Post-quantum library not loaded yet');
+        var senderPub = x25519DerivePublicKey(senderPrivateKey);
+        var dh = x25519SharedSecret(senderPrivateKey, recipientPublicKey);
+        var enc = window.NoblePQ.ml_kem768.encapsulate(recipientPqPublicKey);
+        var kemCt = new Uint8Array(enc.cipherText);
+        var ss = new Uint8Array(enc.sharedSecret);
+        if (kemCt.length !== PQ_MLKEM768_CT_BYTES) throw new Error('Unexpected ML-KEM ciphertext size');
+        var key = _pqEnvelopeKey(dh, ss, kemCt, senderPub, recipientPublicKey);
+        _secureZero(dh);
+        _secureZero(ss);
+        var pt = typeof plaintext === 'string' ? new TextEncoder().encode(plaintext) : new Uint8Array(plaintext);
+        var nonce = randomBytes(24);
+        var aead = _aeadEncryptRaw(pt, key, null, nonce);
+        _secureZero(key);
+        var packed = concatBuffers(PQ_ENVELOPE_MAGIC, kemCt, nonce, aead.ciphertext);
+        return {
+            ciphertext: arrayBufferToBase64(packed),
+            nonce: arrayBufferToBase64(nonce),
+            pq: true
+        };
+    }
+
+    function envelopeDecryptV2(packed, recipientPrivateKey, senderPublicKey, recipientPqSecretKey) {
+        if (!pqAvailable()) throw new Error('Post-quantum library not loaded yet');
+        var off = PQ_ENVELOPE_MAGIC.length;
+        var kemCt = packed.slice(off, off + PQ_MLKEM768_CT_BYTES);
+        off += PQ_MLKEM768_CT_BYTES;
+        var nonce = packed.slice(off, off + 24);
+        off += 24;
+        var ct = packed.slice(off);
+        var dh = x25519SharedSecret(recipientPrivateKey, senderPublicKey);
+        var ss = new Uint8Array(window.NoblePQ.ml_kem768.decapsulate(kemCt, recipientPqSecretKey));
+        var recipientPub = x25519DerivePublicKey(recipientPrivateKey);
+        var key = _pqEnvelopeKey(dh, ss, kemCt, senderPublicKey, recipientPub);
+        _secureZero(dh);
+        _secureZero(ss);
+        var pt = _aeadDecryptRaw(ct, key, null, nonce);
+        _secureZero(key);
+        return pt;
+    }
+
+    // Defensive wrappers for call sites. They never throw: an unavailable
+    // library or a peer that has no published PQ key simply produces / expects
+    // a v1 envelope, so the features keep working during rollout.
+    var PQ_MLKEM768_PUB_BYTES = 1184;
+    function pqPublicKeyFromB64(b64) {
+        if (!b64 || !pqAvailable()) return null;
+        try {
+            var bytes = new Uint8Array(base64ToArrayBuffer(b64));
+            return bytes.length === PQ_MLKEM768_PUB_BYTES ? bytes : null;
+        } catch (_) { return null; }
+    }
+    function identityPqPublicKeyOrNull(identityKeyPair) {
+        if (!identityKeyPair || !identityKeyPair.privateKey || !pqAvailable()) return null;
+        try { return getIdentityPqPublicKeyB64(identityKeyPair.privateKey); } catch (_) { return null; }
+    }
+    function identityPqSecretKeyOrNull(identityKeyPair) {
+        if (!identityKeyPair || !identityKeyPair.privateKey || !pqAvailable()) return null;
+        try { return getIdentityPqSecretKey(identityKeyPair.privateKey); } catch (_) { return null; }
+    }
+
+    // ---- Offline notification escrow (server → identity key) ----
+    // v1: epk_b64:nonce_b64:ciphertext_b64          key = SHA-256(dh)
+    // v2: v2:epk_b64:kem_ct_b64:nonce_b64:ct_b64    key = SHA-256(label || dh
+    //      || ss || kem_ct || epk || recipient_pub) — hybrid X25519 + ML-KEM.
+    // The v2 expression is byte-for-byte the one Rust computes in
+    // db.rs::encrypt_notification_payload; a mixed-and-matched KEM ciphertext
+    // fails the AEAD tag.
+    function decryptEscrowPayload(encryptedPayload, identityKeyPair, identityPqSecretKey) {
+        if (!encryptedPayload || typeof encryptedPayload !== 'string') return null;
+        if (!identityKeyPair || !identityKeyPair.privateKey || !identityKeyPair.publicKey) return null;
+        var parts = encryptedPayload.split(':');
+        try {
+            if (parts[0] === 'v2') {
+                if (parts.length < 5 || !identityPqSecretKey || !pqAvailable()) return null;
+                var epk = new Uint8Array(base64ToArrayBuffer(parts[1]));
+                var kemCt = new Uint8Array(base64ToArrayBuffer(parts[2]));
+                var nonceB64 = parts[3];
+                var ctB64 = parts.slice(4).join(':');
+                var dh = x25519SharedSecret(identityKeyPair.privateKey, epk);
+                var ss = new Uint8Array(window.NoblePQ.ml_kem768.decapsulate(kemCt, identityPqSecretKey));
+                var ikm = concatBuffers(
+                    new TextEncoder().encode('e2e-escrow-v2|'), dh, ss, kemCt, epk,
+                    new Uint8Array(identityKeyPair.publicKey)
+                );
+                var key = sha256(ikm);
+                _secureZero(dh);
+                _secureZero(ss);
+                _secureZero(ikm);
+                var raw = aeadDecrypt(ctB64, key, nonceB64);
+                _secureZero(key);
+                return raw ? new TextDecoder().decode(raw) : null;
+            }
+            if (parts.length < 3) return null;
+            var epk1 = new Uint8Array(base64ToArrayBuffer(parts[0]));
+            var nonce1 = parts[1];
+            var ct1 = parts.slice(2).join(':');
+            var shared = x25519SharedSecret(identityKeyPair.privateKey, epk1);
+            var key1 = sha256(shared);
+            _secureZero(shared);
+            var raw1 = aeadDecrypt(ct1, key1, nonce1);
+            _secureZero(key1);
+            return raw1 ? new TextDecoder().decode(raw1) : null;
+        } catch (e) {
+            return null;
+        }
     }
 
     // ---- Simplified AEAD with AAD support ----
@@ -340,6 +573,10 @@ var E2ECrypto = (() => {
     // single-use nonce, which the client signs — a captured login request
     // carries nothing replayable.
     var LOGIN_SIGNING_SEED_LABEL = 'e2e:login-signing-seed:v1';
+    // PQ Phase 2 — ML-DSA-65 half of the hybrid login signature. A separate
+    // domain-separation label so the PQ seed never equals the Ed25519 seed.
+    var LOGIN_PQ_SIGNING_SEED_LABEL = 'e2e:login-signing-seed:pq:v1';
+    var LOGIN_PQ_PUBLIC_KEY_BYTES = 1952;
 
     function loginSigningSeed(hashKeyBytes, password) {
         // libsodium's hmacsha256 takes exactly a 32-byte key; K is 32 bytes.
@@ -365,6 +602,43 @@ var E2ECrypto = (() => {
         return kp.publicKey;
     }
 
+    // Deterministic ML-DSA-65 login keypair from (hash_key, password). Same
+    // property as the Ed25519 half: every device of one account derives the
+    // same key without syncing anything, and the server stores only the public
+    // half. Throws when the vendored library has not loaded — callers await
+    // pqReady() first, and a missing library is a hard failure for v2 accounts
+    // (there is no silent downgrade to Ed25519-only).
+    function deriveLoginPqKeypair(hashKeyBytes, password) {
+        if (!pqAvailable()) throw new Error('Post-quantum library not loaded yet');
+        var k = hmacSHA256(hashKeyBytes, new TextEncoder().encode(password));
+        var seed = hmacSHA256(k, new TextEncoder().encode(LOGIN_PQ_SIGNING_SEED_LABEL));
+        _secureZero(k);
+        var kp = window.NoblePQ.ml_dsa65.keygen(seed);
+        _secureZero(seed);
+        return {
+            publicKey: new Uint8Array(kp.publicKey),
+            secretKey: new Uint8Array(kp.secretKey)
+        };
+    }
+
+    // The v2 `login_public_key` wire shape: a JSON blob with both halves.
+    // Legacy clients stored a bare base64 Ed25519 key; the server accepts both
+    // on login (legacy accounts keep working) but requires v2 on registration
+    // and password change.
+    function deriveLoginPublicKeyBundle(hashKeyBytes, password) {
+        var pq = deriveLoginPqKeypair(hashKeyBytes, password);
+        if (pq.publicKey.length !== LOGIN_PQ_PUBLIC_KEY_BYTES) {
+            throw new Error('Unexpected ML-DSA-65 public key size');
+        }
+        var bundle = JSON.stringify({
+            v: 2,
+            ed25519: deriveLoginPublicKey(hashKeyBytes, password),
+            ml_dsa_65: arrayBufferToBase64(pq.publicKey)
+        });
+        _secureZero(pq.secretKey);
+        return bundle;
+    }
+
     function loginChallengeMessage(username, nonce) {
         return 'e2e-login-v1|' + username + '|' + nonce;
     }
@@ -376,6 +650,17 @@ var E2ECrypto = (() => {
             kp.privateKey
         );
         _secureZero(kp.privateKey);
+        return arrayBufferToBase64(sig);
+    }
+
+    function signLoginChallengePq(hashKeyBytes, password, username, nonce) {
+        if (!pqAvailable()) throw new Error('Post-quantum library not loaded yet');
+        var kp = deriveLoginPqKeypair(hashKeyBytes, password);
+        var sig = window.NoblePQ.ml_dsa65.sign(
+            new TextEncoder().encode(loginChallengeMessage(username, nonce)),
+            kp.secretKey
+        );
+        _secureZero(kp.secretKey);
         return arrayBufferToBase64(sig);
     }
 
@@ -414,6 +699,13 @@ var E2ECrypto = (() => {
             if (params.login_public_key && params.login_nonce) {
                 body.login_nonce = params.login_nonce;
                 body.login_signature = signLoginChallenge(hashKeyBytes, password, username, params.login_nonce);
+                // Hybrid (v2) account: the ML-DSA-65 signature over the same
+                // message is required too. Failing to produce it fails the
+                // login — never a silent downgrade to Ed25519-only.
+                if (String(params.login_public_key).charAt(0) === '{') {
+                    await pqReady();
+                    body.login_pq_signature = signLoginChallengePq(hashKeyBytes, password, username, params.login_nonce);
+                }
             }
             _secureZero(hashKeyBytes);
             return body;
@@ -926,6 +1218,16 @@ var E2ECrypto = (() => {
         aeadDecrypt: aeadDecrypt,
         envelopeEncrypt: envelopeEncrypt,
         envelopeDecrypt: envelopeDecrypt,
+        // Post-quantum layer (envelope v2 + deterministic PQ identity)
+        pqReady: pqReady,
+        pqAvailable: pqAvailable,
+        getIdentityPqKeyPair: getIdentityPqKeyPair,
+        pqPublicKeyFromB64: pqPublicKeyFromB64,
+        identityPqPublicKeyOrNull: identityPqPublicKeyOrNull,
+        identityPqSecretKeyOrNull: identityPqSecretKeyOrNull,
+        decryptEscrowPayload: decryptEscrowPayload,
+        getIdentityPqPublicKeyB64: getIdentityPqPublicKeyB64,
+        getIdentityPqSecretKey: getIdentityPqSecretKey,
         envelopeEncryptRaw: envelopeEncryptRaw,
         envelopeDecryptRaw: envelopeDecryptRaw,
         encryptMediaFrame: encryptMediaFrame,
@@ -937,7 +1239,10 @@ var E2ECrypto = (() => {
         // F3 — replay-resistant login signing + /api/login body builder
         deriveLoginKeypair: deriveLoginKeypair,
         deriveLoginPublicKey: deriveLoginPublicKey,
+        deriveLoginPqKeypair: deriveLoginPqKeypair,
+        deriveLoginPublicKeyBundle: deriveLoginPublicKeyBundle,
         signLoginChallenge: signLoginChallenge,
+        signLoginChallengePq: signLoginChallengePq,
         loginChallengeMessage: loginChallengeMessage,
         loginRequestBody: loginRequestBody,
         searchTokensForText: searchTokensForText,

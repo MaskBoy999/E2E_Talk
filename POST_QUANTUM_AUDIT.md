@@ -22,9 +22,9 @@ the algorithm-and-asset inventory that plan hangs off.
 |---|---|---|---|---|
 | 1 | Transport web/box ↔ server | TLS 1.3 via rustls 0.23.42 + aws-lc-rs 1.17.1 | **Yes — already hybrid** | None; keep a test that proves it |
 | 2 | Server TLS certificate | Self-signed ECDSA P-256 (rcgen) | No (forgery), mitigated by pinning | Pin everywhere; adopt ML-DSA certs when rustls/webpki ship them |
-| 3 | Message/key envelopes, per-server keys, key bundles, file keys | X25519 + HKDF-SHA256 + XChaCha20-Poly1305 | **No (HNDL)** | Hybrid X25519 + ML-KEM-768 with an envelope version byte |
-| 4 | Offline notification escrow | X25519 + SHA-256 + XChaCha20-Poly1305 | **No (HNDL)** | Same hybrid KEM, Rust side |
-| 5 | Login authentication | Ed25519 signature over a nonce | No (forgery → impersonation) | Hybrid Ed25519 + ML-DSA-65, verify both, store both |
+| 3 | Message/key envelopes, per-server keys, key bundles, file keys | X25519 + HKDF-SHA256 + XChaCha20-Poly1305 | **No (HNDL)** | **Shipped (0.2.44)** — hybrid X25519 + ML-KEM-768 envelope v2 (§1.3); DM/message-envelope call sites still v1 (see §2) |
+| 4 | Offline notification escrow | X25519 + SHA-256 + XChaCha20-Poly1305 | **No (HNDL)** | **Shipped (0.2.44)** — same hybrid KEM, Rust side (§1.4) |
+| 5 | Login authentication | Ed25519 signature over a nonce | No (forgery → impersonation) | **Shipped (0.2.44)** — hybrid Ed25519 + ML-DSA-65, verify both, store both (§1.5); legacy Ed25519-only accounts keep working until re-keyed |
 | 6 | Voice/video media | WebRTC DTLS-SRTP + app-layer XChaCha20-Poly1305 frames | Transport: browser-dependent; key agreement: **No** | Hybridize the call-key envelopes; wait for DTLS 1.3 + ML-KEM for the transport leg |
 | 7 | Web Push | P-256 ECDH + AES-128-GCM (RFC 8291), VAPID ES256 | No (HNDL of the transport layer) | Payload is already app-encrypted; hybridize that inner layer (item 4), track the spec |
 | 8 | Symmetric at rest: messages, files, vault, backups | XChaCha20-Poly1305 / AES-256-GCM / Argon2id | **Yes** | None (256-bit keys keep 128-bit security under Grover) |
@@ -45,6 +45,11 @@ Negotiated TLS1.3 group: X25519MLKEM768
 Everything from item 3 down is application-layer E2EE, which TLS does not
 protect from an adversary who stores the database or recorded envelopes —
 those need the migration below.
+
+**Implementation status (0.2.44):** phases 0, 1 and 2 are implemented. The
+envelope, escrow and login layers are hybrid in the shipped client and server;
+the exact rollout coverage and what remains (DM/message envelope call sites,
+voice frame keys, ratchet/MLS) is tracked per section and in §2.
 
 ---
 
@@ -128,6 +133,24 @@ When the Web Crypto API gains ML-KEM
 (chromestatus: "Add post-quantum cryptography … to Web Crypto"), migrate to
 it. `libcrux`/formal-methods wasm builds are the conservative alternative.
 
+**Status (0.2.44):** shipped for the key-envelope flows. `static/crypto.js`
+implements envelope v2 as a packed ciphertext (`E2EPQv2|` magic + ML-KEM-768
+ciphertext + nonce + AEAD ciphertext) keyed by HKDF over
+`dh || ss || kem_ct || sender_pub || recipient_pub` under the
+`e2e-envelope-v2` label; v2 detection lives in the ciphertext bytes, and v1
+envelopes stay byte-identical and readable. The vendored
+`@noble/post-quantum` 0.7.1 closure is checksum-pinned through
+`tools/vendor-checksums.json` and `tests/vendor-integrity.spec.ts`.
+`tests/pq-envelopes.spec.ts` proves cross-language KAT interop, v2
+round-tripping, fail-closed wrong-key/tamper behaviour and the v1 fallback.
+Deterministic ML-KEM-768 identity keys derive from the identity private key
+(`e2e:pq-identity-seed:v1`), are published at registration and via
+`POST /api/identity/pq-key`, and `/api/client-config` advertises
+`pq_envelope: true` / `pq_kem: "ML-KEM-768"`. Covered call sites: server
+keys, file keys, self-wrapped keys, and every envelope that passes the
+recipient's published PQ key. DM message envelopes currently call the same
+function without one and therefore stay v1 — the next rollout step.
+
 ### 1.4 Offline notification escrow (`server/src/db.rs` ~1867–1900)
 
 The server encrypts queued notifications to the recipient's X25519 identity
@@ -139,6 +162,14 @@ dependency tree (via rustls) and supports ML-KEM; alternatively the pure-Rust
 `ml-kem` crate (RustCrypto). The payload format gains a scheme byte, the
 server keeps decryption compatible per version, and the client unwraps with
 its hybrid private key.
+
+**Status (0.2.44):** shipped. `db.rs::encrypt_notification_payload` emits
+`v2:epk:kem_ct:nonce:ct` with `key = SHA-256("e2e-escrow-v2|" || dh || ss ||
+kem_ct || epk || recipient_pub)` whenever the account has a published ML-KEM
+key, and `E2ECrypto.decryptEscrowPayload` computes the identical expression;
+cross-language KATs pin those exact bytes. An account without a PQ key keeps
+the v1 three-part payload, and the client replays the notification once the
+vendored library is loaded.
 
 ### 1.5 Login authentication (`server/src/auth.rs`, `static/crypto.js`)
 
@@ -157,6 +188,17 @@ small JSON blob with a version field; old Ed25519-only accounts keep working
 until password change / registration re-keys them. Server-side
 `ml-dsa` (RustCrypto) or aws-lc-rs. Registration and password change already
 require a key, so there is one code path to extend.
+
+**Status (0.2.44):** shipped. The stored `login_public_key` is a v2 JSON blob
+(`{"v":2,"ed25519":…,"ml_dsa_65":…}`) or a legacy bare Ed25519 key.
+Registration and password change require the hybrid blob; a v2 account's login
+must carry both signatures over the same `e2e-login-v1|username|nonce`
+message, and a missing or wrong ML-DSA half is a hard refusal — never a silent
+Ed25519-only fallback. The client derives ML-DSA-65 deterministically from
+`(hash_key, password)` (`e2e:login-signing-seed:pq:v1`) and signs the same
+message with both keys; the server verifies with `ml-dsa 0.1` against the
+fixture-proven cross-language format. Legacy Ed25519-only accounts continue to
+log in until their next password change (or re-registration) upgrades them.
 
 ### 1.6 Voice/video (`static/voice.js`, `static/crypto.js`)
 
@@ -208,27 +250,36 @@ not change it.
 
 ## 2. Migration plan
 
-**Phase 0 — now (no wire changes)**
-1. Keep the TLS hybrid claim honest: add a test that fails if the negotiated
-   TLS group ever stops being hybrid (OpenSSL in CI, or a rustls assertion
-   that `X25519MLKEM768` is in the provider's default group list).
-2. Vendor `@noble/post-quantum` (ML-KEM, ML-DSA) with the usual checksum
-   pinning, behind `static/libs/`, and add it to the vendor-integrity test.
-3. Add Rust `ml-kem` (+ `ml-dsa` when the server starts verifying signatures)
-   and a small `pq.rs` module with KATs from the NIST ACVP vectors.
+**Phase 0 — shipped (0.2.44)**
+1. ✅ TLS hybrid is asserted by
+   `tests/pq-envelopes.spec.ts` → *the server negotiates the X25519MLKEM768
+   hybrid group*: it offers only that group and fails if the handshake no
+   longer lands on it.
+2. ✅ `@noble/post-quantum` 0.7.1 (ML-KEM-768 + ML-DSA-65) vendored under
+   `static/libs/` with its dependency closure, pinned in
+   `tools/vendor-checksums.json` and the `static/libs/noble-post-quantum.pin.json`
+   manifest; `tests/vendor-integrity.spec.ts` covers every file.
+3. ✅ Rust `ml-kem 0.3` + `ml-dsa 0.1`; the cross-language KAT fixture
+   (`tools/gen-pq-kat.mjs` → `server/tests/fixtures/pq-kat.json`, generated
+   with the vendored JS) is re-derived/verified by `cargo test`, including
+   ML-KEM keygen + decapsulation, the ML-DSA-65 login-message signature, and
+   the hybrid-escrow KDF bytes.
 
-**Phase 1 — envelopes (the big win)**
-4. Envelope v2: hybrid KEM as §1.3, decryption falls back to v1; old peers keep
-   reading v1. Roll out client-first, server-side escrow next (§1.4).
-5. Capability flag via `/api/client-config` so peers know when everyone is v2;
-   never strip a v2 marker silently — the marker is inside the AEAD, so
-   downgrade requires breaking the label, not just deleting a field.
+**Phase 1 — shipped (0.2.44)**
+4. ✅ Envelope v2 as §1.3, decryption falls back to v1; the escrow (§1.4) is
+   hybrid server-side. Client-first rollout is complete; old v1 data keeps
+   reading.
+5. ✅ Capability flag `pq_envelope` / `pq_kem` in `/api/client-config`; the v2
+   marker is the packed ciphertext's magic inside the AEAD, so stripping it
+   fails the tag rather than downgrading.
 
-**Phase 2 — signatures**
-6. Login key v2 (Ed25519 + ML-DSA-65), verify both, re-key on password change
-   and registration; a later phase drops Ed25519-only acceptance — which is
-   safe here precisely because legacy fallbacks were removed (see
-   `SECURITY_REVIEW_FIXES.md` §6.3): there is exactly one signing path.
+**Phase 2 — shipped (0.2.44)**
+6. ✅ Login key v2 (Ed25519 + ML-DSA-65), verify both, re-key on password
+   change and registration (§1.5). Legacy Ed25519-only acceptance remains for
+   accounts created before the rollout; dropping it is the later phase the
+   audit describes, and is safe precisely because legacy fallbacks were
+   removed (see `SECURITY_REVIEW_FIXES.md` §6.3): there is exactly one signing
+   path.
 
 **Phase 3 — protocol**
 7. Double ratchet for 1:1 and MLS for groups (§6.5), with PQ ciphersuites
@@ -259,12 +310,19 @@ not change it.
 - TLS: `echo | openssl s_client -connect 127.0.0.1:3443 -groups X25519MLKEM768 -brief`
   must print `Negotiated TLS1.3 group: X25519MLKEM768` (run it in CI against
   the built server; today's result is in §0).
-- Envelopes: KATs for ML-KEM-768 from the ACVP vectors plus round-trip tests
-  for v2/v1 fallback in `tests/` (Playwright, in-page `E2ECrypto`).
-- Signatures: cross-verify Ed25519+ML-DSA-65 with a Rust implementation in CI
-  so client and server never drift.
-- Rollout: `tests/` gains a "v2 envelope is produced for a peer that advertises
-  v2" test, mirroring the existing sandbox/isolation patterns.
+- Envelopes: `npx playwright test tests/pq-envelopes.spec.ts` — KAT interop,
+  v2/v1 round-trips, fail-closed wrong-key/tamper, registration publication,
+  a real two-account hybrid exchange, and the TLS group assertion.
+- Signatures: `cd server && cargo test` — the fixture-signed ML-DSA message
+  (`e2e-login-v1|alice|fixture-nonce`) must verify in Rust, and
+  `hybrid_login_key_set_selects_the_right_verification_path` proves the v2
+  blob demands both halves (missing/wrong/tampered → refuse) while a legacy
+  bare key still verifies Ed25519-only. The browser half runs in
+  `tests/pq-envelopes.spec.ts` → *registration stores a v2 login key, and a v2
+  account refuses an Ed25519-only login*.
+- Rollout: the "v2 envelope is produced for a peer that advertises v2" test is
+  `tests/pq-envelopes.spec.ts` → *two accounts exchange a hybrid envelope
+  through their published keys*.
 
 ## 5. References
 
