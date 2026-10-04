@@ -97,6 +97,216 @@ pub fn hash_client_ip(hmac_key: &str, ip: &str) -> String {
     out
 }
 
+/// Request header the client-IP resolver writes. `client_ip_mw` OVERWRITES it
+/// on every request before any handler runs, so a value sent by a client is
+/// discarded and only the server's own answer survives. Nothing may read
+/// `x-forwarded-for` / `x-real-ip` directly any more — those are peer claims,
+/// not facts.
+pub const CLIENT_IP_HEADER: &str = "x-e2e-client-ip";
+
+/// One IPv4/IPv6 CIDR block (a bare address parses as a full-length prefix).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cidr {
+    base: std::net::IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    pub fn parse(raw: &str) -> Option<Cidr> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let (addr, plen) = match raw.split_once('/') {
+            Some((a, p)) => (a.trim(), Some(p.trim())),
+            None => (raw, None),
+        };
+        let base: std::net::IpAddr = addr.parse().ok()?;
+        let bits: u8 = match base {
+            std::net::IpAddr::V4(_) => 32,
+            std::net::IpAddr::V6(_) => 128,
+        };
+        let prefix = match plen {
+            None => bits,
+            Some(p) => p.parse::<u8>().ok().filter(|v| *v <= bits)?,
+        };
+        Some(Cidr { base, prefix })
+    }
+
+    pub fn contains(&self, ip: &std::net::IpAddr) -> bool {
+        // /0 is the whole address family.
+        if self.prefix == 0 {
+            return matches!(
+                (self.base, ip),
+                (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_))
+                    | (std::net::IpAddr::V6(_), std::net::IpAddr::V6(_))
+            );
+        }
+        match (self.base, *ip) {
+            (std::net::IpAddr::V4(b), std::net::IpAddr::V4(i)) => {
+                let shift = 32 - u32::from(self.prefix);
+                (u32::from(b) >> shift) == (u32::from(i) >> shift)
+            }
+            (std::net::IpAddr::V6(b), std::net::IpAddr::V6(i)) => {
+                let shift = 128 - u32::from(self.prefix);
+                (u128::from(b) >> shift) == (u128::from(i) >> shift)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Which TCP peers are allowed to state a client address in `X-Forwarded-For`.
+///
+/// This exists because the header is a *claim by whoever connected to us*.
+/// MDN is blunt about it: "Any security-related use of X-Forwarded-For (such
+/// as for rate limiting or IP-based access control) must only use IP addresses
+/// added by a trusted proxy." Before this type existed every per-IP limiter
+/// trusted any client's `X-Forwarded-For`, which meant a client could mint a
+/// fresh bucket per request (evade every IP limit) or point at a victim's
+/// address (burn that victim's bucket so THEY get 429s).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrustedProxies {
+    /// Believe the header from any peer. Only for a proxy that terminates
+    /// every connection in front of us — never for a directly exposed server.
+    All,
+    /// Believe nobody: the socket peer is always the client.
+    None,
+    /// An explicit allow-list of addresses / CIDR blocks.
+    Cidrs(Vec<Cidr>),
+}
+
+/// Parse a `TRUSTED_PROXIES` value: `*` (trust everyone), `` (trust nobody),
+/// or a comma-separated list of IPs and CIDR blocks.
+pub fn parse_trusted_proxies(raw: &str) -> TrustedProxies {
+    let t = raw.trim();
+    if t == "*" {
+        return TrustedProxies::All;
+    }
+    if t.is_empty() {
+        return TrustedProxies::None;
+    }
+    let mut out = Vec::new();
+    for part in t.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        match Cidr::parse(p) {
+            Some(c) => out.push(c),
+            None => tracing::warn!("TRUSTED_PROXIES: ignoring unparseable entry {:?}", p),
+        }
+    }
+    if out.is_empty() {
+        TrustedProxies::None
+    } else {
+        TrustedProxies::Cidrs(out)
+    }
+}
+
+/// The default allow-list: loopback only.
+///
+/// This is deliberately the smallest set that keeps a same-host reverse proxy
+/// working. It once also trusted every RFC1918 / link-local / ULA range so a
+/// LAN-side proxy needed no configuration — but each of those ranges is also a
+/// set of ordinary client addresses on a LAN, and a peer that was never
+/// designated as a proxy must not be allowed to state one: any device on the
+/// same LAN could otherwise mint a fresh rate-limit bucket (or burn a
+/// victim's) with a header. An operator whose proxy really connects from
+/// another host lists that host in `TRUSTED_PROXIES` (comma-separated IPs and
+/// CIDR blocks — the private ranges are still available there explicitly).
+fn default_trusted_proxies() -> TrustedProxies {
+    const BLOCKS: &[&str] = &["127.0.0.0/8", "::1/128"];
+    TrustedProxies::Cidrs(BLOCKS.iter().filter_map(|b| Cidr::parse(b)).collect())
+}
+
+/// Cached once: the policy cannot change while the process is running.
+fn trusted_proxies() -> &'static TrustedProxies {
+    static POLICY: std::sync::OnceLock<TrustedProxies> = std::sync::OnceLock::new();
+    POLICY.get_or_init(|| match std::env::var("TRUSTED_PROXIES") {
+        Ok(v) => parse_trusted_proxies(&v),
+        Err(_) => default_trusted_proxies(),
+    })
+}
+
+fn is_trusted_proxy(ip: &std::net::IpAddr) -> bool {
+    match trusted_proxies() {
+        TrustedProxies::All => true,
+        TrustedProxies::None => false,
+        TrustedProxies::Cidrs(list) => list.iter().any(|c| c.contains(ip)),
+    }
+}
+
+/// The client address for this request, from facts rather than claims.
+///
+/// * Peer is not one of our proxies → the peer IS the client; the headers are
+///   ignored outright, so no header value can move the request into another
+///   bucket or spin up a new one.
+/// * Peer is one of our proxies → walk `X-Forwarded-For` right to left and take
+///   the first address that is not itself a trusted proxy. Everything a
+///   trusted proxy appended is ours to believe; the first untrusted hop is the
+///   client, and anything further left was supplied by the client (never use
+///   the leftmost entry). Junk in the chain means the client reached past the
+///   proxy, so we fall back to the proxy's own address rather than to it.
+/// * No socket address at all → the ConnectInfo wiring is broken. Return one
+///   shared bucket instead of silently reverting to a client-controlled header.
+pub fn resolve_client_ip(peer: Option<std::net::IpAddr>, headers: &HeaderMap) -> String {
+    let peer = match peer {
+        Some(p) => p,
+        None => return "unknown".to_string(),
+    };
+    if !is_trusted_proxy(&peer) {
+        return peer.to_string();
+    }
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        // Walk RIGHT to LEFT: the entries our proxy appended are the ones we
+        // may believe, and the first address that is not one of ours is the
+        // client. Anything further left was written by that client.
+        let mut trusted_hops: Vec<std::net::IpAddr> = Vec::new();
+        for part in xff.split(',').rev() {
+            match part.trim().parse::<std::net::IpAddr>() {
+                Ok(ip) => {
+                    if !is_trusted_proxy(&ip) {
+                        return ip.to_string();
+                    }
+                    trusted_hops.push(ip);
+                }
+                // A proxy never writes junk into the chain; if we see some, the
+                // client reached past it. Fall back to the proxy's own address
+                // rather than adopting attacker-chosen text.
+                Err(_) => return peer.to_string(),
+            }
+        }
+        // Every hop was ours — the leftmost is the furthest we can identify.
+        if let Some(first) = trusted_hops.last() {
+            return first.to_string();
+        }
+    }
+    if let Some(real) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Ok(ip) = real.trim().parse::<std::net::IpAddr>() {
+            if !is_trusted_proxy(&ip) {
+                return ip.to_string();
+            }
+        }
+    }
+    peer.to_string()
+}
+
+/// Resolve the client address once per request and stamp the answer onto the
+/// request. `insert` replaces anything the client put there, so downstream
+/// code only ever sees the server's own verdict.
+async fn client_ip_mw(mut request: Request, next: Next) -> Response {
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    let resolved = resolve_client_ip(peer, request.headers());
+    let value = HeaderValue::from_bytes(resolved.as_bytes())
+        .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
+    request.headers_mut().insert(CLIENT_IP_HEADER, value);
+    next.run(request).await
+}
+
 /// Hostnames/Host-ports this server is allowed to answer for. A DNS-rebinding
 /// attack hits the server's IP with the attacker's *hostname* in Host; the
 /// only reliable defence is a list of names the server actually owns.
@@ -700,12 +910,18 @@ async fn security_headers_mw(request: Request, next: Next) -> Response {
     headers.insert("permissions-policy", HeaderValue::from_static(PERMISSIONS_POLICY));
     headers.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
     headers.insert("cross-origin-embedder-policy", HeaderValue::from_static("require-corp"));
-    // Vendored parser libraries (/libs/*) are loaded by the sandboxed document
-    // preview, whose opaque origin can never match `same-origin`; they are
-    // public code, so they are explicitly embeddable. Everything else stays
-    // same-origin. Without this the preview frame's scripts die with
+    // Vendored parser libraries (/libs/*) and the two sandbox bootstraps
+    // (doc-preview-docx-boot.js / doc-preview-xlsx-boot.js) are loaded by the
+    // sandboxed document-preview frames, whose opaque origin can never match
+    // `same-origin` (and which inherit this origin's
+    // `Cross-Origin-Embedder-Policy: require-corp`); they are public code, so
+    // they are explicitly embeddable. Everything else stays same-origin.
+    // Without this the preview frame's scripts die with
     // ERR_BLOCKED_BY_RESPONSE and the document never renders.
-    if path.starts_with("/libs/") {
+    if path.starts_with("/libs/")
+        || path == "/doc-preview-docx-boot.js"
+        || path == "/doc-preview-xlsx-boot.js"
+    {
         headers.insert("cross-origin-resource-policy", HeaderValue::from_static("cross-origin"));
     } else {
         headers.insert("cross-origin-resource-policy", HeaderValue::from_static("same-origin"));
@@ -740,21 +956,30 @@ async fn security_headers_mw(request: Request, next: Next) -> Response {
 /// why the HTML no longer carries `integrity=` attributes: SRI protects against
 /// a *changed* file, not against the vendor being in the path at all.
 ///
-/// The two remaining weakenings are deliberate and documented, because both are
-/// load-bearing today:
-///   * `'unsafe-inline'` — the app's HTML carries inline bootstrap scripts. The
-///     fix (per-response nonce injected by the static handler, then dropping
-///     this) is tracked; until then, treat every injection sink as XSS.
-///   * `'unsafe-eval'` — the vendored speech stack (onnxruntime-web / the
-///     transformers.js bundle) and `libsodium-sumo.js` are large generated
-///     bundles; `wasm-unsafe-eval` covers WebAssembly, and this one is kept for
-///     the JS they generate at load time. It is the next thing to remove, after
-///     checking the ASR path in a real call.
-// `connect-src` names exactly one external origin: the Have I Been Pwned
-// k-anonymity range API, used by the registration-time breach check (finding
-// 3). Only the first 5 hex chars of the password's SHA-1 leave the device, the
-// check fails open when offline, and no other code path may talk to it.
-const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+/// `'unsafe-inline'` is gone. The four HTML pages that carried inline
+/// `<script>` blocks now load external files (`icon-helper.js`, `pair.js`,
+/// `box-setup.js`, `sw-register.js`), the 26 inline `on*=` handlers in
+/// admin.html/pair.html are real listeners (admin.js wires the search boxes),
+/// and the two dynamically generated handlers — the link-preview `onerror=`
+/// and the reply-bar `onclick=` — were replaced with listeners too. Inline
+/// scripts (and inline event handlers) are now refused by the browser, so an
+/// injection sink that used to execute is dead even if it is ever missed.
+/// `tests/security-headers.spec.ts` holds the no-'unsafe-inline' rule.
+///
+/// The only script permission beyond `'self'` is `'wasm-unsafe-eval'`, which
+/// WebAssembly instantiation requires (the on-device captions runtime and
+/// libsodium's WASM builds). `'unsafe-eval'` is gone too: the vendored bundles
+/// (PDF/ZIP/XLSX viewers, docx-preview, the ASR stack) were exercised without
+/// it first — documents render, captions transcribe — and
+/// `tests/security-headers.spec.ts` holds both lines so neither can come back
+/// quietly.
+///
+/// `connect-src 'self'` is deliberate too: the app's socket is
+/// `new WebSocket((https ? 'wss' : 'ws') + '://' + location.host + '/ws')` —
+/// same-origin, which `'self'` covers for ws/wss — and every fetch is
+/// relative. The old `ws: wss:` allowed a script to exfiltrate to an
+/// arbitrary WebSocket host; nothing legitimate needs one.
+const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 /// Reject requests whose Host header is not a name this server actually owns.
 /// This is the DNS-rebinding half of the origin check: under rebinding the
@@ -1657,6 +1882,11 @@ async fn main() {
         .layer(middleware::from_fn_with_state(state.clone(), request_timeout_mw))
         .layer(middleware::from_fn(security_headers_mw))
         .layer(middleware::from_fn_with_state(state.clone(), host_allowlist_mw))
+        // Outermost layer, so it runs FIRST: every inner layer (the mutation
+        // rate limiter above all) reads the resolved address from
+        // CLIENT_IP_HEADER, and `insert` there means a client-supplied copy of
+        // that header never survives.
+        .layer(middleware::from_fn(client_ip_mw))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", config.port);
@@ -1727,22 +1957,119 @@ async fn main() {
             }
 
             // Serve HTTPS on port+1
+            // `into_make_service_with_connect_info` is what puts the TCP peer
+            // into request extensions as ConnectInfo<SocketAddr> — without it
+            // client_ip_mw has no peer and every rate-limit bucket collapses
+            // into "unknown". axum-server's serve takes a MakeService whose
+            // target is the peer SocketAddr, which is exactly what this
+            // produces.
             axum_server::bind_rustls(https_addr, tls_config)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
                 .unwrap();
         }
         None => {
             tracing::info!("Running without TLS on http://{}", addr);
             let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         }
     }
 }
 
 #[cfg(test)]
 mod static_path_tests {
-    use super::{hash_client_ip, percent_decode_path, static_subpath};
+    use super::{hash_client_ip, parse_trusted_proxies, percent_decode_path, resolve_client_ip,
+                static_subpath, Cidr, TrustedProxies};
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn hdrs(xff: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(v) = xff {
+            h.insert("x-forwarded-for", HeaderValue::from_bytes(v.as_bytes()).unwrap());
+        }
+        h
+    }
+
+    // ---- Client IP resolution: a header is a claim, the socket is a fact ----
+
+    #[test]
+    fn a_public_peer_cannot_move_itself_into_another_bucket() {
+        // The whole point of the change: before it, this peer's `X-Forwarded-For`
+        // WAS the rate-limit key, so a fresh value per request minted a fresh
+        // bucket (no IP limit could ever trip) and naming a victim burned theirs.
+        let peer = ip("203.0.113.50");
+        assert_eq!(resolve_client_ip(Some(peer), &hdrs(Some("198.51.100.7"))), "203.0.113.50");
+        assert_eq!(resolve_client_ip(Some(peer), &hdrs(None)), "203.0.113.50");
+    }
+
+    #[test]
+    fn a_proxy_peer_may_state_the_client_and_we_take_the_rightmost_untrusted_hop() {
+        let proxy = ip("127.0.0.1");
+        // Our proxy appended the real client after whatever the client sent:
+        // the rightmost untrusted entry is the truth, the leftmost is the lie.
+        assert_eq!(
+            resolve_client_ip(Some(proxy), &hdrs(Some("1.2.3.4, 203.0.113.9"))),
+            "203.0.113.9"
+        );
+        // A chain of trusted hops only (proxy -> proxy) resolves to the hop it
+        // can identify, never to something the client chose.
+        assert_eq!(resolve_client_ip(Some(proxy), &hdrs(Some("10.1.2.3"))), "10.1.2.3");
+        // No header: the proxy is the client as far as we can tell.
+        assert_eq!(resolve_client_ip(Some(proxy), &hdrs(None)), "127.0.0.1");
+        // Junk in the chain means the client reached past the proxy — fall back
+        // to a real address instead of adopting attacker-chosen text.
+        assert_eq!(resolve_client_ip(Some(proxy), &hdrs(Some("not-an-ip"))), "127.0.0.1");
+    }
+
+    #[test]
+    fn without_a_socket_address_it_fails_closed_to_one_bucket() {
+        // ConnectInfo wiring missing → do NOT fall back to the client's header.
+        assert_eq!(resolve_client_ip(None, &hdrs(Some("198.51.100.7"))), "unknown");
+    }
+
+    #[test]
+    fn the_trusted_proxy_policy_is_explicit() {
+        assert_eq!(parse_trusted_proxies("*"), TrustedProxies::All);
+        assert_eq!(parse_trusted_proxies("  "), TrustedProxies::None);
+        assert_eq!(parse_trusted_proxies(""), TrustedProxies::None);
+        let TrustedProxies::Cidrs(list) = parse_trusted_proxies("10.0.0.0/8, 192.168.1.1") else {
+            panic!("expected an explicit list");
+        };
+        assert_eq!(list.len(), 2);
+        assert!(list[0].contains(&ip("10.9.9.9")));
+        assert!(!list[0].contains(&ip("11.0.0.1")));
+        assert!(list[1].contains(&ip("192.168.1.1")));
+        assert!(!list[1].contains(&ip("192.168.1.2")));
+    }
+
+    #[test]
+    fn cidr_boundaries_are_exact() {
+        let c = Cidr::parse("172.16.0.0/12").unwrap();
+        assert!(c.contains(&ip("172.31.255.255")));
+        assert!(!c.contains(&ip("172.32.0.0")));
+        assert!(!c.contains(&ip("172.15.255.255")));
+        // An IPv4 block never matches an IPv6 address (and vice versa).
+        assert!(!c.contains(&"2001:db8::1".parse::<IpAddr>().unwrap()));
+        let v6 = Cidr::parse("::1/128").unwrap();
+        assert!(v6.contains(&ip("::1")));
+        assert!(!v6.contains(&ip("::2")));
+        assert_eq!(Cidr::parse("1.2.3.4/33"), None);
+        assert_eq!(Cidr::parse("not-a-cidr"), None);
+        assert_eq!(
+            Cidr::parse("1.2.3.4").unwrap().contains(&Ipv4Addr::new(1, 2, 3, 4).into()),
+            true
+        );
+    }
 
     // ---- Cross-language post-quantum KATs ----
     // tests/fixtures/pq-kat.json is generated by tools/gen-pq-kat.mjs with the

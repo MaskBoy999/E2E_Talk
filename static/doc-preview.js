@@ -543,32 +543,16 @@ var DocPreview = (function () {
     /// `allow-same-origin`, so it runs in an opaque origin that cannot reach
     /// the app origin — the one holding the E2EE key chain. Its own CSP is
     /// locked to `default-src 'none'` plus exactly the two vendored parser
-    /// scripts, so a malicious .docx cannot fetch anything either.
+    /// scripts, so a malicious .docx cannot fetch anything either. The app's
+    /// CSP is inherited *as well*, so the frame's bootstrap is a same-origin
+    /// external file (doc-preview-docx-boot.js) — an inline script would be
+    /// refused by the inherited `script-src 'self'`.
     function docxSandboxDocument(nonce, origin, narrow) {
-        var csp = "default-src 'none'; script-src " + origin + " 'nonce-" + nonce + "'; "
+        var csp = "default-src 'none'; script-src " + origin + "; "
             + "style-src 'unsafe-inline'; img-src blob: data: " + origin + "; "
             + "font-src data: " + origin + "; object-src 'none'; frame-src 'none'; "
             + "connect-src 'none'; base-uri 'none'; form-action 'none'";
-        var boot = `(function(){
-var nonce = ${JSON.stringify(nonce)};
-var narrow = ${narrow ? 'true' : 'false'};
-function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
-function done(){parent.postMessage({type:"rendered",nonce:nonce,height:document.documentElement.scrollHeight},"*");}
-window.addEventListener("message",function(ev){
-var d=ev.data||{};if(d.nonce!==nonce||d.type!=="render-docx")return;
-var w=document.getElementById("w");
-try{
-docx.renderAsync(new Uint8Array(d.bytes),w,w,{
-className:narrow?"docx docx-narrow":"docx",
-breakPages:!narrow,ignoreWidth:narrow,ignoreHeight:narrow,
-inWrapper:!narrow,ignoreLastRenderedPageBreak:false,
-renderHeaders:true,renderFooters:true,renderFootnotes:true,renderEndnotes:true
-}).then(function(){done();})
-.catch(function(e){w.innerHTML='<div class="err">Error rendering document: '+esc(e&&e.message?e.message:e)+'</div>';done();});
-}catch(e){parent.postMessage({type:"error",nonce:nonce,message:String(e&&e.message?e.message:e)},"*");}
-});
-parent.postMessage({type:"ready",nonce:nonce},"*");
-})();`;
+        
         return '<!DOCTYPE html><html><head><meta charset="utf-8">'
             + '<meta http-equiv="Content-Security-Policy" content="' + csp + '">'
             + '<style>html,body{margin:0;background:#fff;color:#333;font-family:Calibri,Arial,sans-serif}'
@@ -578,7 +562,7 @@ parent.postMessage({type:"ready",nonce:nonce},"*");
             + '</head><body><div class="wrap" id="w"></div>'
             + '<script src="' + origin + '/libs/jszip.min.js"><\/script>'
             + '<script src="' + origin + '/libs/docx-preview.min.js"><\/script>'
-            + '<script nonce="' + nonce + '">' + boot + '<\/script>'
+            + '<script src="' + origin + '/doc-preview-docx-boot.js" data-nonce="' + nonce + '" data-narrow="' + (narrow ? '1' : '0') + '"><\/script>'
             + '</body></html>';
     }
 
@@ -673,64 +657,14 @@ parent.postMessage({type:"ready",nonce:nonce},"*");
     /// turns it into HTML **in here**, so the `sheet_to_html` sink (and the
     /// parser itself) never run in the app origin — the parent only ever
     /// learns sheet names, a rendered height and whether a sheet was windowed.
+    /// Like the DOCX frame, its bootstrap is the external
+    /// doc-preview-xlsx-boot.js (the app's CSP is inherited too, in addition
+    /// to the frame's own meta policy, and no longer allows inline scripts).
     function xlsxSandboxDocument(nonce, origin, background) {
-        var csp = "default-src 'none'; script-src " + origin + " 'nonce-" + nonce + "'; "
+        var csp = "default-src 'none'; script-src " + origin + "; "
             + "style-src 'unsafe-inline'; img-src data: " + origin + "; "
             + "object-src 'none'; frame-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'";
-        var boot = `(function(){
-var nonce = ${JSON.stringify(nonce)};
-document.documentElement.style.background = ${JSON.stringify(background)};
-document.body.style.background = ${JSON.stringify(background)};
-var w = document.getElementById("w");
-var book = null;
-var XLSX_MAX_ROWS = 500;
-var XLSX_MAX_COLS = 100;
-function report(sheet, truncated){
-    parent.postMessage({type:"rendered",nonce:nonce,sheet:sheet,truncated:truncated,
-        maxRows:XLSX_MAX_ROWS,maxCols:XLSX_MAX_COLS,
-        height:Math.ceil(w.getBoundingClientRect().height)},"*");
-}
-function renderSheet(name){
-    var sheet = book.Sheets[name];
-    var capped = sheet;
-    var truncated = false;
-    try {
-        if (sheet && sheet["!ref"]) {
-            var range = XLSX.utils.decode_range(sheet["!ref"]);
-            var lastRow = Math.min(range.e.r, range.s.r + XLSX_MAX_ROWS - 1);
-            var lastCol = Math.min(range.e.c, range.s.c + XLSX_MAX_COLS - 1);
-            truncated = (range.e.r > lastRow) || (range.e.c > lastCol);
-            if (truncated) {
-                capped = Object.assign({}, sheet);
-                capped["!ref"] = XLSX.utils.encode_range({ s: range.s, e: { r: lastRow, c: lastCol } });
-            }
-        }
-    } catch (_) {}
-    w.innerHTML = XLSX.utils.sheet_to_html(capped, { editable: false });
-    report(name, truncated);
-}
-window.addEventListener("message",function(ev){
-    var d = ev.data || {};
-    if (d.nonce !== nonce) return;
-    try {
-        if (d.type === "render-xlsx") {
-            if (typeof XLSX === "undefined") {
-                parent.postMessage({type:"error",nonce:nonce,message:"SheetJS failed to load"},"*");
-                return;
-            }
-            book = XLSX.read(new Uint8Array(d.bytes), { type: "array" });
-            parent.postMessage({type:"sheets",nonce:nonce,names:book.SheetNames},"*");
-            if (book.SheetNames.length) renderSheet(book.SheetNames[0]);
-            else { w.innerHTML = '<div class="empty">This workbook has no sheets.</div>'; report("", false); }
-        } else if (d.type === "sheet") {
-            if (book) renderSheet(String(d.name));
-        }
-    } catch (e) {
-        parent.postMessage({type:"error",nonce:nonce,message:String(e && e.message ? e.message : e)},"*");
-    }
-});
-parent.postMessage({type:"ready",nonce:nonce},"*");
-})();`;
+        
         return '<!DOCTYPE html><html><head><meta charset="utf-8">'
             + '<meta http-equiv="Content-Security-Policy" content="' + csp + '">'
             + '<style>html,body{margin:0;color:#ddd;'
@@ -741,7 +675,7 @@ parent.postMessage({type:"ready",nonce:nonce},"*");
             + '.empty{padding:20px;color:#999}.err{padding:20px;color:#c00}</style>'
             + '</head><body><div id="w"></div>'
             + '<script src="' + origin + '/libs/xlsx.full.min.js"><\/script>'
-            + '<script nonce="' + nonce + '">' + boot + '<\/script>'
+            + '<script src="' + origin + '/doc-preview-xlsx-boot.js" data-nonce="' + nonce + '" data-background="' + String(background).replace(/&/g, "&amp;").replace(/"/g, "&quot;") + '"><\/script>'
             + '</body></html>';
     }
 

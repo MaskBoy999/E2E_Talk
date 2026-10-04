@@ -739,17 +739,19 @@ fn extract_claims(
     Ok(claims)
 }
 
+/// The client address, as resolved by `client_ip_mw` (main.rs) and stamped on
+/// the request under `CLIENT_IP_HEADER`.
+///
+/// Deliberately does NOT read `x-forwarded-for` / `x-real-ip`: those are claims
+/// made by whoever opened the TCP connection, and trusting them made every
+/// per-IP rate limit attacker-controlled (a fresh `X-Forwarded-For` per request
+/// minted a fresh bucket; naming a victim's address burned theirs). The peer
+/// address and the trusted-proxy policy are decided once, server-side.
 fn get_client_ip(headers: &HeaderMap) -> String {
     headers
-        .get("x-forwarded-for")
+        .get(crate::CLIENT_IP_HEADER)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next().map(|s| s.trim().to_string()))
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        })
+        .map(|s| s.to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -6710,8 +6712,17 @@ fn log_admin_action(state: &AppState, action: &str, target: Option<&str>, header
             .flatten()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-    let stored_ip = if redact { "*.*.*.*" } else { ip.as_str() };
-    if let Err(e) = state.db.log_admin_action("admin", action, target, stored_ip) {
+    // The audit row keeps a PSEUDONYM, never the raw address: "never store or
+    // serve raw IPs" applies to this table exactly as it does to the rate-limit
+    // views, and a stable `h1_…` is just as good for correlating "the same
+    // client did these". `admin_audit_redact_ips` remains the coarser option
+    // for hosts that want the entry to identify nothing at all.
+    let stored_ip = if redact {
+        "*.*.*.*".to_string()
+    } else {
+        crate::hash_client_ip(&state.config.hmac_key, &ip)
+    };
+    if let Err(e) = state.db.log_admin_action("admin", action, target, &stored_ip) {
         tracing::warn!("Failed to write admin audit entry ({}): {}", action, e);
     }
 }

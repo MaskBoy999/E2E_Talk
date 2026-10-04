@@ -2263,3 +2263,14 @@ function renderAuditLog(rows) {
         'No admin actions logged yet');
     renderPaginationControls('audit-log');
 }
+
+// The search boxes used inline `oninput=` handlers (`searchTab('users')`, …).
+// script-src no longer allows 'unsafe-inline', which blocks inline handlers
+// outright, so wire the same events here. admin.js loads at the end of <body>,
+// so every input already exists.
+document.querySelectorAll('input[id^="search-"]').forEach(function (el) {
+    el.addEventListener('input', function () {
+        if (el.id === 'search-raw-tables') { filterRawTables(); return; }
+        searchTab(el.id.slice('search-'.length));
+    });
+});

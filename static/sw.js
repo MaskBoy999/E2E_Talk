@@ -36,7 +36,11 @@
 // hybrid (X25519 + ML-KEM-768) envelopes and hybrid (Ed25519 + ML-DSA-65)
 // login signatures, IP-hash-only rate-limit buckets, and the newly tunable
 // limits in the admin panel.
-const CACHE_NAME = 'e2e-chat-v25';
+// v26: the inline scripts are gone — `script-src` has no 'unsafe-inline' (and
+// no 'unsafe-eval'), so `icon-helper.js`, `sw-register.js`, `pair.js`,
+// `box-setup.js` and the two sandboxed-preview bootstraps are real files that
+// the offline shell must carry.
+const CACHE_NAME = 'e2e-chat-v26';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -49,6 +53,14 @@ const STATIC_ASSETS = [
     '/crypto.js',
     '/secure-storage.js',
     '/doc-preview.js',
+    // Sandboxed DOCX/XLSX preview bootstraps (external so the frame's
+    // inherited CSP, which has no 'unsafe-inline', allows them).
+    '/doc-preview-docx-boot.js',
+    '/doc-preview-xlsx-boot.js',
+    '/icon-helper.js',
+    '/sw-register.js',
+    '/pair.js',
+    '/box-setup.js',
     '/thread_categories_shortcuts.js',
     '/roles.js',
     '/manifest.json',

@@ -21,8 +21,8 @@ cargo tauri dev
 
 * **Browser** — just open `https://localhost:3443` (accept the self-signed cert).
 * **Android box** — install the APK from the release / a *Build Android APK*
-  Actions run (Android 10+). Needed for biometrics, captions, audio routes,
-  tiles and the native notifications.
+  Actions run (Android 10+). Needed for captions, audio routes, tiles and the
+  native notifications.
 * **Two accounts** — for anything with a peer. Two browser *profiles* is the
   quickest way (`--user-data-dir`), or one desktop + one browser.
 
@@ -46,7 +46,7 @@ reload is *not* a cold start — it keeps the session.
 ### Fast automated confirmation
 
 ```bash
-npx playwright test tests/key-vault.spec.ts tests/biometric-unlock.spec.ts \
+npx playwright test tests/key-vault.spec.ts tests/biometric-removed.spec.ts \
   tests/captions.spec.ts tests/local-search.spec.ts tests/encrypted-export.spec.ts \
   tests/device-verify.spec.ts tests/panic-wipe.spec.ts tests/network-awareness.spec.ts \
   tests/notification-privacy.spec.ts tests/batch-b.spec.ts tests/drag-out.spec.ts \
@@ -89,25 +89,31 @@ This is the feature that changed how everything else boots, so test it first.
 
 ---
 
-## 2. Biometric unlock (5.1) — Android box
+## 2. Biometric unlock (5.1) — REMOVED (0.2.30); verify it stays removed
+
+Fingerprint unlock was **removed**, not disabled: it added a credential-release
+path (and a Keystore key) outside the password. The password is the only way
+into the vault, and a seal left by an older build is wiped rather than honoured.
+`tests/biometric-removed.spec.ts` is the automated proof, layer by layer
+(WebView UI/API, Kotlin, declared plugin commands, and what is left on disk).
 
 **Do**
 
-1. Settings → *Unlock with fingerprint* → toggle on → accept the Android
-   biometric prompt.
-2. Sign out. On the login page a fingerprint button appears → tap it → you are
-   signed in without typing anything.
-3. Cold start the app (swipe it away, reopen) → the vault lock screen offers the
-   fingerprint button as well as the password field.
+1. Login page and the vault lock screen: only the password form — no
+   fingerprint button anywhere.
+2. Settings → Security: no *fingerprint* / *biometric* row or toggle.
+3. Put a stale seal in place, then sign in:
+   `localStorage.setItem('e2e_bio_seal','x'); localStorage.setItem('e2e_bio_user','someone');`
+   Both keys must be gone afterwards, and nothing may re-seal them.
 
 **Try to break it**
 
-* Cancel the biometric prompt during *enable* → the toggle must fall back to
-  off and say so; nothing may be sealed (the status line never reads "enabled").
-* Fail the prompt 3× on purpose → you get the password field, not an unlocked
-  app.
-* The password path must always remain: after any biometric failure you can
-  still type the password and get in.
+* Console: `typeof window.__biometric` must be `undefined`, and no
+  `plugin:box-shell|biometric*` command may be callable (the permissions are
+  not declared either).
+* After a fresh sign-in, `localStorage` must not contain `e2e_bio_seal` or
+  `e2e_bio_user` — a removed feature must not leave a decryptable credential,
+  or the username that went with it, sitting in storage.
 
 ---
 

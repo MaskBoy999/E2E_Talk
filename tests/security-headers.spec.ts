@@ -55,21 +55,65 @@ test.describe('Security Headers (S1 CSP + S2 HSTS)', () => {
         expect(csp).toContain("style-src 'self'");
     });
 
-    // Tracked in SECURITY_REVIEW_PLAN.md (finding 1 follow-up): dropping
-    // 'unsafe-inline' needs the 4 HTML files' inline <script> blocks converted
-    // to nonces (the static handler can inject those) AND the 26 inline
-    // `on*=` handlers in admin.html/pair.html rewritten to addEventListener —
-    // an inline event handler cannot carry a nonce. 'unsafe-eval' stays until
-    // the vendored ASR runtime is verified without it.
-    test.fixme('CSP blocks inline script execution (nonce not provided)', async ({ page }) => {
-        // Verify the CSP is strict enough by checking that wasm-unsafe-eval is the only non-self script source
+    // Both script weakenings are gone: the 4 HTML pages with inline <script>
+    // blocks (index/admin/pair/box-setup) load external files, the 26 inline
+    // `on*=` handlers plus the two generated ones are listeners, and the
+    // vendored PDF/ZIP/XLSX/ASR bundles were verified without 'unsafe-eval'
+    // before it was dropped. `wasm-unsafe-eval` stays — WebAssembly
+    // instantiation needs it and it does not permit JS eval.
+    test('CSP blocks inline scripts (no unsafe-inline in script-src)', async ({ page }) => {
         const res = await page.request.get(`${BASE}/api/client-config`);
         const csp = res.headers()['content-security-policy'];
-        // Should NOT have 'unsafe-eval' (only wasm-unsafe-eval)
-        expect(csp).not.toContain("'unsafe-eval'");
-        // Should NOT have 'unsafe-inline' for scripts
-        const scriptSrc = csp.split(';').find(s => s.trim().startsWith('script-src'));
+        const scriptSrc = csp.split(';').map(s => s.trim()).find(s => s.startsWith('script-src'));
+        expect(scriptSrc).toBeTruthy();
         expect(scriptSrc).not.toContain("'unsafe-inline'");
+    });
+
+    test('CSP drops unsafe-eval too (only wasm-unsafe-eval remains)', async ({ page }) => {
+        const res = await page.request.get(`${BASE}/api/client-config`);
+        const csp = res.headers()['content-security-policy'];
+        expect(csp).not.toContain("'unsafe-eval'");
+        expect(csp).toContain("'wasm-unsafe-eval'");
+    });
+
+    test('the served pages carry no inline scripts or inline handlers', async ({ request }) => {
+        // The policy without 'unsafe-inline' blocks inline script outright;
+        // this asserts the prose (/path:line texts, generated buttons) was
+        // actually converted, so a future edit cannot silently reintroduce a
+        // dead inline handler that the CSP then refuses.
+        for (const p of ['/index.html', '/login.html', '/admin.html', '/pair.html', '/box-setup.html', '/box-wipe.html']) {
+            const html = await (await request.get(`${BASE}${p}`)).text();
+            expect(html, `${p} carries an inline <script> block`)
+                .not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/i);
+            expect(html, `${p} carries an inline on*= handler`)
+                .not.toMatch(/\son[a-z]{2,12}\s*=/i);
+        }
+    });
+
+    test('an injected inline script and inline handler cannot run', async ({ page }) => {
+        // The header assertions above are the contract; this is the browser
+        // enforcing it. A dynamic <script> with text (the way an injection
+        // lands after the CSP is what has to stop it) and an on* attribute
+        // must both be refused, not just look refused on paper.
+        await page.goto(`${BASE}/login.html`);
+        const ran = await page.evaluate(() => {
+            const w = window as unknown as Record<string, unknown>;
+            const s = document.createElement('script');
+            s.textContent = 'window.__inlineRan = true;';
+            document.body.appendChild(s);
+            const img = document.createElement('img');
+            img.setAttribute('onerror', 'window.__handlerRan = true;');
+            img.src = 'data:,';
+            document.body.appendChild(img);
+            return new Promise<{ inline: boolean; handler: boolean }>((resolve) => {
+                setTimeout(() => resolve({
+                    inline: w.__inlineRan === true,
+                    handler: w.__handlerRan === true,
+                }), 500);
+            });
+        });
+        expect(ran.inline).toBe(false);
+        expect(ran.handler).toBe(false);
     });
 
     test('HSTS is present on 404 responses too', async ({ request }) => {

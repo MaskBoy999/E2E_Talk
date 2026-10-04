@@ -274,11 +274,27 @@ test.describe('B4 — offline queued notifications are blinded', () => {
         expect(mentionRow, 'expected a blinded mention notification row').toBeTruthy();
         if (!mentionRow) return;
         expect(mentionRow[0]).toMatch(/^[a-f0-9]{64}$/);
-        const parts = mentionRow[1].split(':');
-        expect(parts.length).toBe(3);
-        expect(parts[0].length).toBeGreaterThanOrEqual(40); // ephemeral pubkey b64
-        expect(parts[1].length).toBeGreaterThanOrEqual(30); // nonce b64
-        expect(parts[2].length).toBeGreaterThanOrEqual(20); // ciphertext b64
+        // The payload is ECDH-encrypted in one of two shapes (db.rs
+        // encrypt_notification_payload): hybrid v2 whenever the recipient has
+        // published an ML-KEM-768 identity key — `v2:epk:kem_ct:nonce:ct` —
+        // and plain v1 (`epk:nonce:ct`) for accounts that have not. New
+        // accounts derive a PQ identity at registration, so v2 is the shape a
+        // fresh test user gets.
+        const payload = mentionRow[1];
+        const parts = payload.split(':');
+        if (parts[0] === 'v2') {
+            expect(payload.slice(0, 3), 'hybrid envelope is version-tagged').toBe('v2:');
+            expect(parts.length).toBe(5);
+            expect(parts[1].length).toBeGreaterThanOrEqual(40);  // ephemeral X25519 pubkey
+            expect(parts[2].length).toBeGreaterThanOrEqual(1400); // ML-KEM-768 ciphertext (1088 B)
+            expect(parts[3].length).toBeGreaterThanOrEqual(30);  // XChaCha20 nonce
+            expect(parts[4].length).toBeGreaterThanOrEqual(20);  // ciphertext
+        } else {
+            expect(parts.length).toBe(3);
+            expect(parts[0].length).toBeGreaterThanOrEqual(40); // ephemeral pubkey b64
+            expect(parts[1].length).toBeGreaterThanOrEqual(30); // nonce b64
+            expect(parts[2].length).toBeGreaterThanOrEqual(20); // ciphertext b64
+        }
 
         // Clean up this user's queue so later assertions aren't polluted.
         dbExec('DELETE FROM pending_notifications WHERE user_id = ?1', [bUserId]);

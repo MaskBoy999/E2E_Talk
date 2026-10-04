@@ -85,7 +85,7 @@ test.describe('copy any file type to the clipboard (0.2.30)', () => {
         // length][name][bytes]`), which is smaller and never a string — and
         // which turned out to be unreachable in the real app: the page is served
         // by a server-supplied CSP, the app's own server sends
-        // `connect-src 'self' ws: wss:`, the engine therefore blocks Tauri's
+        // `connect-src 'self'`, the engine therefore blocks Tauri's
         // custom-protocol IPC (`http://ipc.localhost`), and the `postMessage`
         // interface Tauri silently falls back to serialises JSON and cannot
         // carry a body at all. The shell answered "expected the raw request

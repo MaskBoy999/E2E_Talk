@@ -2503,9 +2503,13 @@
 
         preview = preview.substring(0, 120);
 
-        bar.innerHTML = '<span class="reply-bar-text">Replying to <strong>' + (senderName || 'message') + '</strong>: ' + preview + '</span>' +
+        bar.innerHTML = '<span class="reply-bar-text">Replying to <strong>' + escapeHtml(senderName || 'message') + '</strong>: ' + escapeHtml(preview) + '</span>' +
 
-            '<button class="reply-bar-close" onclick="document.getElementById(\'reply-bar\').style.display=\'none\'">&times;</button>';
+            '<button class="reply-bar-close">&times;</button>';
+
+        var replyBarClose = bar.querySelector('.reply-bar-close');
+
+        if (replyBarClose) replyBarClose.addEventListener('click', function () { bar.style.display = 'none'; });
 
         bar.style.display = 'flex';
 

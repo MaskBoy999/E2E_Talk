@@ -234,9 +234,11 @@ with random topics (R6); diagnostics and logs ship scrubbed (R3).
 
 **Sprint 3 — "nobody else can do this":** 5.1, 5.4, 5.7, 1.7, 7.3 — each L,
 each strengthens or preserves E2EE, each needing its at-rest story (R5):
-biometric via Keystore, verification codes in-app only, FTS5 bounded +
-wipe-covered, captions fully offline with no publish path at all, LiveKit with the
-fail-closed signaling guarantee intact.
+biometric via Keystore *(shipped, then removed in 0.2.30 — see the status
+table; the Keystore seal was a release path outside the password)*,
+verification codes in-app only, FTS5 bounded + wipe-covered, captions fully
+offline with no publish path at all, LiveKit with the fail-closed signaling
+guarantee intact.
 
 **Deferred / requires a security decision first:** 4.5 (Discord presence —
 opt-in wording), 4.7 (updater — pin the key first), 1.5 (ConnectionService —
@@ -273,7 +275,7 @@ the spec that goes red if it regresses. Run one with
 | **4.2** | `?mini=1` renders only the controls view; the main window acts on its buttons | `batch-b.spec.ts` |
 | **4.4** | Deep links accept only in-scope id routes | `batch-b.spec.ts` |
 | **4.6** | Tray tooltip/status carry state and counts only — `in_call`/`muted`/`deafened`/`unread`, never a name | `tray-parity.spec.ts`, box `cargo test` |
-| **5.1** | Biometric unlock: enabling seals the **real** password (never plaintext), a cancelled prompt seals nothing and never looks enabled, the seal survives the login-page wipe, and the password path stays as fallback | `biometric-unlock.spec.ts` |
+| **5.1** | *Removed by request (0.2.30)* — no biometric release path exists: the login page and the vault lock screen take the password only, the Keystore wrap/unwrap commands are gone from the plugin's declared surface, and a seal left by an older build is wiped rather than honoured | `biometric-removed.spec.ts` |
 | **5.2** | *Removed by request* — JS, Kotlin and ACL fully stripped, `setSecureMode` gone | `batch-b.spec.ts` (asserts absence) |
 | **5.3** | Panic wipe / auto-lock: default OFF, clamps, fires only past the idle limit, the chord wipes with no confirmation, and the wipe is total (search index included) | `panic-wipe.spec.ts` |
 | **5.4** | Device verification: both devices derive the SAME string, marking verified pins the key and a later key change warns, and the string never reaches a notification or a log | `device-verify.spec.ts` |
@@ -296,15 +298,17 @@ guarantee.
 
 Deleting the password bootstrap removed the only thing that let **in-page**
 flows wrap the key blob: the mirror wraps every save with the password, and
-enabling biometrics (5.1) seals the password itself. Keeping it in page memory
-alone died at the first navigation (login.html → index.html) or reload, which
-broke 5.1 and silently stopped every key-blob save.
+enabling biometrics (5.1) sealed the password itself (biometric unlock was
+later removed in 0.2.30 — the ticket remains because the vault and key-blob
+flows depend on it). Keeping the password in page memory alone died at the
+first navigation (login.html → index.html) or reload, which broke 5.1's
+"unlock without typing" path and silently stopped every key-blob save.
 
 The middle ground is `e2e_vault_ticket`: the password written through
 secure-storage's own interceptor, i.e. stored **encrypted under the live
 session key** — the same protection the session token already has. It is only
 readable while a session is unlocked; a cold start has no key, so it reads as
-nothing and the lock screen asks for the password (or a fingerprint). It is
+nothing and the lock screen asks for the password. It is
 written in exactly two places — `_kvMigrate()` (login/register/recovery) and
 `_secUnlockVault()` — and the writer proves the value landed as ciphertext
 (read through `_secGetRaw`, since the interceptor's `getItem` would hand back

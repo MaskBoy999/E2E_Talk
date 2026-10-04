@@ -75,17 +75,14 @@ static WS_AUTH_RATE_LIMITER: LazyLock<WsRateLimiter> = LazyLock::new(|| WsRateLi
     attempts: Mutex::new(HashMap::new()),
 });
 
+/// Resolved by `client_ip_mw` (main.rs). Reading `x-forwarded-for` here too
+/// would hand the WebSocket auth limiter the same client-controlled bucket
+/// key the HTTP limiters used to have.
 fn get_client_ip(headers: &HeaderMap) -> String {
     headers
-        .get("x-forwarded-for")
+        .get(crate::CLIENT_IP_HEADER)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next().map(|s| s.trim().to_string()))
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        })
+        .map(|s| s.to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 

@@ -13,7 +13,7 @@ import * as fs from 'fs';
  *   1. the ACL (the app window's page is a remote origin; a command missing from
  *      the capability is refused before any native code runs),
  *   2. the IPC **transport** — the page is served by a server-supplied CSP, and
- *      this app's own server sends `connect-src 'self' ws: wss:`, so the engine
+ *      this app's own server sends `connect-src 'self'`, so the engine
  *      blocks Tauri's custom-protocol IPC (`http://ipc.localhost`) and Tauri
  *      silently falls back to an interface that serialises JSON and cannot carry
  *      a request body. The raw-body payload desktop used to send therefore never

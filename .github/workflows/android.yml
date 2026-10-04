@@ -152,6 +152,57 @@ jobs:
         run: |
           if [ ! -d gen/android ]; then npx tauri android init; fi
 
+      # ---------------------------------------------------------------------
+      # `src-tauri/gen/android/` is GITIGNORED (it bakes absolute machine paths
+      # into tauri.settings.gradle), so the committed tree never carries the app
+      # manifest — CI always gets a freshly generated one from Tauri's template.
+      #
+      # That template leaves android:unset, and Android's DEFAULT for
+      # android:allowBackup is TRUE. The result is that /data/data/<pkg>/
+      # app_webview/ — the entire WebView localStorage holding the session token
+      # and the sealed E2E key material — is included in Auto Backup,
+      # device-to-device transfer and (on older builds) `adb backup`, i.e. it
+      # leaves the device. A chat app whose keys live in that directory has to
+      # opt out explicitly, and the only place that can happen for CI builds is
+      # here, between init and build.
+      #
+      # Idempotent by construction: if the attribute is already there, it must
+      # already say "false" or the step fails instead of silently shipping a
+      # backed-up build; if it is absent, the tag is rewritten and then re-read
+      # to prove the attribute landed (a no-op sed must not pass).
+      # ---------------------------------------------------------------------
+      - name: Disable Android auto-backup of app data
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST=gen/android/app/src/main/AndroidManifest.xml
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::$MANIFEST is missing after 'tauri android init'"
+            exit 1
+          fi
+          if grep -q 'android:allowBackup=' "$MANIFEST"; then
+            if ! grep -q 'android:allowBackup="false"' "$MANIFEST"; then
+              echo "::error::$MANIFEST already sets android:allowBackup, but not to false:"
+              grep -n 'android:allowBackup' "$MANIFEST"
+              exit 1
+            fi
+            echo "android:allowBackup=\"false\" already present"
+            grep -n 'android:allowBackup\|android:fullBackupContent' "$MANIFEST"
+            exit 0
+          fi
+          # Rewrite the opening `<application` line, keeping its indentation and
+          # starting the next attribute on its own line so the result stays
+          # valid XML whatever the template's formatting is.
+          sed -i 's|^\([[:space:]]*\)<application|\1<application android:allowBackup="false" android:fullBackupContent="false"\n\1    |' "$MANIFEST"
+          if ! grep -q 'android:allowBackup="false"' "$MANIFEST"; then
+            echo "::error::could not set android:allowBackup=false in $MANIFEST — the sed anchor did not match:"
+            grep -n '<application' "$MANIFEST" || true
+            exit 1
+          fi
+          echo "app data is now excluded from Android backups:"
+          grep -n 'android:allowBackup\|android:fullBackupContent\|<application' "$MANIFEST"
+
       # The Gradle error summary is buried thousands of lines above the final
       # exit code, so a plain `run:` step shows "exit code 1" with nothing
       # actionable. Tee the full output to a file and ALWAYS dump its tail in

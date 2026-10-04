@@ -36888,12 +36888,22 @@ function extractUrls(text) {
     });
 }
 
+// Broken link-preview images hide their tile. This used to be an inline
+// `onerror=` attribute on the <img>; the CSP blocks inline handlers now,
+// and `error` does not bubble, so one capture-phase listener covers them.
+document.addEventListener('error', function (e) {
+    var t = e.target;
+    if (t && t.tagName === 'IMG' && t.classList && t.classList.contains('link-preview-thumb') && t.parentElement) {
+        t.parentElement.style.display = 'none';
+    }
+}, true);
+
 function buildLinkPreviewHtml(preview) {
     if (!preview) return '';
     var html = '<div class="link-preview-card" style="display:flex;border:1px solid var(--border-color,#333);border-radius:8px;overflow:hidden;max-width:420px;margin-top:6px;background:var(--bg-secondary,#1a1a2e)">';
     if (preview.image) {
         html += '<div style="width:120px;min-height:80px;flex-shrink:0;background:#111;display:flex;align-items:center;justify-content:center;overflow:hidden">';
-        html += '<img src="' + escapeHtml(preview.image) + '" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.style.display=\'none\'">';
+        html += '<img src="' + escapeHtml(preview.image) + '" alt="" style="width:100%;height:100%;object-fit:cover" class="link-preview-thumb">';
         html += '</div>';
     }
     html += '<div class="u-b1c7aec9" >';

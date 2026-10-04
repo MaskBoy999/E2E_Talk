@@ -11,6 +11,10 @@ ciphertext relay that routes, stores and moderates — it never sees content.
 | **Android app** (Android 10+) | Background calls with the screen off, a full-screen incoming-call ring, a Quick Settings tile, picture-in-picture and on-device captions. |
 | **Browser (PWA)** | Open your server's address directly — installable, with Web Push. Works everywhere, degrading gracefully where a native feature doesn't exist. |
 
+**[Download the latest release →](../../releases/latest)** — Windows and Linux
+installers, the signed Android APK, and `SHA256SUMS` files for every build. Full
+per-platform steps are in [Install](#install) below.
+
 ---
 
 ## Security & encryption
@@ -74,7 +78,7 @@ not a missing feature:
 | File size, chunk count, uploader, storage quota fields | Resumable uploads and quota enforcement. |
 | Device names / session metadata in your Devices panel | You need the list to revoke sessions; the device id is the revoke key. |
 | Notification *type* + recipient (not content) | Dispatching the notification. Payloads themselves are encrypted. |
-| Moderation state (bans, roles, voice sanctions), admin audit rows (actor/action/target; **IPs behind a redaction toggle**) | The server enforces moderation and keeps its own audit. |
+| Moderation state (bans, roles, voice sanctions), admin audit rows (actor/action/target; client IPs stored as keyed **HMAC pseudonyms**, or fully redacted) | The server enforces moderation and keeps its own audit. |
 | IPs and timing (TLS endpoint, relay) | Unavoidable for delivery; a TURN relay correlates IPs by definition — standard WebRTC reality. |
 | URLs you ask to preview | Link previews are fetched server-side (that fetch is the feature). |
 
@@ -145,9 +149,19 @@ not a missing feature:
   a product whose whole story is pinning; updates are manual re-downloads.
 - **Rate limiting everywhere** — registration, login, 2FA, friend requests,
   search, admin, mutations, server creation; voice signaling 300 msgs/10 s.
-- **XSS is escaped on every plaintext field** (audited by test), security
-  headers are asserted by test, and the admin audit log supports IP
-  redaction.
+  Per-IP buckets key on the address the server resolved from the connection,
+  never on a client-supplied header: `X-Forwarded-For` is believed only from a
+  proxy you name in `TRUSTED_PROXIES` (loopback by default), so a client can
+  neither mint a fresh bucket per request nor spend someone else's.
+- **XSS is escaped on every plaintext field, and script cannot run from an
+  injection** (both audited by test): `script-src` carries neither
+  `'unsafe-inline'` nor `'unsafe-eval'` — only `'wasm-unsafe-eval'`, which
+  WebAssembly instantiation needs and which does not permit JS eval — so an
+  injection that ever slips past escaping has no inline handler to run and no
+  eval to reach. The admin audit log stores client IPs as keyed HMAC
+  pseudonyms, with a full redaction toggle — and rows written by older
+  builds, which held the address verbatim, are rewritten to the mask the
+  next time the database is opened.
 - **Block users**, **disable incoming friend requests**, and **hide message
   content in notifications** (blanks the sender too, and governs the native
   Android ring in both lock states).
@@ -569,7 +583,7 @@ not a missing feature:
 - **CI/CD** — two GitHub workflows (*Build Desktop Box*, *Build Android APK*)
   produce installers, APK/AAB, and SHA256SUMS on every tag; APK signature is
   verified before publishing
-- **318 Playwright spec files** — the feature suite is the proof: encryption,
+- **339 Playwright spec files** — the feature suite is the proof: encryption,
   notifications, voice, soundboard, vault, search, admin, box and more
 
 ---
@@ -614,7 +628,7 @@ and you never have to trust the download blindly:
 sha256sum -c SHA256SUMS-linux-x64.txt
 
 # Windows PowerShell
-Get-FileHash .\E2E.Chat_0.2.29_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\E2E.Chat_0.2.44_x64-setup.exe -Algorithm SHA256
 ```
 
 ### First launch (all platforms)
@@ -656,7 +670,7 @@ npm run tauri -- android build        # universal release APK + AAB
 Run the end-to-end test suite (starts the server itself on :3443):
 
 ```bash
-npx playwright test                          # everything (318 spec files)
+npx playwright test                          # everything (339 spec files)
 npx playwright test tests/key-vault.spec.ts  # or a single suite
 ```
 
@@ -668,7 +682,7 @@ npx playwright test tests/key-vault.spec.ts  # or a single suite
 server/     Rust backend (Axum + SQLite): auth, sessions, relay, encrypted storage
 static/     Frontend: chat, voice, crypto, secure-storage, captions, keyvault (the app itself)
 src-tauri/  Native desktop + Android shell (Tauri 2) and the call-service/box-shell plugins
-tests/      Playwright end-to-end suite (318 specs)
+tests/      Playwright end-to-end suite (339 specs)
 tools/      Small build helpers (icon generation, etc.)
 packaging/  AUR and other packaging bits
 ```
