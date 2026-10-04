@@ -1283,10 +1283,22 @@
                 E2ECrypto.encodeEncryptedFileKey(btoa(newPassword), devKey));
             _secureZero(devKey);
 
-            // 3. Derive the NEW key and drop the old caches.
+            // 3. Derive the NEW key and drop the old caches. The derived key
+            //    MUST be installed in `_key` (and the sessionStorage cache)
+            //    before step 4 rewrites anything: step 4 encrypts with `_key`,
+            //    so leaving it null there meant every throwaway write was
+            //    swallowed by the per-key try/catch and the sensitive values
+            //    stayed encrypted under the OLD key while
+            //    `e2e_encrypted_password` already held the new password — the
+            //    session token, `user` and the identity keys became
+            //    unreadable on the very device that just changed the password.
+            //    `_secReKey` installs its derived key the same way.
             _key = null;
             sessionStorage.removeItem(SESSION_KEY_NAME);
-            if (!_tryDeriveFromEncryptedPassword()) return false;
+            var newKey = _tryDeriveFromEncryptedPassword();
+            if (!newKey) return false;
+            _key = newKey;
+            try { sessionStorage.setItem(SESSION_KEY_NAME, _bytesToBase64(_key)); } catch (_) {}
             _settleLocalKeyCopy();
 
             // 4. Re-write the collected plaintexts using AEAD.

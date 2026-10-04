@@ -20,11 +20,27 @@ function generateCode(len) {
     return code;
 }
 
+// Bump when the server changes how /api/hmac-key derives its value. The server
+// derives the published key from its master (so the master can never be used
+// to compute friend/invite code hashes), and a cache written by an older
+// derivation would silently break isOwn matching, sender resolution and the
+// blocked-friend-requests hash — so a stale cache is discarded and refetched.
+const HMAC_KEY_CACHE_VERSION = '2';
+
+function cachedHmacKey() {
+    try {
+        if (localStorage.getItem('e2e_hmac_key_version') !== HMAC_KEY_CACHE_VERSION) return null;
+        return localStorage.getItem('e2e_hmac_key');
+    } catch (_) {
+        return null;
+    }
+}
+
 // Single-flight guard so concurrent calls (e.g. a burst of renders on a stale
 // session) share one fetch instead of hammering /api/hmac-key.
 let _hmacKeyFetchPromise = null;
 async function ensureHmacKey() {
-    var key = localStorage.getItem('e2e_hmac_key');
+    var key = cachedHmacKey();
     if (key) return key;
     if (_hmacKeyFetchPromise) return _hmacKeyFetchPromise;
     _hmacKeyFetchPromise = (async function () {
@@ -34,6 +50,7 @@ async function ensureHmacKey() {
                 var data = await res.json();
                 if (data.hmac_key) {
                     localStorage.setItem('e2e_hmac_key', data.hmac_key);
+                    localStorage.setItem('e2e_hmac_key_version', HMAC_KEY_CACHE_VERSION);
                     return data.hmac_key;
                 }
             }
@@ -620,6 +637,12 @@ var _keyBlobTimer = null;
 var _keyBlobRev = null;            // revision this device last saw
 var _keyBlobInFlight = false;      // one PUT at a time (queued behind it)
 var _keyBlobQueued = false;
+// One-shot: the FIRST save of this page load must learn the current revision
+// before writing (see saveKeyBlobToServer). Without it the write is blind —
+// base_rev=null — and the server has to accept it however old the copy is,
+// which is exactly how a save composed before a password change could land
+// after it and replace the freshly re-wrapped blob.
+var _keyBlobRevProbed = false;
 function _rememberBlobRev(v) {
     if (typeof v === 'number') _keyBlobRev = v;
 }
@@ -683,6 +706,23 @@ function saveKeyBlobToServer(attempt) {
             return;
         }
         if (_keyBlobInFlight) { _keyBlobQueued = true; return; }
+        // No revision known yet: read it first. A blind PUT is accepted by the
+        // server regardless of what it overwrites (legacy devices need that),
+        // so this is the only thing standing between a stale in-flight save and
+        // a blob another writer — a password change — just replaced.
+        if (_keyBlobRev === null && !_keyBlobRevProbed) {
+            _keyBlobRevProbed = true;   // a failed probe must not loop
+            _keyBlobInFlight = true;
+            fetch('/api/key-blob', { headers: { 'Authorization': 'Bearer ' + t } })
+                .then(function (r) { return r.json(); })
+                .catch(function () { return null; })
+                .then(function (d) {
+                    _keyBlobInFlight = false;
+                    _captureBlobRev(d);
+                    saveKeyBlobToServer(attempt);
+                });
+            return;
+        }
         _keyBlobInFlight = true;
         const bundle = E2ECrypto.buildKeyBundle();
         const enc = E2ECrypto.encryptKeyBundle(bundle, pw);
@@ -3302,7 +3342,7 @@ async function renderSearchResults(results) {
             if (snippet.length > 140) snippet = snippet.substring(0, 140) + '…';
             snippet = escapeHtml(snippet);
         } else {
-            snippet = '<span style="color:#888">[encrypted]</span>';
+            snippet = '<span class="u-8b490eb6" >[encrypted]</span>';
         }
         var timeStr = searchTime(r.timestamp);
         html += '<div class="search-result-item" data-mid="' + escapeAttr(r.id) + '" data-dm="' + (r.dm_channel_id ? escapeAttr(r.dm_channel_id) : '') + '" data-cid="' + (r.channel_id ? escapeAttr(r.channel_id) : '') + '" data-sid="' + (r.server_id ? escapeAttr(r.server_id) : '') + '">' +
@@ -3803,12 +3843,12 @@ function showVaultLockScreen() {
         '<div class="vault-lock-card">' +
             '<div class="vault-lock-title">Unlock your key vault</div>' +
             '<p class="vault-lock-hint">Your storage key is sealed with your password on this device — it is no longer kept in a form that can be read from disk. Enter your password to open it.</p>' +
-            '<div class="vault-lock-pw-row" style="position:relative;margin-top:10px">' +
-                '<input type="password" id="vault-lock-password" class="modal-input auth-code-input" placeholder="Password" autocomplete="current-password" style="width:100%;padding-right:38px" />' +
+            '<div class="vault-lock-pw-row u-ec17010e" >' +
+                '<input type="password" id="vault-lock-password" class="modal-input auth-code-input u-a8059227" placeholder="Password" autocomplete="current-password"  />' +
                 '<button type="button" class="toggle-visibility-btn" id="toggle-vault-lock-pw" title="Show/Hide" aria-label="Show or hide password" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:#aaa;cursor:pointer;padding:4px;display:flex;align-items:center"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>' +
             '</div>' +
             '<div class="vault-lock-error" id="vault-lock-error" style="display:none"></div>' +
-            '<button type="button" class="btn btn-primary" id="vault-lock-submit" style="width:100%;margin-top:10px">Unlock</button>' +
+            '<button type="button" class="btn btn-primary u-9202fe4c" id="vault-lock-submit" >Unlock</button>' +
             '<button type="button" class="vault-lock-forget" id="vault-lock-forget">Forget this device and sign in again</button>' +
         '</div>';
     document.body.appendChild(wrap);
@@ -4492,7 +4532,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!modal || !list) return;
         const tok = localStorage.getItem('token');
         if (!tok) return;
-        list.innerHTML = '<div style="color:var(--text-muted);padding:12px">Loading vault files...</div>';
+        list.innerHTML = '<div class="u-41e80424" >Loading vault files...</div>';
         modal.style.display = 'flex';
         var sendSI = document.getElementById('vault-send-search');
         if (sendSI) setTimeout(() => sendSI.focus(), 100);
@@ -4500,7 +4540,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const resp = await fetch('/api/vault/files', {
                 headers: { 'Authorization': 'Bearer ' + tok }
             });
-            if (!resp.ok) { list.innerHTML = '<div style="color:var(--text-muted);padding:12px">Failed to load vault files.</div>'; return; }
+            if (!resp.ok) { list.innerHTML = '<div class="u-41e80424" >Failed to load vault files.</div>'; return; }
             const data = await resp.json();
             const files = data.files || [];
             if (files.length === 0) {
@@ -4522,7 +4562,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (err) {
             console.error('Vault send picker error:', err);
-            list.innerHTML = '<div style="color:var(--text-muted);padding:12px">Error loading vault files.</div>';
+            list.innerHTML = '<div class="u-41e80424" >Error loading vault files.</div>';
         }
     }
     document.getElementById('close-vault-send').addEventListener('click', function () {
@@ -4662,8 +4702,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     (function initConnectionSettings() {
         const connTab = document.getElementById('connection-settings-tab');
+        if (!connTab) return;
         const tauri = window.__TAURI__;
-        if (!connTab || !tauri || !tauri.core || !tauri.core.invoke) return;
+        const inBox = !!(tauri && tauri.core && tauri.core.invoke);
         const addrEl = document.getElementById('connection-server-address');
         const changeBtn = document.getElementById('connection-change-server-btn');
 
@@ -4675,8 +4716,17 @@ document.addEventListener('DOMContentLoaded', () => {
         // event / notification / call-service permissions are granted to it).
         if (addrEl) addrEl.textContent = location.origin;
 
+        // The tab is shown in a plain browser too, not just in the box. The
+        // web app is served BY the server, so when that server is gone (host
+        // moved, port changed, machine off) the page can still be running from
+        // the service-worker cache with no way back to the connection screen —
+        // the exact dead end the box's tray menu exists to prevent. In a
+        // browser the only way to switch servers is to navigate to the new
+        // origin, where that server serves the app under its own storage.
         connTab.style.display = '';
-        if (changeBtn) {
+        if (!changeBtn) return;
+
+        if (inBox) {
             // Ask the box for the setup screen over the *event* channel — the one
             // call this page is allowed to make (`core:event:default` includes
             // `emit`). The box opens the setup screen in its own window on
@@ -4693,8 +4743,63 @@ document.addEventListener('DOMContentLoaded', () => {
                     alert('Could not open the server settings: ' + (e && e.message ? e.message : e));
                 });
             });
+            return;
         }
+
+        // Plain browser: ask for the new server's address and navigate there.
+        // Same normalization rules as the box setup screen: default the scheme
+        // to https and the port to 3443 only when the user left them out, so an
+        // explicit :443 (or a path that was pasted) is preserved.
+        changeBtn.addEventListener('click', async function () {
+            // Use the app's in-page dialogs (ui-dialog.js) rather than native
+            // prompt/alert: ui-dialog replaces window.alert/confirm/prompt
+            // everywhere else, the native versions are blocked in the Tauri
+            // webview and unstylable elsewhere, and app sources must not call
+            // them at all (tests/ui-dialogs.spec.ts). ui-dialog.js is loaded on
+            // every page that renders this tab, so a missing helper means the
+            // page is broken — say so instead of falling back to a native popup.
+            if (typeof window.uiPrompt !== 'function') {
+                showToast('Could not open the address prompt — reload the page and try again.');
+                return;
+            }
+            const raw = await window.uiPrompt('Enter the address of the server to connect to:', location.origin);
+            if (raw === null || raw === undefined) return;
+            const target = await normalizeServerAddress(raw);
+            if (!target) return;
+            if (target === location.origin) {
+                return;
+            }
+            // A different origin has its own storage/session, so this is a full
+            // navigation (and a fresh login there). Nothing is sent until the
+            // new server serves its own login page.
+            window.location.href = target + '/login.html';
+        });
     })();
+
+    // Normalize a user-typed server address to an origin. Returns '' for input
+    // that cannot be an origin (so callers just stop). Mirrors normalize() in
+    // box-setup.html, including the "default the port only when none was typed"
+    // rule (a pasted :443 must survive the URL parser folding it away).
+    async function normalizeServerAddress(raw) {
+        const notify = typeof window.uiAlert === 'function'
+            ? window.uiAlert
+            : function (m) { return Promise.resolve(alert(m)); };
+        const input = String(raw || '').trim();
+        if (!input) return '';
+        const withScheme = /^https?:\/\//i.test(input) ? input : 'https://' + input;
+        if (/^http:\/\//i.test(input)) {
+            await notify('The app can only load https:// addresses.');
+            return '';
+        }
+        try {
+            const u = new URL(withScheme);
+            if (!/:\d+(\/|$|\?|#)/.test(input)) u.port = '3443';
+            return u.origin;
+        } catch (_) {
+            await notify('That does not look like a server address. Enter an IP or hostname, e.g. 100.64.0.1:3443');
+            return '';
+        }
+    }
 
     // Box app only: Settings → Display → Hardware Acceleration. The shell owns
     // the value (it is a WebView launch flag applied when the window is built),
@@ -4854,7 +4959,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             var res = await authFetch('/api/key-blob');
             if (res.status === 404) {
-                el.innerHTML = icon('warning') + ' No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
+                el.innerHTML = icon('warning') + ' No key backup found on server. <span class="u-3dc3cf7f" >(Keys are saved automatically at login and registration.)</span>';
                 el.style.color = '#faa61a';
                 return;
             }
@@ -4866,7 +4971,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var data = await res.json();
             var hasBlob = !!(data.encrypted_blob);
             if (!hasBlob) {
-                el.innerHTML = icon('warning') + ' No key backup found on server. <span style="font-weight:normal;color:var(--text-muted)">(Keys are saved automatically at login and registration.)</span>';
+                el.innerHTML = icon('warning') + ' No key backup found on server. <span class="u-3dc3cf7f" >(Keys are saved automatically at login and registration.)</span>';
                 el.style.color = '#faa61a';
                 return;
             }
@@ -4882,7 +4987,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     else timeStr = Math.floor(diff / 86400000) + 'd ago';
                 } catch (_) { timeStr = data.updated_at; }
             }
-            el.innerHTML = icon('check') + ' Key backup exists on server' + (timeStr ? ' <span style="font-weight:normal;color:var(--text-muted)">(last saved ' + timeStr + ')</span>' : '');
+            el.innerHTML = icon('check') + ' Key backup exists on server' + (timeStr ? ' <span class="u-3dc3cf7f" >(last saved ' + timeStr + ')</span>' : '');
             el.style.color = '#43b581';
             // Show age warning if backup is over 30 days old
             var ageEl = document.getElementById('backup-age-warning');
@@ -4892,7 +4997,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     var ageDays = Math.floor((Date.now() - backupMs) / 86400000);
                     if (ageDays >= 30) {
                         ageEl.style.display = 'block';
-                        ageEl.innerHTML = icon('warning') + ' Your backup is ' + ageDays + ' days old. Consider saving a new backup to ensure other devices can restore your keys. <button id="backup-age-save-btn" style="margin-left:8px;padding:4px 12px;border-radius:6px;border:1px solid #faa61a;background:transparent;color:#faa61a;cursor:pointer;font-size:12px;">Save Now</button>';
+                        ageEl.innerHTML = icon('warning') + ' Your backup is ' + ageDays + ' days old. Consider saving a new backup to ensure other devices can restore your keys. <button class="u-715547d7" id="backup-age-save-btn" >Save Now</button>';
                         // Wire the button
                         var saveBtn = document.getElementById('backup-age-save-btn');
                         if (saveBtn) {
@@ -8592,7 +8697,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 try {
                     sendPassword = await computeHashedPasswordGlobal(password);
                 } catch (_) {
-                    sendPassword = password; // Fall back to raw password for legacy accounts
+                    reauthError.textContent = 'Session key unavailable — sign in again before re-authenticating.';
+                    reauthError.style.display = 'block';
+                    return;
                 }
                 // Custom session duration chosen in settings (clamped 1min–30 days;
                 // the server clamps again defensively).
@@ -8701,6 +8808,10 @@ document.addEventListener('DOMContentLoaded', () => {
             old_password: E2ECrypto.hmacHex(hashKeyBytes, oldPw),
             new_password: E2ECrypto.hmacHex(hashKeyBytes, newPw)
         };
+        // F3 — the signed-login key is derived from (hash_key, password), so it
+        // rotates with the password; send the new public key so the server can
+        // keep enforcing nonce-signed logins for this account.
+        payload.login_public_key = E2ECrypto.deriveLoginPublicKey(hashKeyBytes, newPw);
 
         // 3. Re-encrypt everything with the NEW password.
         var encHashKey = E2ECrypto.encryptWithPassword(hashKeyB64, newPw);
@@ -8733,7 +8844,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // 4. Submit — the server verifies the old hash (constant-time) and
-        //    swaps every blob in one go.
+        //    swaps every blob in one go. Nothing must be composing a save with
+        //    the password that is about to be retired, so drop the debounce and
+        //    the queued flag here: an in-flight PUT still gets 409 (the change
+        //    bumps the revision) and retries under the new password.
+        try {
+            if (_keyBlobTimer) { clearTimeout(_keyBlobTimer); _keyBlobTimer = null; }
+            _keyBlobQueued = false;
+        } catch (_) {}
         var res = await authFetch('/api/password/change', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -8746,6 +8864,16 @@ document.addEventListener('DOMContentLoaded', () => {
         //    at-rest secure storage to the new password-derived key, so this
         //    device keeps auto-hashing with the new password.
         try {
+            // The key-blob mirror reads its wrapping password through
+            // loadDecryptedPassword(), whose FIRST source is this session
+            // variable — set by the unlock/login and never touched by the
+            // rekey. Leaving it at the OLD password meant the next mirror save
+            // (a second later, from the very storage writes below) re-wrapped
+            // the blob with the old password and overwrote the change. Swap it
+            // here, synchronously, before any queued save can run, and adopt
+            // the revision the server just created.
+            window._vaultSessionPassword = newPw;
+            if (typeof data.rev === 'number') _rememberBlobRev(data.rev);
             if (window._secRekeyToPassword) {
                 window._secRekeyToPassword(newPw);
             } else {
@@ -8761,8 +8889,12 @@ document.addEventListener('DOMContentLoaded', () => {
             // changed it. _kvMigrate() reads the key synchronously before it
             // awaits anything, so calling it here sees the freshly re-keyed
             // storage, and it deletes the bootstrap the line above just wrote.
+            // AWAITED: it also rewrites the vault ticket (the password the next
+            // page load reads through loadDecryptedPassword()). Firing it and
+            // moving on left a window where the ticket still held the OLD
+            // password and a reload handed that to the blob mirror.
             if (window._kvMigrate) {
-                Promise.resolve(window._kvMigrate(newPw)).catch(function () {});
+                try { await Promise.resolve(window._kvMigrate(newPw)); } catch (_) {}
             }
         } catch (_) {}
     }
@@ -9544,7 +9676,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var avatarEl = document.getElementById('profile-edit-avatar');
             // Show initial letter instead of removed PFP
             var dn = document.getElementById('profile-edit-display-name').value || 'U';
-            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+            avatarEl.innerHTML = '<div class="u-619874db" >' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
             avatarEl.style.background = document.getElementById('profile-edit-color').value || '#4fc3f7';
             document.getElementById('profile-avatar-remove-btn').style.display = 'none';
         });
@@ -9704,7 +9836,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // HMAC hashes are 64 hex characters, raw UUIDs are 36 characters with hyphens
                 if (profileUserId && profileUserId.length === 64 && /^[a-f0-9]{64}$/i.test(profileUserId)) {
                     // Value is an HMAC hash, not a raw UUID — check if it's our own hash
-                    var _hmacKey = localStorage.getItem('e2e_hmac_key');
+                    var _hmacKey = cachedHmacKey();
                     var _myId = user ? user.id : null;
                     var _myHmac = (_hmacKey && _myId) ? E2ECrypto.hmacHex(_hmacKey, _myId) : null;
                     if (_myHmac && profileUserId === _myHmac) {
@@ -10255,36 +10387,36 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraCaptureModal = document.createElement('div');
             _cameraCaptureModal.className = 'modal';
             _cameraCaptureModal.style.cssText = 'display:flex;z-index:2000;background:rgba(0,0,0,0.9);';
-            _cameraCaptureModal.innerHTML = '<div class="camera-capture-content" style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
-                + '<button class="camera-capture-close" style="position:absolute;top:10px;right:14px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;z-index:10;line-height:1;">&times;</button>'
-                + '<video id="camera-capture-video" autoplay playsinline style="width:100%;max-height:60vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
+            _cameraCaptureModal.innerHTML = '<div class="camera-capture-content u-97eb3485" >'
+                + '<button class="camera-capture-close u-01073ed5" >&times;</button>'
+                + '<video class="u-e7e9cf5d" id="camera-capture-video" autoplay playsinline ></video>'
                 + '<div class="camera-countdown" id="camera-countdown" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:72px;font-weight:700;text-shadow:0 0 20px rgba(0,0,0,0.8);z-index:5;pointer-events:none;"></div>'
                 // Timer row
                 + '<div class="camera-timer-row" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;padding:0 16px;">'
-                + '<span style="color:#aaa;font-size:12px;">⏱</span>'
-                + '<button class="camera-timer-btn" data-timer="0" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">Instant</button>'
-                + '<button class="camera-timer-btn" data-timer="3" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">3s</button>'
-                + '<button class="camera-timer-btn" data-timer="5" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">5s</button>'
-                + '<button class="camera-timer-btn" data-timer="10" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">10s</button>'
+                + '<span class="u-da4463b9" >⏱</span>'
+                + '<button class="camera-timer-btn u-ab633f52" data-timer="0" >Instant</button>'
+                + '<button class="camera-timer-btn u-01674bb9" data-timer="3" >3s</button>'
+                + '<button class="camera-timer-btn u-01674bb9" data-timer="5" >5s</button>'
+                + '<button class="camera-timer-btn u-01674bb9" data-timer="10" >10s</button>'
                 + '<input type="number" id="camera-custom-timer" min="1" max="99" placeholder="s" style="width:40px;padding:4px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;background:transparent;color:#fff;font-size:11px;text-align:center;display:none;">'
                 + '</div>'
                 // Resolution selector for photo
                 + '<div class="camera-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
-                + '<span style="color:#888;font-size:11px;">' + icon('monitor') + '</span>'
-                + '<button class="camera-res-btn" data-res="720p" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-weight:600;">720p</button>'
-                + '<button class="camera-res-btn" data-res="1080p" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">1080p</button>'
-                + '<button class="camera-res-btn" data-res="4K" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">4K</button>'
+                + '<span class="u-13e3cfbc" >' + icon('monitor') + '</span>'
+                + '<button class="camera-res-btn u-0ee30450" data-res="720p" >720p</button>'
+                + '<button class="camera-res-btn u-01674bb9" data-res="1080p" >1080p</button>'
+                + '<button class="camera-res-btn u-01674bb9" data-res="4K" >4K</button>'
                 + '</div>'
                 + '<div class="camera-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
-                + '<span style="color:#888;font-size:11px;">' + icon('search') + '</span>'
-                + '<input type="range" id="camera-zoom-slider" min="1" max="3" step="0.1" value="1" style="flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
-                + '<span id="camera-zoom-label" style="color:#aaa;font-size:11px;min-width:28px;text-align:center;">1.0×</span>'
+                + '<span class="u-13e3cfbc" >' + icon('search') + '</span>'
+                + '<input class="u-b97ec8b4" type="range" id="camera-zoom-slider" min="1" max="3" step="0.1" value="1" >'
+                + '<span class="u-09ecd9e1" id="camera-zoom-label" >1.0×</span>'
                 + '</div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-top:4px;padding:0 10px;">'
                 + '<button class="camera-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">' + icon('flash') + '</button>'
                 + '<button class="camera-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">' + icon('mirror') + '</button>'
                 + '<button class="camera-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('flip') + '</button>'
-                + '<button class="camera-capture-btn" style="background:#fff;border:none;border-radius:50%;width:56px;height:56px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,0.3);transition:transform 0.1s;"><div style="width:46px;height:46px;border-radius:50%;background:#fff;border:2px solid #333;"></div></button>'
+                + '<button class="camera-capture-btn" style="background:#fff;border:none;border-radius:50%;width:56px;height:56px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,0.3);transition:transform 0.1s;"><div class="u-348991e0" ></div></button>'
                 + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_cameraCaptureModal);
@@ -10300,9 +10432,9 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraBrightnessCtrl = document.createElement('div');
             _cameraBrightnessCtrl.id = 'camera-brightness-ctrl';
             _cameraBrightnessCtrl.style.cssText = 'display:none;position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2004;background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 16px;align-items:center;gap:8px;';
-            _cameraBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">' + icon('lightbulb') + '</span>'
-                + '<input type="range" id="camera-flash-intensity" min="0" max="100" step="1" value="35" style="width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
-                + '<span id="camera-flash-intensity-label" style="color:#FFD700;font-size:12px;min-width:32px;text-align:center;">35%</span>';
+            _cameraBrightnessCtrl.innerHTML = '<span class="u-ebae5d0c" >' + icon('lightbulb') + '</span>'
+                + '<input class="u-87f04ca6" type="range" id="camera-flash-intensity" min="0" max="100" step="1" value="35" >'
+                + '<span class="u-f6f10f84" id="camera-flash-intensity-label" >35%</span>';
             document.body.appendChild(_cameraBrightnessCtrl);
             
             // Close button
@@ -10496,8 +10628,8 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraPhotoPreviewEl = document.createElement('div');
             _cameraPhotoPreviewEl.className = 'modal';
             _cameraPhotoPreviewEl.style.cssText = 'display:none;z-index:2001;background:rgba(0,0,0,0.95);';
-            _cameraPhotoPreviewEl.innerHTML = '<div class="camera-capture-content" style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
-                + '<img id="camera-photo-preview-img" style="width:100%;max-height:70vh;border-radius:12px;object-fit:contain;background:#000;">'
+            _cameraPhotoPreviewEl.innerHTML = '<div class="camera-capture-content u-97eb3485" >'
+                + '<img class="u-13a8174d" id="camera-photo-preview-img" >'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
                 + '<button class="camera-retake-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('refresh') + ' Retake</button>'
                 + '<button class="camera-accept-btn" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">' + icon('check') + '</div></button>'
@@ -10908,28 +11040,28 @@ document.addEventListener('DOMContentLoaded', () => {
             _videoRecModal = document.createElement('div');
             _videoRecModal.className = 'modal';
             _videoRecModal.style.cssText = 'display:flex;z-index:2000;background:rgba(0,0,0,0.9);';
-            _videoRecModal.innerHTML = '<div style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
-                + '<button class="video-rec-close" style="position:absolute;top:10px;right:14px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;z-index:10;line-height:1;">&times;</button>'
-                + '<video id="video-rec-preview" autoplay playsinline muted style="width:100%;max-height:55vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
+            _videoRecModal.innerHTML = '<div class="u-97eb3485" >'
+                + '<button class="video-rec-close u-01073ed5" >&times;</button>'
+                + '<video class="u-a511b8ad" id="video-rec-preview" autoplay playsinline muted ></video>'
                 // Zoom row
                 + '<div class="video-rec-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
-                + '<span style="color:#888;font-size:11px;">' + icon('search') + '</span>'
-                + '<input type="range" id="video-rec-zoom-slider" min="1" max="3" step="0.1" value="1" style="flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
-                + '<span id="video-rec-zoom-label" style="color:#aaa;font-size:11px;min-width:28px;text-align:center;">1.0×</span>'
+                + '<span class="u-13e3cfbc" >' + icon('search') + '</span>'
+                + '<input class="u-b97ec8b4" type="range" id="video-rec-zoom-slider" min="1" max="3" step="0.1" value="1" >'
+                + '<span class="u-09ecd9e1" id="video-rec-zoom-label" >1.0×</span>'
                 + '</div>'
                 // Resolution selector
                 + '<div class="video-rec-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
-                + '<span style="color:#888;font-size:11px;">' + icon('monitor') + '</span>'
-                + '<button class="video-rec-res-btn" data-res="720p" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-weight:600;">720p</button>'
-                + '<button class="video-rec-res-btn" data-res="1080p" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">1080p</button>'
-                + '<button class="video-rec-res-btn" data-res="4K" style="background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;">4K</button>'
+                + '<span class="u-13e3cfbc" >' + icon('monitor') + '</span>'
+                + '<button class="video-rec-res-btn u-0ee30450" data-res="720p" >720p</button>'
+                + '<button class="video-rec-res-btn u-01674bb9" data-res="1080p" >1080p</button>'
+                + '<button class="video-rec-res-btn u-01674bb9" data-res="4K" >4K</button>'
                 + '</div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-top:4px;padding:0 16px;">'
-                + '<span id="video-rec-timer" style="color:#fff;font-size:16px;font-weight:600;min-width:60px;font-variant-numeric:tabular-nums;">0:00</span>'
+                + '<span class="u-3e3c3fbd" id="video-rec-timer" >0:00</span>'
                 + '<button id="video-rec-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">' + icon('sun') + '</button>'
                 + '<button id="video-rec-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">' + icon('mirror') + '</button>'
                 + '<button id="video-rec-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;" title="Flip camera">' + icon('flip') + '</button>'
-                + '<button id="video-rec-toggle-btn" style="background:#f44336;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(244,67,54,0.3);transition:all 0.15s;"><div style="width:28px;height:28px;border-radius:50%;background:#fff;"></div></button>'
+                + '<button id="video-rec-toggle-btn" style="background:#f44336;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(244,67,54,0.3);transition:all 0.15s;"><div class="u-b4d0bdf6" ></div></button>'
                 + '<button id="video-rec-finish-btn" style="display:none;background:#4caf50;border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;cursor:pointer;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:all 0.15s;color:#fff;font-size:22px;">' + icon('check') + '</button>'
                 + '<button class="video-rec-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
                 + '</div></div>';
@@ -10945,9 +11077,9 @@ document.addEventListener('DOMContentLoaded', () => {
             _videoBrightnessCtrl = document.createElement('div');
             _videoBrightnessCtrl.id = 'video-rec-brightness-ctrl';
             _videoBrightnessCtrl.style.cssText = 'display:none;position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2003;background:rgba(0,0,0,0.6);border-radius:10px;padding:8px 16px;align-items:center;gap:8px;';
-            _videoBrightnessCtrl.innerHTML = '<span style="color:#FFD700;font-size:14px;">' + icon('lightbulb') + '</span>'
-                + '<input type="range" id="video-rec-flash-intensity" min="0" max="100" step="1" value="25" style="width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer;">'
-                + '<span id="video-rec-flash-intensity-label" style="color:#FFD700;font-size:12px;min-width:32px;text-align:center;">25%</span>';
+            _videoBrightnessCtrl.innerHTML = '<span class="u-ebae5d0c" >' + icon('lightbulb') + '</span>'
+                + '<input class="u-87f04ca6" type="range" id="video-rec-flash-intensity" min="0" max="100" step="1" value="25" >'
+                + '<span class="u-f6f10f84" id="video-rec-flash-intensity-label" >25%</span>';
             document.body.appendChild(_videoBrightnessCtrl);
             
             // Zoom slider
@@ -11090,9 +11222,9 @@ document.addEventListener('DOMContentLoaded', () => {
             _videoRecPreviewEl = document.createElement('div');
             _videoRecPreviewEl.className = 'modal';
             _videoRecPreviewEl.style.cssText = 'display:none;z-index:2002;background:rgba(0,0,0,0.95);';
-            _videoRecPreviewEl.innerHTML = '<div style="position:relative;width:100%;max-width:500px;margin:auto;text-align:center;">'
-                + '<video id="video-rec-preview-playback" autoplay loop playsinline muted style="width:100%;max-height:60vh;border-radius:12px;object-fit:contain;background:#000;"></video>'
-                + '<div id="video-rec-preview-duration" style="color:#aaa;font-size:12px;margin-top:6px;"></div>'
+            _videoRecPreviewEl.innerHTML = '<div class="u-97eb3485" >'
+                + '<video class="u-e7e9cf5d" id="video-rec-preview-playback" autoplay loop playsinline muted ></video>'
+                + '<div class="u-0dea4edb" id="video-rec-preview-duration" ></div>'
                 + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
                 + '<button class="video-rec-preview-retake" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('refresh') + ' Retake</button>'
                 + '<button class="video-rec-preview-accept" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">' + icon('check') + '</div></button>'
@@ -11223,7 +11355,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var btn = document.getElementById('video-rec-toggle-btn');
             if (btn) {
                 btn.style.background = '#ff9800';
-                btn.innerHTML = '<div style="width:0;height:0;border-left:20px solid #fff;border-top:14px solid transparent;border-bottom:14px solid transparent;margin-left:4px;"></div>';
+                btn.innerHTML = '<div class="u-0679e94b" ></div>';
                 btn.style.boxShadow = '0 0 0 4px rgba(255,152,0,0.3)';
             }
             return;
@@ -11234,7 +11366,7 @@ document.addEventListener('DOMContentLoaded', () => {
             var btn = document.getElementById('video-rec-toggle-btn');
             if (btn) {
                 btn.style.background = '#fff';
-                btn.innerHTML = '<div style="width:26px;height:26px;border-radius:4px;background:#f44336;"></div>';
+                btn.innerHTML = '<div class="u-7055bac0" ></div>';
                 btn.style.boxShadow = '0 0 0 4px rgba(255,255,255,0.3)';
             }
             return;
@@ -11320,7 +11452,7 @@ document.addEventListener('DOMContentLoaded', () => {
         var btn = document.getElementById('video-rec-toggle-btn');
         if (btn) {
             btn.style.background = '#fff';
-            btn.innerHTML = '<div style="width:26px;height:26px;border-radius:4px;background:#f44336;"></div>';
+            btn.innerHTML = '<div class="u-7055bac0" ></div>';
             btn.style.boxShadow = '0 0 0 4px rgba(255,255,255,0.3)';
         }
     }
@@ -11340,7 +11472,7 @@ document.addEventListener('DOMContentLoaded', () => {
         var toggleBtn = document.getElementById('video-rec-toggle-btn');
         if (toggleBtn) {
             toggleBtn.style.background = '#f44336';
-            toggleBtn.innerHTML = '<div style="width:28px;height:28px;border-radius:50%;background:#fff;"></div>';
+            toggleBtn.innerHTML = '<div class="u-b4d0bdf6" ></div>';
             toggleBtn.style.boxShadow = '0 0 0 4px rgba(244,67,54,0.3)';
         }
         var finishBtn = document.getElementById('video-rec-finish-btn');
@@ -13345,7 +13477,7 @@ function renderMentionsInbox() {
     var list = document.getElementById('mentions-inbox-list');
     if (!list) return;
     if (mentionItems.length === 0) {
-        list.innerHTML = '<div style="color:#888;text-align:center;padding:40px 20px;font-size:14px;">No unread notifications</div>';
+        list.innerHTML = '<div class="u-ce728f3d" >No unread notifications</div>';
         return;
     }
     var html = '';
@@ -13731,7 +13863,7 @@ function showServerContextMenu(e, serverId, serverName) {
                     currentServerId = null;
                     currentChannelId = null;
                     document.getElementById('server-name').textContent = '';
-                    document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                    document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Select a server</div>';
                     document.getElementById('channel-name').textContent = 'Select a channel';
                     document.getElementById('message-list').innerHTML = '<div class="welcome">' +
                         (data.server_deleted ? 'Server has been deleted' : 'Select a server and channel to start chatting') + '</div>';
@@ -14744,7 +14876,7 @@ function connectWebSocket(t) {
                             currentServerId = null;
                             currentChannelId = null;
                             document.getElementById('server-name').textContent = '';
-                            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                            document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Select a server</div>';
                             document.getElementById('channel-name').textContent = 'Select a channel';
                             document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
                             document.getElementById('message-input').disabled = true;
@@ -14814,7 +14946,7 @@ function connectWebSocket(t) {
                         currentChannelId = null;
                         viewMode = 'servers';
                         document.getElementById('server-name').textContent = '';
-                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Select a server</div>';
                         document.getElementById('channel-name').textContent = 'Select a channel';
                         document.getElementById('message-list').innerHTML = '<div class="welcome">Select a server and channel to start chatting</div>';
                         document.getElementById('message-input').disabled = true;
@@ -14895,7 +15027,7 @@ function connectWebSocket(t) {
                         currentServerId = null;
                         currentChannelId = null;
                         document.getElementById('server-name').textContent = '';
-                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Select a server</div>';
                         document.getElementById('channel-name').textContent = 'Select a channel';
                         document.getElementById('message-list').innerHTML = '<div class="welcome">This server has been deleted</div>';
                         document.getElementById('message-input').disabled = true;
@@ -16365,7 +16497,7 @@ async function loadServers() {
             selectServer(servers[0].id);
         } else if (servers.length === 0 && viewMode === 'servers') {
             document.getElementById('server-name').textContent = 'No servers yet';
-            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Create or join a server</div>';
+            document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Create or join a server</div>';
         }
     } catch (err) {
         console.error('Failed to load servers:', err);
@@ -17795,23 +17927,23 @@ async function selectServer(serverId) {
         }
         if (!ok && !serverDisplayName) {
             if (isOwner) {
-                document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key. <a href="#" id="regenerate-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Regenerate server key</a></div>';
+                document.getElementById('channel-list').innerHTML = '<div class="channel-item u-720fd595" >Cannot decrypt server key. <a class="u-9ba877cd" href="#" id="regenerate-server-key-btn" >Regenerate server key</a></div>';
                 document.getElementById('regenerate-server-key-btn').addEventListener('click', async (e) => {
                     e.preventDefault();
-                    document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Regenerating server key...</div>';
+                    document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Regenerating server key...</div>';
                     const ok2 = await rotateServerKey(serverId);
                     if (ok2) {
                         await loadChannels(serverId);
                         loadMembers(serverId);
                     } else {
-                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Failed to regenerate server key</div>';
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item u-720fd595" >Failed to regenerate server key</div>';
                     }
                 });
             } else {
-                document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key <a href="#" id="retry-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Retry now</a></div>';
+                document.getElementById('channel-list').innerHTML = '<div class="channel-item u-720fd595" >Cannot decrypt server key <a class="u-9ba877cd" href="#" id="retry-server-key-btn" >Retry now</a></div>';
                 document.getElementById('retry-server-key-btn').addEventListener('click', async function retryKeyFn(e) {
                     e.preventDefault();
-                    document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Retrying...</div>';
+                    document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Retrying...</div>';
                     var retryOk = await fetchAndDecryptServerKey(serverId);
                     if (retryOk) {
                         // Re-decrypt server name
@@ -17824,7 +17956,7 @@ async function selectServer(serverId) {
                         await loadChannels(serverId);
                         loadMembers(serverId);
                     } else {
-                        document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#f44336;cursor:default">Cannot decrypt server key <a href="#" id="retry-server-key-btn" style="color:#4fc3f7;text-decoration:underline">Retry now</a></div>';
+                        document.getElementById('channel-list').innerHTML = '<div class="channel-item u-720fd595" >Cannot decrypt server key <a class="u-9ba877cd" href="#" id="retry-server-key-btn" >Retry now</a></div>';
                         document.getElementById('retry-server-key-btn').addEventListener('click', retryKeyFn);
                     }
                 });
@@ -17937,7 +18069,7 @@ async function loadChannels(serverId) {
         list.innerHTML = '';
 
         if (!Array.isArray(channels) || channels.length === 0) {
-            list.innerHTML = '<div class="channel-item" style="color:#666;cursor:default">No channels yet</div>';
+            list.innerHTML = '<div class="channel-item u-aff4273c" >No channels yet</div>';
             document.getElementById('channel-name').textContent = 'Select a channel';
             document.getElementById('message-input').disabled = true;
             document.getElementById('send-btn').disabled = true;
@@ -18220,7 +18352,7 @@ async function loadMessages(channelId, aroundMessageId, skipBottomScroll) {
         }
         var fetched = await fetchAndDecryptServerKey(currentServerId);
         if (!fetched) {
-            list.innerHTML = '<div class="welcome" style="color:#f44336">Cannot load messages: encryption key unavailable</div>';
+            list.innerHTML = '<div class="welcome u-3cbcede7" >Cannot load messages: encryption key unavailable</div>';
             return;
         }
     }
@@ -18318,7 +18450,7 @@ async function loadMessages(channelId, aroundMessageId, skipBottomScroll) {
         ackOpenConversationRead(channelId, false);
     } catch (err) {
         console.error('Failed to load messages:', err);
-        list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
+        list.innerHTML = '<div class="welcome u-3cbcede7" >Failed to load messages</div>';
     }
 }
 
@@ -18763,7 +18895,7 @@ async function appendMessage(msg) {
     // session from before the key existed), fetch it now so the HMAC fallback
     // below can never silently fail. ensureHmacKey() returns instantly when the
     // key is already present, so this is a no-op in the common path.
-    var hmacKey = localStorage.getItem('e2e_hmac_key');
+    var hmacKey = cachedHmacKey();
     if (!hmacKey && myUserId) {
         hmacKey = await ensureHmacKey();
     }
@@ -19053,7 +19185,7 @@ async function appendMessage(msg) {
         }
         // Render rich media preview for forwards that contain GIF/sticker/file
         if (forwardData.gif) {
-            contentHtml += '<div class="gif-message" style="margin-top:4px">' +
+            contentHtml += '<div class="gif-message u-96ad6099" >' +
                 '<img src="' + escapeHtml(forwardData.gif.url) + '" alt="' + escapeHtml(forwardData.gif.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
                 '</div>';
         } else if (forwardData.sticker) {
@@ -20177,7 +20309,7 @@ function handleReply(messageId, msgDiv) {
     };
     const replyBar = document.getElementById('reply-bar');
     if (replyBar) {
-        replyBar.innerHTML = 'Replying to <strong>@' + escapeHtml(username) + '</strong>: ' + escapeHtml(preview) + ' <button id="cancel-reply" style="margin-left:8px;background:none;border:none;color:#aaa;cursor:pointer">&#x2715;</button>';
+        replyBar.innerHTML = 'Replying to <strong>@' + escapeHtml(username) + '</strong>: ' + escapeHtml(preview) + ' <button class="u-1d3db62b" id="cancel-reply" >&#x2715;</button>';
         replyBar.style.display = 'flex';
         document.getElementById('cancel-reply')?.addEventListener('click', () => {
             pendingReply = null;
@@ -20224,8 +20356,8 @@ function handleEdit(messageId, msgDiv) {
     const btnRow = document.createElement('div');
     btnRow.className = 'edit-buttons';
     btnRow.style.cssText = 'display:flex;gap:8px;margin-top:6px';
-    btnRow.innerHTML = '<button class="edit-save-btn" style="background:#569cd6;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">Save</button>' +
-        '<button class="edit-cancel-btn" style="background:#666;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">Cancel</button>';
+    btnRow.innerHTML = '<button class="edit-save-btn u-a81f5077" >Save</button>' +
+        '<button class="edit-cancel-btn u-1433b212" >Cancel</button>';
 
     // Remove old text and actions
     const oldText = contentEl.querySelector('.text');
@@ -20686,10 +20818,10 @@ function showForwardAllModal() {
 async function loadAllForwardChannels() {
     const list = document.getElementById('forward-channel-list');
     if (!list) return;
-    list.innerHTML = '<div style="color:#888">Loading all servers...</div>';
+    list.innerHTML = '<div class="u-8b490eb6" >Loading all servers...</div>';
     try {
         if (!servers || servers.length === 0) {
-            list.innerHTML = '<div style="color:#888">No servers available</div>';
+            list.innerHTML = '<div class="u-8b490eb6" >No servers available</div>';
             return;
         }
         let html = '';
@@ -20714,9 +20846,9 @@ async function loadAllForwardChannels() {
             serverHtml += '</div>';
             if (channelCount > 0) html += serverHtml;
         }
-        list.innerHTML = html || '<div style="color:#888">No channels found</div>';
+        list.innerHTML = html || '<div class="u-8b490eb6" >No channels found</div>';
     } catch (e) {
-        list.innerHTML = '<div style="color:#888">Failed to load servers</div>';
+        list.innerHTML = '<div class="u-8b490eb6" >Failed to load servers</div>';
     }
     // Wire up search
     var searchInput = document.getElementById('forward-channel-search');
@@ -21343,15 +21475,15 @@ function renderDmSidebar() {
     _dmDragPendingRerender = false;
     const container = document.getElementById('channel-list');
     let html = '<div class="dm-header">';
-    html += '<div class="identity-key-box" style="margin-bottom:10px">';
+    html += '<div class="identity-key-box u-761d3add" >';
     html += '<span class="key-value" id="my-friend-code">••••••••••••••••</span>';
     html += '<button class="key-action-btn" id="toggle-friend-code-btn" title="Show/Hide">' + icon('eye') + '</button>';
     html += '<button class="key-action-btn" id="copy-friend-code-btn" title="Copy">' + icon('copy') + '</button>';
     html += '<button class="key-action-btn" id="friend-qr-btn" title="Show QR Code">' + icon('camera') + '</button>';
     html += '<button class="key-action-btn" id="get-friend-code-btn" title="Get friend code from server">' + icon('lock') + '</button>';
-    html += '<button class="key-action-btn" id="regen-friend-code-btn" title="Generate new friend code" style="color:#ff9800;">' + icon('refresh') + '</button>';
+    html += '<button class="key-action-btn u-886a61a0" id="regen-friend-code-btn" title="Generate new friend code" >' + icon('refresh') + '</button>';
     html += '</div>';
-    html += '<div id="friend-code-status" class="friend-code-status" style="font-size:11px;color:#888;margin-top:4px;text-align:center;"></div>';
+    html += '<div id="friend-code-status" class="friend-code-status u-01a658d0" ></div>';
     html += '<div id="friend-qr-container" class="qr-code-container" style="display:none;margin-top:10px;margin-bottom:10px;">';
     html += '<div id="friend-qr-canvas" class="qr-code-canvas"></div>';
     html += '<p class="qr-warning">' + icon('warning') + ' This shows your friend code. Only show to trusted people.</p>';
@@ -21367,7 +21499,7 @@ function renderDmSidebar() {
     html += '<input type="text" class="dm-search" id="dm-search" placeholder="Search conversations..." autocomplete="off" spellcheck="false">';
     html += '<div class="channel-list dm-list" id="dm-list">';
     if (dmConversations.length === 0) {
-        html += '<div style="color:#666;padding:12px;font-size:13px">No conversations yet</div>';
+        html += '<div class="u-0c1eff4e" >No conversations yet</div>';
     } else {
         // Slot above the first conversation — the same in-between space the
         // server rail has, so a row can be dropped between two others instead of
@@ -22150,7 +22282,7 @@ async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {
         ackOpenConversationRead(dmChannelId, true);
     } catch (err) {
         console.error('Failed to load DM messages:', err);
-        list.innerHTML = '<div class="welcome" style="color:#f44336">Failed to load messages</div>';
+        list.innerHTML = '<div class="welcome u-3cbcede7" >Failed to load messages</div>';
     }
 }
 
@@ -22178,7 +22310,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
     // session from before the key existed), fetch it now so the HMAC fallback
     // below can never silently fail. ensureHmacKey() returns instantly when the
     // key is already present, so this is a no-op in the common path.
-    var hmacKey = localStorage.getItem('e2e_hmac_key');
+    var hmacKey = cachedHmacKey();
     if (!hmacKey && myUserId) {
         hmacKey = await ensureHmacKey();
     }
@@ -22466,7 +22598,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         }
         // Render rich media preview for forwards that contain GIF/sticker/file
         if (forwardData.gif) {
-            contentHtml += '<div class="gif-message" style="margin-top:4px">' +
+            contentHtml += '<div class="gif-message u-96ad6099" >' +
                 '<img src="' + escapeHtml(forwardData.gif.url) + '" alt="' + escapeHtml(forwardData.gif.alt || 'GIF') + '" loading="lazy" style="max-width:300px;max-height:300px;border-radius:8px;cursor:pointer">' +
                 '</div>';
         } else if (forwardData.sticker) {
@@ -22493,7 +22625,7 @@ async function appendDmMessage(msg, kp, otherPublicKey) {
         contentHtml += '<div class="text">' + highlightMentionsInHtml(renderEmojiText(textContent, extraEmojis)) + '<span class="time-hover">' + time + '</span></div>';
     } else if (msg.encrypted_content && !otherPublicKey) {
         const label = isOwn ? '[message sent]' : '[encrypted]';
-        contentHtml += '<div class="text" style="color:#888;font-style:italic">' + label + '</div>';
+        contentHtml += '<div class="text u-e3f045f8" >' + label + '</div>';
     }
 
     var isPinned = !!msg.pinned;
@@ -23149,7 +23281,7 @@ async function leaveServer() {
             currentServerId = null;
             currentChannelId = null;
             document.getElementById('server-name').textContent = '';
-            document.getElementById('channel-list').innerHTML = '<div class="channel-item" style="color:#666;cursor:default">Select a server</div>';
+            document.getElementById('channel-list').innerHTML = '<div class="channel-item u-aff4273c" >Select a server</div>';
             document.getElementById('channel-name').textContent = 'Select a channel';
             document.getElementById('message-list').innerHTML = '<div class="welcome">' +
                 (data.server_deleted ? 'Server has been deleted' : 'Select a server and channel to start chatting') + '</div>';
@@ -23248,16 +23380,16 @@ async function loadServerSettings() {
 
 async function loadBannedUsers() {
     const list = document.getElementById('banned-users-list');
-    list.innerHTML = '<div style="color:#666;padding:10px">Loading...</div>';
+    list.innerHTML = '<div class="u-2f88915b" >Loading...</div>';
     try {
         const res = await authFetch(`/api/servers/${currentServerId}/bans`);
         if (!res.ok) {
-            list.innerHTML = '<div style="color:#666;padding:10px">Failed to load</div>';
+            list.innerHTML = '<div class="u-2f88915b" >Failed to load</div>';
             return;
         }
         const bans = await res.json();
         if (!Array.isArray(bans) || bans.length === 0) {
-            list.innerHTML = '<div style="color:#666;padding:10px">No banned users</div>';
+            list.innerHTML = '<div class="u-2f88915b" >No banned users</div>';
             return;
         }
         list.innerHTML = '';
@@ -23270,7 +23402,7 @@ async function loadBannedUsers() {
             list.appendChild(div);
         });
     } catch (err) {
-        list.innerHTML = '<div style="color:#f44336;padding:10px">Error loading bans</div>';
+        list.innerHTML = '<div class="u-3186868e" >Error loading bans</div>';
     }
 }
 
@@ -23485,7 +23617,7 @@ async function showInviteModal() {
                 inviteQrCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Invite code QR code', title: 'Scan to join server' });
             } catch (e) {
                 console.error('QR generation failed:', e);
-                inviteQrCanvas.innerHTML = '<p style="color:#f44336">Failed to generate QR code</p>';
+                inviteQrCanvas.innerHTML = '<p class="u-3cbcede7" >Failed to generate QR code</p>';
             }
         };
     }
@@ -23677,7 +23809,7 @@ async function loadMyFriendCode() {
                         friendQrCanvas.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 4, alt: 'Friend code QR code', title: 'Scan to add as friend' });
                     } catch (e) {
                         console.error('QR generation failed:', e);
-                        friendQrCanvas.innerHTML = '<p style="color:#f44336">Failed to generate QR code</p>';
+                        friendQrCanvas.innerHTML = '<p class="u-3cbcede7" >Failed to generate QR code</p>';
                     }
                 };
             }
@@ -24092,7 +24224,7 @@ async function friendRequestsDisabledToggleChanged() {
     if (!toggle) return;
     try {
         // Compute HMAC(hmac_key, user_id + ":fr_disabled:" + "1"/"0")
-        var hmacKey = localStorage.getItem('e2e_hmac_key');
+        var hmacKey = await ensureHmacKey();
         if (!hmacKey) {
             alert('HMAC key not available');
             toggle.checked = !toggle.checked;
@@ -24187,7 +24319,7 @@ async function loadFriendRequests() {
         cachedFriendRequests = [];
     }
     if (!Array.isArray(cachedFriendRequests) || cachedFriendRequests.length === 0) {
-        list.innerHTML = '<div style="color:#666;padding:16px;text-align:center">No incoming friend requests</div>';
+        list.innerHTML = '<div class="u-a93c3eb9" >No incoming friend requests</div>';
         return;
     }
     let html = '';
@@ -24846,6 +24978,9 @@ async function loadClientConfig() {
             const cfg = await res.json();
             if (cfg.max_file_size_bytes > 0) _maxFileSizeBytes = cfg.max_file_size_bytes;
             if (cfg.max_file_size_mb > 0) _maxFileSizeMb = cfg.max_file_size_mb;
+            // Icon packs are capped server-side (Runtime Limits); publish the
+            // server's number so icon-packs.js checks the same value.
+            if (cfg.icon_slot_max_bytes > 0) window._iconSlotMaxBytes = cfg.icon_slot_max_bytes;
         }
     } catch (_) {}
 }
@@ -25894,7 +26029,7 @@ function highlightSyntax(text, filename, mime) {
 // ── Markup protection for the highlighters ───────────────────────────────────
 // Every highlighter below colours code with a sequence of plain string
 // replacements, and after the first one the text contains markup of the
-// highlighter's own making — `<span style="color:#e06c75">`. A later, looser
+// highlighter's own making — `<span class="u-92235734" >`. A later, looser
 // pattern then matches *inside* that markup and shreds it: the number pass
 // wraps the digits of the colour it just wrote, a `#`-comment pass eats the
 // rest of the line from `#e06c75` on, and an HTML attribute pass turns
@@ -26114,6 +26249,40 @@ function highlightGeneric(text, lang, c) {
     return hlExpand(result.join('\n'), store);
 }
 
+// ===== Untrusted markdown URL handling =====
+// renderMarkdown() runs on message text and on shared-file previews, so every
+// URL inside it is attacker-controlled. Only these schemes may reach an href
+// or src; everything else (javascript:, data:text/html, vbscript:, file:)
+// renders as inert text. Relative app links are allowed because they stay on
+// the app's own origin.
+const MD_LINK_SCHEMES = ['http://', 'https://', 'mailto:'];
+const MD_IMAGE_SCHEMES = ['http://', 'https://', 'blob:', 'data:image/'];
+
+function sanitizeMarkdownUrl(raw, kind) {
+    const url = String(raw == null ? '' : raw).trim();
+    if (!url) return null;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) {
+        const lower = url.toLowerCase();
+        const allowed = kind === 'image' ? MD_IMAGE_SCHEMES : MD_LINK_SCHEMES;
+        return allowed.some(function (s) { return lower.startsWith(s); }) ? url : null;
+    }
+    // Protocol-relative "//evil.example" is an absolute URL without a scheme.
+    if (url.startsWith('//')) return null;
+    // Anchors and same-origin paths only; a bare "example.com" stays inert
+    // because a browser would resolve it as a relative path anyway.
+    return /^([#/?]|\.{1,2}\/)/.test(url) ? url : null;
+}
+
+// The markdown source was already escaped for & < > before inlineFormat runs,
+// so only quotes (and line breaks) can still break out of an attribute here.
+// Re-escaping & would double-encode the escapes the first pass installed.
+function escapeMarkdownAttr(value) {
+    return String(value == null ? '' : value)
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/[\r\n\t]/g, ' ');
+}
+
 function renderMarkdown(text) {
     const s = text
         .replace(/&/g, '&amp;')
@@ -26138,7 +26307,7 @@ function renderMarkdown(text) {
 
     function closeBlockquote() {
         if (inBlockquote && blockquoteContent) {
-            html += '<div style="border-left:3px solid #569cd6;padding:8px 12px;color:#aaa;margin:8px 0;background:rgba(86,156,214,0.06);border-radius:0 4px 4px 0">' + blockquoteContent + '</div>';
+            html += '<blockquote class="md-quote">' + blockquoteContent + '</blockquote>';
             blockquoteContent = '';
         }
         inBlockquote = false;
@@ -26147,12 +26316,12 @@ function renderMarkdown(text) {
     function closeList() {
         if (inList && listItems.length > 0) {
             listItems.forEach((item, idx) => {
-                const check = item.checked !== null ? '<input type="checkbox" disabled' + (item.checked ? ' checked' : '') + ' style="margin-right:6px;vertical-align:middle">' : '';
-                const num = listOrdered ? '<span style="color:#888;margin-right:6px;min-width:20px;display:inline-block">' + (idx + 1) + '.</span>' : '';
-                const bullet = !listOrdered && item.checked === null ? '<span style="color:#569cd6;margin-right:6px">•</span>' : '';
+                const check = item.checked !== null ? '<input type="checkbox" class="md-task" disabled' + (item.checked ? ' checked' : '') + '>' : '';
+                const num = listOrdered ? '<span class="md-li-num">' + (idx + 1) + '.</span>' : '';
+                const bullet = !listOrdered && item.checked === null ? '<span class="md-li-bullet">•</span>' : '';
                 const prefix = check || num || bullet;
-                const indent = item.indent ? 'padding-left:' + (item.indent * 20) + 'px' : 'padding-left:4px';
-                html += '<div style="' + indent + ';margin:3px 0;line-height:1.6">' + prefix + inlineFormat(item.text) + '</div>';
+                const indent = ' style="--md-indent:' + Math.min(item.indent || 0, 12) + '"';
+                html += '<div class="md-li"' + indent + '>' + prefix + inlineFormat(item.text) + '</div>';
             });
             listItems = [];
         }
@@ -26172,16 +26341,15 @@ function renderMarkdown(text) {
                     else alignments.push('left');
                 });
             }
-            html += '<div style="overflow-x:auto;margin:8px 0"><table style="border-collapse:collapse;width:100%;font-size:13px">';
+            html += '<div class="md-table-wrap"><table class="md-table">';
             tableRows.forEach((row, rIdx) => {
                 if (rIdx === 1) return;
                 html += '<tr>';
                 row.cells.forEach((cell, cIdx) => {
                     const tag = rIdx === 0 ? 'th' : 'td';
-                    const align = alignments[cIdx] || 'left';
-                    const border = rIdx === 0 ? 'border-bottom:2px solid #3d3d3d;font-weight:600' : 'border-bottom:1px solid #2d2d2d';
-                    const bg = rIdx === 0 ? 'background:#252526' : (rIdx % 2 === 0 ? 'background:#1e1e1e' : 'background:#252526');
-                    html += '<' + tag + ' style="padding:6px 12px;text-align:' + align + ';' + border + ';' + bg + ';color:#d4d4d4">' + inlineFormat(cell.trim()) + '</' + tag + '>';
+                    const align = alignments[cIdx] || '';
+                    const alignCls = align && align !== 'left' ? ' md-align-' + align : '';
+                    html += '<' + tag + ' class="md-cell' + alignCls + '">' + inlineFormat(cell.trim()) + '</' + tag + '>';
                 });
                 html += '</tr>';
             });
@@ -26192,17 +26360,27 @@ function renderMarkdown(text) {
     }
 
     function inlineFormat(t) {
-        t = t.replace(/\*\*(.+?)\*\*/g, '<strong style="color:#e0e0e0">$1</strong>');
-        t = t.replace(/\*(.+?)\*/g, '<em style="color:#d0d0d0">$1</em>');
-        t = t.replace(/~~(.+?)~~/g, '<del style="color:#888">$1</del>');
-        t = t.replace(/==(.+?)==/g, '<mark style="background:#5a4a18;color:#e0e0e0;padding:1px 4px;border-radius:2px">$1</mark>');
+        t = t.replace(/\*\*(.+?)\*\*/g, '<strong class="md-strong">$1</strong>');
+        t = t.replace(/\*(.+?)\*/g, '<em class="md-em">$1</em>');
+        t = t.replace(/~~(.+?)~~/g, '<del class="md-del">$1</del>');
+        t = t.replace(/==(.+?)==/g, '<mark class="md-mark">$1</mark>');
         t = t.replace(/\|\|(.+?)\|\|/g, '<span class="spoiler" data-action="toggle-spoiler">$1</span>');
-        t = t.replace(/`(.+?)`/g, '<code style="background:#2d2d2d;padding:2px 6px;border-radius:3px;font-family:monospace;color:#e06c75;font-size:12px">$1</code>');
-        t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:#569cd6;text-decoration:none;border-bottom:1px solid #569cd666" target="_blank" rel="noopener">$1</a>');
-        t = t.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:4px;margin:4px 0">');
-        t = t.replace(/H~2~O/g, 'H<sub style="font-size:0.8em">2</sub>O');
-        t = t.replace(/~(.+?)~/g, '<sub style="font-size:0.8em">$1</sub>');
-        t = t.replace(/\^(.+?)\^/g, '<sup style="font-size:0.8em">$1</sup>');
+        t = t.replace(/`(.+?)`/g, '<code class="md-inline-code">$1</code>');
+        // Images first: the link pattern below would otherwise swallow the
+        // "[alt](src)" half of "![alt](src)" and render an anchor.
+        t = t.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function (_m, alt, src) {
+            const safeSrc = sanitizeMarkdownUrl(src, 'image');
+            if (!safeSrc) return escapeMarkdownAttr(alt);
+            return '<img src="' + escapeMarkdownAttr(safeSrc) + '" alt="' + escapeMarkdownAttr(alt) + '" class="md-image">';
+        });
+        t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (_m, label, href) {
+            const safeHref = sanitizeMarkdownUrl(href, 'link');
+            if (!safeHref) return label;
+            return '<a href="' + escapeMarkdownAttr(safeHref) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+        });
+        t = t.replace(/H~2~O/g, 'H<sub class="md-sub">2</sub>O');
+        t = t.replace(/~(.+?)~/g, '<sub class="md-sub">$1</sub>');
+        t = t.replace(/\^(.+?)\^/g, '<sup class="md-sup">$1</sup>');
         t = t.replace(/:([\w+-]+):/g, function(m) {
             const emojis = { 'smile': '😄', 'heart': '❤️', 'thumbsup': '👍', 'rocket': '🚀', 'fire': '🔥', 'check': '✅', 'warning': '⚠️', 'info': 'ℹ️', 'star': '⭐', 'bug': '🐛', 'sparkles': '✨', 'tada': '🎉', 'wave': '👋', 'eyes': '👀', 'clap': '👏', 'think': '🤔', 'muscle': '💪', 'pray': '🙏', 'rainbow': '🌈', 'party': '🎉', 'white_check_mark': '✅', 'x': '❌', 'heavy_check_mark': '✔️', 'memo': '📝', 'pushpin': '📌', 'bulb': '💡', 'zap': '⚡', 'book': '📚', 'wrench': '🔧', 'gear': '⚙️', 'hammer': '🔨', 'lock': '🔒', 'key': '🔑', 'package': '📦', 'robot': '🤖', 'alien': '👽', 'ghost': '👻', 'skull': '💀', 'poop': '💩', 'clown': '🤡', 'sunglasses': '😎', 'nerd': '🤓', 'thinking': '🤔', 'shushing': '🤫', 'money': '💰', 'crown': '👑', 'gem': '💎', 'trophy': '🏆', 'medal': '🥇', 'soccer': '⚽', 'basketball': '🏀', 'baseball': '⚾', 'football': '🏈', 'tennis': '🎾', 'video_game': '🎮', 'joystick': '🕹️', 'dart': '🎯', 'art': '🎨', 'camera': '📷', 'video': 'VIDEO', 'microphone': '🎤', 'headphones': '🎧', 'guitar': '🎸', 'piano': '🎹', 'trumpet': '🎺', 'violin': '🎻', 'drum': '🥁', 'coffee': '☕', 'pizza': '🍕', 'hamburger': '🍔', 'fries': '🍟', 'taco': '🌮', 'sushi': '🍣', 'cookie': '🍪', 'cake': '🎂', 'pie': '🥧', 'icecream': '🍦', 'candy': '🍬', 'lollipop': '🍭', 'apple': '🍎', 'banana': '🍌', 'grapes': '🍇', 'watermelon': '🍉', 'orange': '🍊', 'lemon': '🍋', 'strawberry': '🍓', 'peach': '🍑', 'coconut': '🥥', 'avocado': '🥑', 'carrot': '🥕', 'corn': '🌽', 'broccoli': '🥦', 'hotdog': '🌭', 'pretzel': '🥨', 'bread': '🍞', 'cheese': '🧀', 'egg': '🥚', 'bacon': '🥓', 'steak': '🥩', 'poultry': '🍗', 'seafood': '🦞', 'crab': '🦀', 'shrimp': '🦐', 'octopus': '🐙', 'fish': '🐟', 'dolphin': '🐬', 'whale': '🐳', 'shark': '🦈', 'crocodile': '🐊', 'snake': '🐍', 'lizard': '🦎', 'turtle': '🐢', 'frog': '🐸', 'monkey': '🐒', 'gorilla': '🦍', 'dog': '🐕', 'cat': '🐈', 'mouse': '🐁', 'rabbit': '🐇', 'hamster': '🐹', 'bear': '🐻', 'panda': '🐼', 'tiger': '🐯', 'lion': '🦁', 'cow': '🐄', 'pig': '🐷', 'chicken': '🐔', 'penguin': '🐧', 'bird': '🐦', 'eagle': '🦅', 'duck': '🦆', 'owl': '🦉', 'bat': '🦇', 'butterfly': '🦋', 'bee': '🐝', 'ladybug': '🐞', 'ant': '🐜', 'spider': '🕷️', 'scorpion': '🦂', 'snail': '🐌', 'worm': '🐛', 'flower': '🌸', 'rose': '🌹', 'tulip': '🌷', 'sunflower': '🌻', 'tree': '🌳', 'palm': '🌴', 'cactus': '🌵', 'mushroom': '🍄', 'leaf': '🍃', 'seedling': '🌱', 'earth': '🌍', 'moon': '🌙', 'sun': '☀️', 'star': '⭐', 'comet': '☄️', 'cloud': '☁️', 'storm': '⛈️', 'rain': '🌧️', 'snow': '❄️', 'wind': '💨', 'tornado': '🌪️', 'fire': '🔥', 'droplet': '💧', 'ocean': '🌊', 'diamond': '💎', 'crystal': '🔮', ' magnet': '🧲', 'battery': '🔋', 'bulb': '💡', 'wire': '🔌', 'computer': '💻', 'laptop': '💻', 'desktop': '🖥️', 'phone': '📱', 'tablet': '📟', 'keyboard': '⌨️', 'mouse': '🖱️', 'floppy': '💾', 'cd': '💿', 'dvd': '📀', 'camera': '📷', 'tv': '📺', 'radio': '📻', 'satellite': '📡', 'telescope': '🔭', 'microscope': '🔬', 'test_tube': '🧪', 'dna': '🧬', 'pill': '💊', 'syringe': '💉', 'thermometer': '🌡️', 'stethoscope': '🩺', 'mortar': '⚗️', 'rocket': '🚀', 'airplane': '✈️', 'helicopter': '🚁', 'boat': '⛵', 'ship': '🚢', 'car': '🚗', 'truck': '🚚', 'bus': '🚌', 'ambulance': '🚑', 'fire': '🚒', 'police': '🚔', 'taxi': '🚕', 'bicycle': '🚲', 'motorcycle': '🏍️', 'train': '🚂', 'subway': '🚇', 'ticket': '🎫', 'compass': '🧭', 'map': '🗺️', 'pin': '📍', 'flag': '🚩', 'anchor': '⚓', 'chain': '🔗', 'lock': '🔒', 'unlock': '🔓', 'key': '🔑', 'shield': '🛡️', 'sword': '⚔️', 'crossed_swords': '⚔️', 'wand': '🪄', 'crystal_ball': '🔮', 'mystery': '🔮', 'speech': '💬', 'thought': '💭', 'envelope': '✉️', 'email': '📧', 'inbox': '📥', 'outbox': '📤', 'package': '📦', 'mailbox': '📫', 'bell': '🔔', 'no_bell': '🔕', 'heart': '❤️', 'broken_heart': '💔', 'sparkling_heart': '💖', 'grow_heart': '💗', 'blue_heart': '💙', 'green_heart': '💚', 'purple_heart': '💜', 'black_heart': '🖤', 'white_heart': '🤍', 'brown_heart': '🤎', 'orange_heart': '🧡', 'yellow_heart': '💛', '100': '💯', 'infinity': '♾️', 'check_mark': '✔️', 'x_mark': '❌', 'warning': '⚠️', 'no_entry': '🚫', 'prohibited': '禁止', 'question': '❓', 'exclamation': '❗', 'bangbang': '‼️', 'interrobang': '⁉️', 'recycle': '♻️', 'atom': '⚛️', 'wheelchair': '♿', 'globe': '🌐', 'atom_symbol': '⚛️', 'fleur_de_lis': '⚜️', 'radioactive': '☢️', 'biohazard': '☣️', 'trident': '🔱', 'name_badge': '📛', 'beginner': '🔰', 'o': '⭕', 'white_check': '✅', 'cyclone': '🌀', 'sparkle': '❇️', 'maggie': '✳️', 'eight_spoked': '✳️', 'vs': '🆚', 'up': '🆙', 'cool': '🆒', 'new': '🆕', 'free': '🆓', 'koko': '🈁', 'sa': '🈂️', 'u7121': '🈚', 'u6307': '🈯', 'u7981': '🈲', 'u7533': '🈸', 'u5408': '🈴', 'u7a7a': '🈳', 'congratulations': '㊗️', 'secret': '㊙️', 'u55b6': '🈺', 'u6e80': '🈵', 'elevator': '🛗', 'wheelchair2': '♿', 'men_room': '🚹', 'women_room': '🚺', 'restroom': '🚻', 'baby_symbol': '🚼', 'wc': '🚾', 'passport': '🛂', 'baggage': '🛅', 'left_luggage': '🛅', 'customs': '🛃', 'mantelpiece': '🗝️', 'old_key': '🗝️', 'couch': '🛋️', 'bed': '🛏️', 'sleeping': '🛌', 'teddy': '🧸', 'framed': '🖼️', 'mirror': '🪞', 'shower': '🚿', 'bathtub': '🛁', 'toothbrush': '🪥', 'toilet': '🚽', 'plunger': '🪠', 'shampoo': '🧴', 'sponge': '🧽', 'lotion': '🧴', 'ring': '💍', 'lipstick': '💄', 'purse': '👛', 'handbag': '👜', 'briefcase': '💼', 'backpack': '🎒', 'shoe': '👞', 'sandal': '👡', 'boot': '👢', 'hat': '👒', 'top_hat': '🎩', 'cap': '🧢', 'crown': '👑', 'scarf': '🧣', 'gloves': '🧤', 'coat': '🧥', 'dress': '👗', 'kimono': '👘', 'bikini': '👙', 'womans_clothes': '👚', 'pocket': '👛', 'folded': '🧎', 'open_hands': '👐', 'raised_hands': '🙌', 'clap': '👏', 'handshake': '🤝', 'pray': '🙏', 'writing': '✍️', 'nail': '💅', 'selfie': '🤳', 'muscle': '💪', 'leg': '🦵', 'foot': '🦶', 'ear': '👂', 'nose': '👃', 'brain': '🧠', 'eyes': '👀', 'eye': '👁️', 'tongue': '👅', 'lips': '👄', 'kiss': '💋', 'love_letter': '💌', 'cupid': '💘', 'gift_heart': '💝', 'revolving_hearts': '💞', 'two_hearts': '💕', 'heartbeat': '💓', 'pulse': '💗', 'sparkling_heart': '💖', 'gift': '🎁', 'balloon': '🎈', 'confetti': '🎊', 'tada': '🎉', 'wind_chime': '🎐', 'izakaya': '🏮', 'red_envelope': '🧧', 'ribbon': '🎀', 'reminder': '🔖', 'tickets': '🎟️', 'military': '🎖️', 'medal_sports': '🏅', 'medal_first': '🥇', 'medal_second': '🥈', 'medal_third': '🥉', 'soccer_ball': '⚽', 'baseball': '⚾', 'golf': '⛳', 'ice_hockey': '🏒', 'ski': '🎿', 'cricket': '🏏', 'volleyball': '🏐', 'rugby': '🏉', 'tennis': '🎾', 'ping_pong': '🏓', 'badminton': '🏸', 'hockey': '🏒', 'goal': '🥅', 'ice_skate': '⛸️', 'fishing': '🎣', 'mask': '🎭', 'art': '🎨', 'clapper': '🎬', 'microphone': '🎤', 'headphones': '🎧', 'musical_score': '🎼', 'musical_keyboard': '🎹', 'drum': '🥁', 'saxophone': '🎷', 'trumpet': '🎺', 'guitar': '🎸', 'violin': '🎻', 'video_game': '🎮', 'slot_machine': '🎰', 'dice': '🎲', 'puzzle': '🧩', 'teddy_bear': '🧸', 'framed_picture': '🖼️', 'thread': '🧵', 'yarn': '🧶', 'scissors': '✂️', 'knife': '🔪', 'dagger': '🗡️', 'crossed_swords': '⚔️', 'shield': '🛡️', 'smoking': '🚬', 'coffin': '⚰️', 'funeral': '⚱️', 'memento': '🗿', 'placard': '🪧', ' identification': '🪪', 'oil': '🛢️', 'bowl': '🥣', 'cup_straw': '🥤', 'chopsticks': '🥢', 'fork_knife': '🍽️', 'spoon': '🥄', 'cooking': '🍳', 'popcorn': '🍿', 'salt': '🧂', 'can': '🥫', 'bento': '🍱', 'rice': '🍙', 'onigiri': '🍙', 'dango': '🍡', 'crab': '🦀', 'lobster': '🦞', 'shrimp': '🦐', 'squid': '🦑', 'fried': '🍟', 'donut': '🍩', 'cookie': '🍪', 'chocolate': '🍫', 'candy': '🍬', 'lollipop': '🍭', 'custard': '🍮', 'honey': '🍯', 'baby_bottle': '🍼', 'milk': '🥛', 'coffee2': '☕', 'tea': '🍵', 'sake': '🍶', 'champagne': '🍾', 'wine': '🍷', 'cocktail': '🍸', 'tropical': '🍹', 'beer': '🍺', 'beers': '🍻', 'clinking': '🥂', 'whisky': '🥃', 'ice_cube': '🧊', 'spoon_straw': '🥄', 'bottle': '🫗', 'cup': '🫖', 'mate': '🧉', 'ice': '🧊', 'chopsticks2': '🥢', 'bowl2': '🍜', 'plate_cutlery': '🍽️', 'fork': '🍴', 'spoon2': '🥄', 'knife2': '🔪', 'amphora': '🏺', 'world_map': '🗺️', 'moyai': '🗿', 'nazar': '🧿', 'ocarina': '🪈', 'diya': '🪔', 'card': '💳', 'atm': '🏧', 'receipt': '🧾', 'abacus': '🧮', 'abacus2': '🧮', 'chart': '📈', 'bar_chart': '📊', 'clipboard': '📋', 'pushpin': '📌', 'round_pushpin': '📍', 'paperclip': '📎', 'scissors2': '✂️', 'triangular_ruler': '📐', 'straight_ruler': '📏', 'bookmark': '🔖', 'label': '🏷️', 'envelope2': '✉️', 'email2': '📧', 'incoming': '📥', 'outgoing': '📤', 'package2': '📦', 'mailbox_closed': '📪', 'mailbox_open': '📬', 'newspaper': '📰', 'rolled_up': '🗞️', 'bookmark_tabs': '📑', 'page_facing_up': '📄', 'page_with_curl': '📃', 'receipt': '🧾', 'ledger': '📒', 'notebook': '📓', 'closed_book': '📕', 'green_book': '📗', 'blue_book': '📘', 'orange_book': '📙', 'books': '📚', 'notebook_with_decorative': '📔', 'bookmark2': '🔖', 'money_with_wings': '💸', 'dollar': '💵', 'yen': '💴', 'euro': '💶', 'pound': '💷', 'coin': '🪙', 'yen2': '💰', 'wallet': '👛', 'purse2': '👛', 'credit_card': '💳', 'handbag2': '👜', 'briefcase2': '💼', 'receipt2': '🧾', 'chart2': '📈', 'chart_down': '📉', 'bar_chart2': '📊', 'pie_chart': '🥧', 'boxing': '🥊', 'martial': '🥋', 'running_shoe': '👟', 'ski2': '🎿', 'sled': '🛷', 'curling_stone': '🥌', 'trophy': '🏆', 'gold': '🥇', 'silver': '🥈', 'bronze': '🥉', 'medal2': '🏅', 'medal3': '🎖️', 'rosette': '🏵️', 'ribbon2': '🎀', 'reminder_ribbon': 'reminder_ribbon', 'ticket2': '🎟️', 'tickets2': '🎟️', 'admission': '🎫', 'pass': '🎫', 'passport2': '🛂', 'baggage_claim': '🛅', 'left_luggage2': '🛅', 'customs2': '🛃', 'warning2': '⚠️', 'children_crossing': '🚸', 'construction': '🚧', 'no_entry2': '🚫', 'no_bicycles': '🚳', 'no_smoking': '🚭', 'do_not': '🚯', 'no_pedestrians': '🚷', 'no_mobile': '📵', 'underage': '🔞', 'radioactive2': '☢️', 'biohazard2': '☣️', 'arrow_up': '⬆️', 'arrow_down': '⬇️', 'arrow_left': '⬅️', 'arrow_right': '➡️', 'arrow_upper_right': '↗️', 'arrow_lower_right': '↘️', 'arrow_lower_left': '↙️', 'arrow_upper_left': '↖️', 'arrow_up_down': '↕️', 'left_right': '↔️', 'arrow_right_hook': '↪️', 'leftwards_arrow': '↩️', 'arrow_heading_up': '⤴️', 'arrow_heading_down': '⤵️', 'arrow_clockwise': '🔄', 'arrow_counterclockwise': '🔃', 'arrow_back': '🔙', 'arrow_end': '🔚', 'arrow_on': '🔛', 'arrow_top': '🔝', 'soon': '🔜', 'arrow_doubles': '➿', 'arrow_doubles2': '➿', 'arrow_doubles3': '➿', 'arrow_doubles4': '➿', 'arrow_doubles5': '➿', 'arrow_doubles6': '➿', 'arrow_doubles7': '➿', 'arrow_doubles8': '➿' };
             const key = m.slice(1, -1);
@@ -26216,13 +26394,13 @@ function renderMarkdown(text) {
 
         if (inCodeBlock) {
             if (line.trim() === '```') {
-                const langAttr = codeBlockLang ? ' data-lang="' + codeBlockLang + '"' : '';
+                const langAttr = codeBlockLang ? ' data-lang="' + escapeMarkdownAttr(codeBlockLang) + '"' : '';
                 // F9: Apply syntax highlighting when a language tag is present
                 var highlightedCode = codeBlockContent;
                 if (codeBlockLang && typeof highlightSyntax === 'function') {
                     highlightedCode = highlightSyntax(codeBlockContent, 'code.' + codeBlockLang, '');
                 }
-                html += '<div style="position:relative;margin:8px 0"><pre style="background:#1e1e1e;border:1px solid #3d3d3d;border-radius:6px;padding:12px;margin:0;overflow-x:auto;font-family:monospace;font-size:13px;color:#d4d4d4;line-height:1.5"' + langAttr + '><code>' + highlightedCode + '</code></pre></div>';
+                html += '<div class="md-code-wrap"><pre class="md-pre"' + langAttr + '><code>' + highlightedCode + '</code></pre></div>';
                 codeBlockContent = '';
                 codeBlockLang = '';
                 inCodeBlock = false;
@@ -26304,16 +26482,13 @@ function renderMarkdown(text) {
         if (line.match(/^#{1,6}\s/)) {
             const level = line.match(/^(#{1,6})\s/)[1].length;
             const content = line.replace(/^#{1,6}\s+/, '');
-            const sizes = { 1: '22px', 2: '19px', 3: '16px', 4: '15px', 5: '14px', 6: '13px' };
-            const weights = { 1: '700', 2: '600', 3: '600', 4: '500', 5: '500', 6: '500' };
-            const margins = { 1: '16px 0 8px', 2: '14px 0 6px', 3: '12px 0 6px', 4: '10px 0 4px', 5: '8px 0 4px', 6: '6px 0 4px' };
-            html += '<h' + level + ' style="color:#e0e0e0;margin:' + margins[level] + ';font-size:' + sizes[level] + ';font-weight:' + weights[level] + '">' + inlineFormat(content) + '</h' + level + '>';
+            html += '<h' + level + ' class="md-h md-h' + level + '">' + inlineFormat(content) + '</h' + level + '>';
             continue;
         }
 
         if (line.match(/^(-{3,}|\*{3,}|_{3,})$/)) {
             closeTable();
-            html += '<hr style="border:none;border-top:1px solid #3d3d3d;margin:12px 0">';
+            html += '<hr class="md-hr">';
             continue;
         }
 
@@ -26323,7 +26498,7 @@ function renderMarkdown(text) {
             continue;
         }
 
-        html += '<div style="margin:4px 0;line-height:1.6">' + inlineFormat(line) + '</div>';
+        html += '<div class="md-p">' + inlineFormat(line) + '</div>';
     }
 
     closeBlockquote();
@@ -28390,19 +28565,19 @@ function openTextEditorModal(file) {
             // overflowed the screen).
             modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:min(96vw,800px);max-height:88vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
                 + '<div style="padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
-                + '<span style="color:#e0e0e0;font-size:15px;font-weight:600"><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Text</span>'
-                + '<span id="text-edit-filename" style="color:#888;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%"></span></div>'
-                + '<div style="flex:1;overflow:hidden;padding:0;min-height:0">'
-                + '<textarea id="text-edit-area" style="width:100%;height:100%;min-height:160px;background:#0d1117;color:#c9d1d9;border:none;padding:16px;font-family:Consolas,Monaco,monospace;font-size:14px;resize:none;outline:none;tab-size:4"></textarea>'
+                + '<span class="u-f72d3dfa" ><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Text</span>'
+                + '<span class="u-0fd6d726" id="text-edit-filename" ></span></div>'
+                + '<div class="u-4dc2ab2b" >'
+                + '<textarea class="u-83fbfbba" id="text-edit-area" ></textarea>'
                 + '</div>'
                 + '<div style="padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
                 + '<div style="display:flex;gap:8px">'
-                + '<button id="text-edit-undo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">' + icon('undo') + ' Undo</button>'
-                + '<button id="text-edit-redo" style="padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px">' + icon('redo') + ' Redo</button>'
-                + '<span id="text-edit-info" style="color:#888;font-size:12px;margin-left:8px"></span></div>'
+                + '<button class="u-4eba1e04" id="text-edit-undo" >' + icon('undo') + ' Undo</button>'
+                + '<button class="u-4eba1e04" id="text-edit-redo" >' + icon('redo') + ' Redo</button>'
+                + '<span class="u-3b5a9e24" id="text-edit-info" ></span></div>'
                 + '<div style="display:flex;gap:8px">'
-                + '<button id="text-edit-cancel" style="padding:8px 18px;border:none;background:#f44336;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">Cancel</button>'
-                + '<button id="text-edit-confirm" style="padding:8px 18px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">' + icon('check') + ' Save & Upload</button>'
+                + '<button class="u-ea740c70" id="text-edit-cancel" >Cancel</button>'
+                + '<button class="u-911b78f9" id="text-edit-confirm" >' + icon('check') + ' Save & Upload</button>'
                 + '</div></div></div>';
             document.body.appendChild(modal);
             // Event handlers
@@ -28574,15 +28749,15 @@ function _sheetBuildModal() {
         modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:none;align-items:center;justify-content:center';
         modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:min(96vw,1000px);max-height:88vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
             + '<div style="padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
-            + '<span style="color:#e0e0e0;font-size:15px;font-weight:600"><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Spreadsheet</span>'
-            + '<span id="sheet-edit-filename" style="color:#888;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%"></span></div>'
+            + '<span class="u-f72d3dfa" ><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Spreadsheet</span>'
+            + '<span class="u-0e71be35" id="sheet-edit-filename" ></span></div>'
             + '<div id="sheet-edit-tabs" style="display:flex;gap:4px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid #333"></div>'
-            + '<div id="sheet-edit-body" style="flex:1;min-height:0;overflow:auto;background:#0d1117"></div>'
+            + '<div class="u-234d094d" id="sheet-edit-body" ></div>'
             + '<div style="padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
-            + '<span id="sheet-edit-info" style="color:#888;font-size:12px"></span>'
+            + '<span class="u-557c1505" id="sheet-edit-info" ></span>'
             + '<div style="display:flex;gap:8px">'
-            + '<button id="sheet-edit-cancel" style="padding:8px 18px;border:none;background:#f44336;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">Cancel</button>'
-            + '<button id="sheet-edit-confirm" style="padding:8px 18px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px">Save &amp; Upload</button>'
+            + '<button class="u-ea740c70" id="sheet-edit-cancel" >Cancel</button>'
+            + '<button class="u-911b78f9" id="sheet-edit-confirm" >Save &amp; Upload</button>'
             + '</div></div></div>';
         document.body.appendChild(modal);
         document.getElementById('sheet-edit-cancel').onclick = function () {
@@ -29468,7 +29643,7 @@ async function loadMediaPreview(container, fileData) {
                 // No filename: it is decrypted user content, and the console is
                 // a surface the project's own R3 rule keeps plaintext out of.
                 console.warn('Audio preview failed:', blob.type, blob.size);
-                container.innerHTML = '<span style="font-size:24px"><svg class="ui-icon" width="24" height="24"><use href="#icon-music"/></svg></span><span style="color:var(--text-muted);font-size:13px">Audio preview unavailable</span>';
+                container.innerHTML = '<span class="u-81351bd1" ><svg class="ui-icon" width="24" height="24"><use href="#icon-music"/></svg></span><span class="u-aad8e636" >Audio preview unavailable</span>';
             };
             // Custom loop toggle next to the native player.
             const audioWrap = document.createElement('div');
@@ -29539,12 +29714,12 @@ async function loadMediaPreview(container, fileData) {
                 var docIcon = getFileIcon(fileData.mime_type, fileData.filename);
                 container.innerHTML = '<div class="doc-preview-hint" style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg-secondary,rgba(255,255,255,0.05));border-radius:8px;cursor:pointer;transition:background .15s" ' +
                     'title="Click to preview">' +
-                    '<span style="font-size:24px">' + docIcon + '</span>' +
-                    '<div style="flex:1;min-width:0">' +
-                        '<div style="font-size:13px;color:var(--text-primary,#eee);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(fileData.filename) + '</div>' +
-                        '<div style="font-size:11px;color:var(--text-muted,#999)">' + formatFileSize(fileData.file_size) + ' — click to preview</div>' +
+                    '<span class="u-81351bd1" >' + docIcon + '</span>' +
+                    '<div class="u-59eddc67" >' +
+                        '<div class="u-28256b04" >' + escapeHtml(fileData.filename) + '</div>' +
+                        '<div class="u-f61207b2" >' + formatFileSize(fileData.file_size) + ' — click to preview</div>' +
                     '</div>' +
-                    '<span style="font-size:18px;opacity:0.6">' + icon('eye', 18) + '</span>' +
+                    '<span class="u-50f2bef5" >' + icon('eye', 18) + '</span>' +
                     '</div>';
                 // Click to open preview modal
                 container.querySelector('.doc-preview-hint').addEventListener('click', function () {
@@ -30257,8 +30432,8 @@ function openMediaViewer(url, type, fileData, galleryItems) {
         const audioInfo = document.createElement('div');
         audioInfo.style.cssText = 'text-align:center;color:#fff;padding:40px 20px;max-width:400px';
         const audioFilename = (fileData && fileData.filename) ? escapeHtml(fileData.filename) : 'Audio';
-        audioInfo.innerHTML = '<div style="font-size:64px;margin-bottom:16px">&#127925;</div>' +
-            '<div style="font-size:16px;margin-bottom:20px;word-break:break-all;opacity:0.9">' + audioFilename + '</div>';
+        audioInfo.innerHTML = '<div class="u-7cbd797d" >&#127925;</div>' +
+            '<div class="u-b4088674" >' + audioFilename + '</div>';
         content.appendChild(audioInfo);
         audio.src = url;
         audio.controls = false;
@@ -30375,7 +30550,7 @@ function navigateViewer(direction) {
         const img = document.createElement('img');
         img.src = item.url;
         img.draggable = false;
-        img.onerror = () => { content.innerHTML = '<div style="color:#fff;text-align:center;padding:40px">Failed to load image</div>'; };
+        img.onerror = () => { content.innerHTML = '<div class="u-a6f880c2" >Failed to load image</div>'; };
         img.addEventListener('mousedown', (e) => {
             e.preventDefault();
             if (!viewerZoomed) {
@@ -30397,7 +30572,7 @@ function navigateViewer(direction) {
         video.src = item.url;
         video.controls = false;
         video.playsInline = true;
-        video.onerror = () => { content.innerHTML = '<div style="color:#fff;text-align:center;padding:40px">Failed to load video</div>'; };
+        video.onerror = () => { content.innerHTML = '<div class="u-a6f880c2" >Failed to load video</div>'; };
         content.appendChild(video);
         videoControls.style.display = 'flex';
         audioControls.style.display = 'none';
@@ -30406,7 +30581,7 @@ function navigateViewer(direction) {
         const audio = document.createElement('audio');
         audio.src = item.url;
         audio.controls = false;
-        audio.onerror = () => { content.innerHTML = '<div style="color:#fff;text-align:center;padding:40px">Failed to load audio</div>'; };
+        audio.onerror = () => { content.innerHTML = '<div class="u-a6f880c2" >Failed to load audio</div>'; };
         content.appendChild(audio);
         videoControls.style.display = 'none';
         audioControls.style.display = 'flex';
@@ -31328,7 +31503,7 @@ function renderEmojiGrid(container, searchQuery) {
     grid.className = 'emoji-grid';
 
     if (filtered !== null && filtered.length === 0) {
-        grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#888;padding:20px;font-size:13px;">No emojis matching &quot;' + escapeHtml(searchQuery) + '&quot;</div>';
+        grid.innerHTML = '<div class="u-cbf99aca" >No emojis matching &quot;' + escapeHtml(searchQuery) + '&quot;</div>';
         container.appendChild(grid);
         return;
     }
@@ -31728,7 +31903,7 @@ function renderStickerGrid(container) {
     loadUserStickers().then(stickers => {
         container.innerHTML = '';
         if (!stickers || stickers.length === 0) {
-            container.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px;">No stickers yet. Use the + tab to upload one.</div>';
+            container.innerHTML = '<div class="u-9c7335bf" >No stickers yet. Use the + tab to upload one.</div>';
             return;
         }
         const searchBar = document.createElement('div');
@@ -31881,7 +32056,7 @@ function renderGifPanel(container, searchQuery) {
         }
         
         if (gifs.length === 0) {
-            grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#888;padding:20px;font-size:13px;">' +
+            grid.innerHTML = '<div class="u-cbf99aca" >' +
                 (query ? 'No GIFs matching &quot;' + escapeHtml(query) + '&quot;' : 'No GIFs yet. Upload one from the + tab.') +
                 '</div>';
             return;
@@ -32185,15 +32360,15 @@ async function sendStickerMessage(sticker) {
 function renderUploadStickerPanel(container) {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'padding:16px;text-align:center;';
-    wrap.innerHTML = '<p style="color:#888;font-size:13px;margin-bottom:12px;">Add to your personal collection</p>' +
+    wrap.innerHTML = '<p class="u-696ae0ee" >Add to your personal collection</p>' +
         '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">' +
-        '<button id="sticker-upload-trigger" style="background:var(--accent);color:var(--bg-primary);border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">' + icon('image') + ' Upload Sticker</button>' +
-        '<button id="gif-upload-trigger" style="background:#2a6a3a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">' + icon('video') + ' Upload GIF</button>' +
-        '<button id="emoji-upload-trigger" style="background:#6a3a8a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">😊 Upload Emoji</button>' +
+        '<button class="u-79fb88bd" id="sticker-upload-trigger" >' + icon('image') + ' Upload Sticker</button>' +
+        '<button class="u-2b9c48bc" id="gif-upload-trigger" >' + icon('video') + ' Upload GIF</button>' +
+        '<button class="u-5f6fbce5" id="emoji-upload-trigger" >😊 Upload Emoji</button>' +
         '</div>' +
-        '<p style="color:#666;font-size:11px;margin-top:10px;">Emoji: small inline images • use :emoji_name: in messages to insert</p>' +
-        '<p style="color:#666;font-size:11px;margin-top:4px;">Stickers: cropped to square • GIFs always uploaded as-is</p>' +
-        '<div style="margin-top:16px;"><button id="sticker-upload-cancel-btn" style="background:rgba(255,255,255,0.1);color:#aaa;border:1px solid #444;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;transition:all 0.15s;">Cancel</button></div>';
+        '<p class="u-a4bd636e" >Emoji: small inline images • use :emoji_name: in messages to insert</p>' +
+        '<p class="u-30016dd2" >Stickers: cropped to square • GIFs always uploaded as-is</p>' +
+        '<div class="u-8a359a76" ><button class="u-1f0f0af8" id="sticker-upload-cancel-btn" >Cancel</button></div>';
     container.appendChild(wrap);
 
     // Cancel button closes the sticker panel
@@ -32739,14 +32914,14 @@ function showDmForwardModal() {
 async function loadDmForwardList() {
     const list = document.getElementById('dm-forward-list');
     if (!list) return;
-    list.innerHTML = '<div style="color:#888;padding:12px;">Loading friends...</div>';
+    list.innerHTML = '<div class="u-645f25b7" >Loading friends...</div>';
     try {
         // Use already-loaded dmConversations data
         if (!dmConversations || dmConversations.length === 0) {
             await loadDmConversations();
         }
         if (!Array.isArray(dmConversations) || dmConversations.length === 0) {
-            list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No friends to forward to.</div>';
+            list.innerHTML = '<div class="u-cd87cd9e" >No friends to forward to.</div>';
             return;
         }
         let html = '';
@@ -32761,14 +32936,14 @@ async function loadDmForwardList() {
             var fwdColor = (_fwdCache && _fwdCache.username_color) || null;
             var fwdBorderColor = (_fwdCache && _fwdCache.username_border_color) || null;
             var fwdNameStyle = fwdColor ? 'font-size:14px;color:' + fwdColor + ';text-shadow:' + getDisplayNameTextShadow(fwdColor, fwdBorderColor) : 'font-size:14px;color:var(--text-primary)';
-            var usernameHtml = (c.other_username && fwdDisplayName !== c.other_username) ? '<span style="font-size:12px;color:var(--text-muted);margin-left:6px;">@' + escapeHtml(c.other_username) + '</span>' : '';
+            var usernameHtml = (c.other_username && fwdDisplayName !== c.other_username) ? '<span class="u-dfc3cbc1" >@' + escapeHtml(c.other_username) + '</span>' : '';
             html += '<div class="dm-forward-item" data-user-id="' + c.other_user_id + '" data-username="' + escapeAttr(c.other_username) + '" data-dm-channel-id="' + escapeAttr(c.dm_channel_id || '') + '" data-search-term="' + escapeAttr((fwdDisplayName + ' ' + (c.other_username || '')).toLowerCase()) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-radius:6px;border-bottom:1px solid var(--bg-border);transition:background .15s;">' +
                 avatarHtml +
                 '<span style="' + fwdNameStyle + ';">' + escapeHtml(fwdDisplayName) + usernameHtml + '</span>' +
                 '</div>';
         }
         if (!html) {
-            list.innerHTML = '<div style="color:#666;padding:12px;font-size:13px;">No friends to forward to.</div>';
+            list.innerHTML = '<div class="u-cd87cd9e" >No friends to forward to.</div>';
             return;
         }
         list.innerHTML = html;
@@ -32785,7 +32960,7 @@ async function loadDmForwardList() {
             });
         });
     } catch (e) {
-        list.innerHTML = '<div style="color:#666;padding:12px;">Failed to load friends.</div>';
+        list.innerHTML = '<div class="u-9e4aa9b0" >Failed to load friends.</div>';
     }
     // Wire up DM search
     var dmSearchInput = document.getElementById('dm-forward-search');
@@ -33084,7 +33259,7 @@ document.addEventListener('click', function (e) {
 // the DM list, the open server's member list, or our own id.
 function resolveRawUserId(userId) {
     if (!userId || userId.length !== 64 || !/^[a-f0-9]{64}$/i.test(userId)) return userId;
-    var _hk = localStorage.getItem('e2e_hmac_key');
+    var _hk = cachedHmacKey();
     if (!_hk) return userId;
     var resolved = userId;
     // Try DM conversations to find the raw UUID
@@ -34555,11 +34730,11 @@ function updateServerSettingsPreview() {
         } else {
             // Trigger async fetch; show fallback for now
             getServerPictureUrl(srv.server_picture_file_id, srv.id);
-            preview.innerHTML = '<span style="font-size:22px;font-weight:700;">' + (serverName ? serverName.charAt(0).toUpperCase() : '#') + '</span>';
+            preview.innerHTML = '<span class="u-38fd0e12" >' + (serverName ? serverName.charAt(0).toUpperCase() : '#') + '</span>';
         }
         if (removeBtn) removeBtn.style.display = '';
     } else {
-        preview.innerHTML = '<span style="font-size:22px;font-weight:700;">' + (serverName ? serverName.charAt(0).toUpperCase() : '#') + '</span>';
+        preview.innerHTML = '<span class="u-38fd0e12" >' + (serverName ? serverName.charAt(0).toUpperCase() : '#') + '</span>';
         if (removeBtn) removeBtn.style.display = 'none';
     }
 }
@@ -34632,7 +34807,7 @@ function renderBorderGlowOptions(baseColor, selectedBorderColor) {
     
     var options = generateBorderGlowOptions(baseColor);
     if (!options || options.length === 0) {
-        container.innerHTML = '<div style="color:#888;font-size:13px;padding:8px 0;">Select a username color first to see glow options</div>';
+        container.innerHTML = '<div class="u-d301eafb" >Select a username color first to see glow options</div>';
         return;
     }
     
@@ -34939,7 +35114,7 @@ async function openProfileModal(userId) {
     document.getElementById('profile-modal-display-name').textContent = 'Loading...';
     document.getElementById('profile-modal-nickname').textContent = '';
     document.getElementById('profile-modal-description').textContent = '';
-    document.getElementById('profile-modal-avatar').innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">...</div>';
+    document.getElementById('profile-modal-avatar').innerHTML = '<div class="u-619874db" >...</div>';
     document.getElementById('profile-modal-username-tag').textContent = '';
     document.getElementById('profile-edit-btn').style.display = 'none';
 
@@ -35229,11 +35404,11 @@ function renderProfileView(data, decrypted, uid) {
             if (url) {
                 avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
             } else {
-                avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
+                avatarEl.innerHTML = '<div class="u-619874db" >' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
             }
         }, uid);
     } else {
-        avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
+        avatarEl.innerHTML = '<div class="u-619874db" >' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
     }
     
     // Show edit button only for own profile
@@ -35500,11 +35675,11 @@ function updateProfileEditPreview() {
                 if (url) {
                     avatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
                 } else {
-                    avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+                    avatarEl.innerHTML = '<div class="u-619874db" >' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
                 }
             });
         } else {
-            avatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
+            avatarEl.innerHTML = '<div class="u-619874db" >' + escapeHtml(dn.charAt(0).toUpperCase()) + '</div>';
         }
     }
     
@@ -35529,7 +35704,7 @@ function updateProfileEditPreview() {
                 if (url) {
                     viewAvatarEl.innerHTML = '<img src="' + url + '" alt="Avatar">';
                 } else {
-                    viewAvatarEl.innerHTML = '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(dn2.charAt(0).toUpperCase()) + '</div>';
+                    viewAvatarEl.innerHTML = '<div class="u-619874db" >' + escapeHtml(dn2.charAt(0).toUpperCase()) + '</div>';
                 }
             });
         }
@@ -35689,7 +35864,9 @@ async function verifyStoredPassword() {
             try {
                 sendPassword = await computeHashedPasswordGlobal(stored);
             } catch (_) {
-                sendPassword = stored; // Fall back to raw password for legacy accounts
+                // No raw-password fallback: without the auth key we cannot
+                // prove the password. Fall through to asking the user.
+                throw new Error('auth key unavailable');
             }
             var res = await authFetch('/api/reauth', {
                 method: 'POST',
@@ -35710,17 +35887,12 @@ async function verifyStoredPassword() {
             // Try logging in as a fallback before prompting the user.
             if (user && user.username) {
                 try {
-                    // Hash password client-side (HMAC-SHA256) if auth key is available
-                    var loginPassword;
-                    try {
-                        loginPassword = await computeHashedPasswordGlobal(stored);
-                    } catch (_) {
-                        loginPassword = stored; // Fall back to raw password for legacy accounts
-                    }
+                    // F3 — build the body through the shared helper: the
+                    // account signs a fresh server nonce.
                     var loginRes = await fetch('/api/login', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ username: user.username, password: loginPassword })
+                        body: JSON.stringify(await E2ECrypto.loginRequestBody(user.username, stored))
                     });
                     if (loginRes.ok) {
                         var loginData = await loginRes.json();
@@ -35743,20 +35915,20 @@ async function verifyStoredPassword() {
         // Also update the token via reauth with the new password
         try {
             // Hash password client-side (HMAC-SHA256) if auth key is available
-            var reauthPassword;
+            var reauthPassword = null;
             try {
                 reauthPassword = await computeHashedPasswordGlobal(newPassword);
-            } catch (_) {
-                reauthPassword = newPassword; // Fall back to raw password for legacy accounts
-            }
-            var pwRes = await authFetch('/api/reauth', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: reauthPassword })
-            });
-            if (pwRes.ok) {
-                var pwData = await pwRes.json();
-                if (pwData && pwData.token) localStorage.setItem('token', pwData.token);
+            } catch (_) {}
+            if (reauthPassword) {
+                var pwRes = await authFetch('/api/reauth', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: reauthPassword })
+                });
+                if (pwRes.ok) {
+                    var pwData = await pwRes.json();
+                    if (pwData && pwData.token) localStorage.setItem('token', pwData.token);
+                }
             }
         } catch (_) {}
         return newPassword;
@@ -36505,7 +36677,7 @@ function cancelPfpCrop() {
         var avatarEl = document.getElementById('profile-modal-avatar');
         var editAvatarEl = document.getElementById('profile-edit-avatar');
         var restoreFn = function(url) {
-            var html = url ? '<img src="' + url + '" alt="Avatar">' : '<div style="font-size:36px;color:#1a1a2e;font-weight:700;">' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
+            var html = url ? '<img src="' + url + '" alt="Avatar">' : '<div class="u-619874db" >' + escapeHtml(displayName.charAt(0).toUpperCase()) + '</div>';
             if (avatarEl) avatarEl.innerHTML = html;
             if (editAvatarEl) editAvatarEl.innerHTML = html;
         };
@@ -36683,19 +36855,19 @@ function buildLinkPreviewHtml(preview) {
         html += '<img src="' + escapeHtml(preview.image) + '" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.style.display=\'none\'">';
         html += '</div>';
     }
-    html += '<div style="padding:8px 12px;flex:1;min-width:0">';
+    html += '<div class="u-b1c7aec9" >';
     if (preview.site_name) {
-        html += '<div style="font-size:11px;color:var(--text-muted,#888);text-transform:uppercase;margin-bottom:2px">' + escapeHtml(preview.site_name) + '</div>';
+        html += '<div class="u-6168431f" >' + escapeHtml(preview.site_name) + '</div>';
     }
     if (preview.title) {
-        html += '<div style="font-size:13px;font-weight:600;color:var(--text-primary,#e0e0e0);margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(preview.title) + '</div>';
+        html += '<div class="u-0b6a313a" >' + escapeHtml(preview.title) + '</div>';
     }
     if (preview.description) {
         var desc = preview.description.length > 120 ? preview.description.substring(0, 120) + '…' : preview.description;
         html += '<div style="font-size:12px;color:var(--text-muted,#888);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + escapeHtml(desc) + '</div>';
     }
     if (preview.domain) {
-        html += '<div style="font-size:11px;color:var(--accent,#4fc3f7);margin-top:4px">' + escapeHtml(preview.domain) + '</div>';
+        html += '<div class="u-adb28073" >' + escapeHtml(preview.domain) + '</div>';
     }
     html += '</div></div>';
     return html;

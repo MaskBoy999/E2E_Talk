@@ -436,7 +436,7 @@
                             '<span class="thread-msg-time">' + threadTime(msg.timestamp) + '</span>' +
                         '</div>' +
                         '<div class="thread-msg-content">' +
-                            (plaintext ? escapeHtml(plaintext) : '<span style="color:#666">[encrypted]</span>') +
+                            (plaintext ? escapeHtml(plaintext) : '<span class="u-5db4a70b" >[encrypted]</span>') +
                         '</div>' +
                     '</div>';
 
@@ -881,7 +881,7 @@
 
         if (!channels || channels.length === 0) {
 
-            list.innerHTML = '<div class="channel-item" style="color:#666;cursor:default">No channels yet</div>';
+            list.innerHTML = '<div class="channel-item u-aff4273c" >No channels yet</div>';
 
             return;
 
@@ -2075,9 +2075,9 @@
 
         var html = '<div class="shortcut-settings">';
 
-        html += '<h3 style="color:#e0e0e0;margin:16px 0 8px">Keyboard Shortcuts</h3>';
+        html += '<h3 class="u-203546eb" >Keyboard Shortcuts</h3>';
 
-        html += '<p style="color:#888;font-size:12px;margin-bottom:12px">Click a shortcut to remap it. Press the new key combination to set it.</p>';
+        html += '<p class="u-95638582" >Click a shortcut to remap it. Press the new key combination to set it.</p>';
 
 
 
@@ -2950,19 +2950,24 @@
 
     function fetchCssSlots() {
         if (_cssSlotsCache) return Promise.resolve(_cssSlotsCache);
-        return authFetch('/api/user-css/slots').then(function (r) { return r.json(); }).then(function (data) {
+        return authFetch('/api/user-css/slots').then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }).then(function (data) {
             _cssSlotsCache = data;
             return data;
         }).catch(function () {
-            _cssSlotsCache = { slot1: { encrypted_css: '' }, slot2: { encrypted_css: '' }, active_slot: 0 };
-            return _cssSlotsCache;
+            // Do NOT cache the failure: on startup the session token can still
+            // be restoring from secure storage, and caching `active_slot: 0`
+            // here would silently drop the user's CSS for the whole session.
+            return { slot1: { encrypted_css: '' }, slot2: { encrypted_css: '' }, active_slot: 0, _failed: true };
         });
     }
 
     function invalidateCssSlotCache() { _cssSlotsCache = null; }
 
     function renderCustomCssSettings(container) {
-        container.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)"><div style="display:inline-block;width:28px;height:28px;border:3px solid #444;border-top-color:var(--accent,#4fc3f7);border-radius:50%;animation:css-spin .6s linear infinite"></div><div style="margin-top:8px;font-size:13px">Loading CSS settings\u2026</div><style>@keyframes css-spin{to{transform:rotate(360deg)}}</style></div>';
+        container.innerHTML = '<div class="u-3936d22c" ><div style="display:inline-block;width:28px;height:28px;border:3px solid #444;border-top-color:var(--accent,#4fc3f7);border-radius:50%;animation:css-spin .6s linear infinite"></div><div class="u-fc09feb0" >Loading CSS settings\u2026</div></div>';
 
         fetchCssSlots().then(function (slotsData) {
             var activeSlot = slotsData.active_slot || 0;
@@ -2972,9 +2977,9 @@
             var html = '<div class="custom-css-settings-inner">';
 
             // ── Slot Selector ──
-            html += '<div style="margin-bottom:16px">';
-            html += '<h3 style="color:var(--text-primary);margin:0 0 8px;font-size:14px">CSS Source</h3>';
-            html += '<p style="color:var(--text-muted);font-size:12px;margin:0 0 12px">Choose which stylesheet to use. Custom CSS is encrypted and stored on the server.</p>';
+            html += '<div class="u-87c136df" >';
+            html += '<h3 class="u-87d82625" >CSS Source</h3>';
+            html += '<p class="u-a3ede179" >Choose which stylesheet to use. Custom CSS is encrypted and stored on the server.</p>';
             html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
 
             var slots = [
@@ -2988,7 +2993,7 @@
                 var opacity = (!active && !s.hasContent) ? '0.5' : '1';
                 html += '<div data-css-slot="' + s.id + '" style="cursor:pointer;padding:10px 16px;border-radius:8px;border:2px solid ' + (active ? s.color : '#333') + ';background:' + (active ? s.color + '22' : '#1a1a2e') + ';min-width:120px;text-align:center;opacity:' + opacity + ';transition:all .2s">';
                 html += '<div style="color:' + (active ? s.color : '#ccc') + ';font-weight:600;font-size:13px;margin-bottom:4px">' + s.label + '</div>';
-                html += '<div style="color:#888;font-size:10px">' + s.desc + '</div>';
+                html += '<div class="u-f3a25817" >' + s.desc + '</div>';
                 html += '</div>';
             });
 
@@ -3057,19 +3062,19 @@
             html += '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">';
 
             if (isEditing && parseInt(isEditing) === activeSlot) {
-                html += '<button id="css-save-slot" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">' + icon('check') + ' Save & Apply</button>';
-                html += '<button id="css-preview" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('eye') + ' Preview</button>';
-                html += '<button id="css-import-file" style="padding:10px 20px;border-radius:8px;border:2px solid #666;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('upload') + ' Import .css</button>';
-                html += '<button id="css-cancel-edit" style="padding:10px 20px;border-radius:8px;border:2px solid #888;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('close') + ' Cancel</button>';
-                html += '<button id="css-clear-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #f44336;background:rgba(244,67,54,0.1);color:#f44336;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('trash') + ' Clear Slot</button>';
+                html += '<button class="u-c8d3b8b1" id="css-save-slot" >' + icon('check') + ' Save & Apply</button>';
+                html += '<button class="u-c30d98a7" id="css-preview" >' + icon('eye') + ' Preview</button>';
+                html += '<button class="u-90863b19" id="css-import-file" >' + icon('upload') + ' Import .css</button>';
+                html += '<button class="u-6d5fff1f" id="css-cancel-edit" >' + icon('close') + ' Cancel</button>';
+                html += '<button class="u-94cf6807" id="css-clear-slot" >' + icon('trash') + ' Clear Slot</button>';
             } else if (activeSlot > 0) {
-                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">' + icon('copy') + ' Copy CSS</button>';
-                html += '<button id="css-edit-slot" style="padding:10px 20px;border-radius:8px;border:2px solid #e0e0e0;background:rgba(224,224,224,0.1);color:#e0e0e0;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('edit') + ' Edit</button>';
-                html += '<button id="css-export" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('download') + ' Export</button>';
-                html += '<button id="css-import-backup" style="padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('upload') + ' Import Backup</button>';
+                html += '<button class="u-c8d3b8b1" id="css-copy" >' + icon('copy') + ' Copy CSS</button>';
+                html += '<button class="u-5778f204" id="css-edit-slot" >' + icon('edit') + ' Edit</button>';
+                html += '<button class="u-5607bbc6" id="css-export" >' + icon('download') + ' Export</button>';
+                html += '<button class="u-5607bbc6" id="css-import-backup" >' + icon('upload') + ' Import Backup</button>';
             } else {
-                html += '<button id="css-copy" style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3)">' + icon('copy') + ' Copy CSS</button>';
-                html += '<button id="css-refresh" style="padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s">' + icon('refresh') + ' Refresh</button>';
+                html += '<button class="u-c8d3b8b1" id="css-copy" >' + icon('copy') + ' Copy CSS</button>';
+                html += '<button class="u-c30d98a7" id="css-refresh" >' + icon('refresh') + ' Refresh</button>';
             }
 
             html += '</div>';
@@ -3306,14 +3311,30 @@
         });
     }
 
-    // Auto-load active slot CSS on page load
-    function _loadActiveSlotCss() {
+    // Auto-load active slot CSS on page load. Startup races the secure-storage
+    // restore of the session token and identity key, so retry briefly instead
+    // of leaving the user without CSS until they re-open the settings tab.
+    function _loadActiveSlotCss(attempt) {
+        attempt = attempt || 0;
         fetchCssSlots().then(function (data) {
-            if (data.active_slot > 0) _applyServerSlot(data.active_slot);
+            var slot = data.active_slot > 0 ? data['slot' + data.active_slot] : null;
+            if (slot && slot.encrypted_css) {
+                var css = _decryptCss(slot.encrypted_css, slot.nonce);
+                if (css) { applyCustomCss(css); return; }
+            }
+            var pending = !!data._failed || !!(slot && slot.encrypted_css);
+            if (pending && attempt < 20) {
+                setTimeout(function () { _loadActiveSlotCss(attempt + 1); }, 750);
+            }
         });
     }
     window.renderCustomCssSettings = renderCustomCssSettings;
     window.applyCustomCss = applyCustomCss;
     window.invalidateCssSlotCache = invalidateCssSlotCache;
+    // chat.js's startup hook calls this to restore the active CSS slot. It must
+    // be on `window`: everything here lives inside an IIFE, and a bare
+    // `_loadActiveSlotCss` is invisible to chat.js (which loads afterwards), so
+    // the slot CSS would only appear once the settings tab was opened.
+    window._loadActiveSlotCss = _loadActiveSlotCss;
 
 })();

@@ -460,25 +460,82 @@ struct OutgoingChatMessage {
 
 pub async fn ws_handler(
     headers: HeaderMap,
-    ws: WebSocketUpgrade,
+    mut ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // F6 — Cross-Site WebSocket Hijacking guard: browsers always send an
-    // Origin on WS handshakes. If present and it does not match the Host
-    // (scheme ignored), refuse the upgrade. Clients without an Origin header
-    // (native apps, headless tools) are allowed — Bearer auth still applies.
+    // Origin on WS handshakes. A `null` origin (sandboxed iframe / data: page)
+    // is never this app, and a mismatched origin is an attack; both are
+    // refused. Clients without an Origin header (native apps, headless tools)
+    // are allowed — Bearer auth still applies. Fetch Metadata is checked too:
+    // a handshake a browser itself labels cross-site is refused even if the
+    // Origin header was somehow omitted.
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if origin == "null" {
+            return StatusCode::FORBIDDEN.into_response();
+        }
         if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
-            if origin != "null" && !crate::origin_host_matches(origin, host) {
+            if !crate::origin_host_matches(origin, host) {
                 return StatusCode::FORBIDDEN.into_response();
             }
         }
     }
+    if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if site.eq_ignore_ascii_case("cross-site") {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     let client_ip = get_client_ip(&headers);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip))
+    // Finding 7 — message/frame caps + the per-socket inbound budget are
+    // admin-configurable (KB/MB/GB in the panel), so one socket can neither
+    // make the server buffer megabytes per message nor have a broadcast
+    // amplified to N sockets unbounded. 0 = no cap (operator's choice).
+    let (
+        max_message,
+        max_frame,
+        budget_bytes,
+        budget_window_secs,
+        ws_auth_max,
+        ws_auth_window_secs,
+    ) = {
+        let t = state.runtime_tuning.read().unwrap();
+        (
+            t.ws_max_message_bytes,
+            t.ws_max_frame_bytes,
+            t.ws_socket_budget_bytes,
+            t.ws_socket_budget_window_secs,
+            t.ws_auth_max,
+            t.ws_auth_window_secs,
+        )
+    };
+    if max_message > 0 {
+        ws = ws.max_message_size(max_message as usize);
+    }
+    if max_frame > 0 {
+        ws = ws.max_frame_size(max_frame as usize);
+    }
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            state,
+            client_ip,
+            budget_bytes,
+            budget_window_secs,
+            ws_auth_max,
+            ws_auth_window_secs,
+        )
+    })
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: String) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    client_ip: String,
+    budget_bytes: u64,
+    budget_window_secs: u64,
+    ws_auth_max: u32,
+    ws_auth_window_secs: u64,
+) {
     let (mut sender, mut receiver) = socket.split();
 
     let (user_id, device_id, last_seen_timestamp) = loop {
@@ -522,7 +579,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
                             }
                             Err(_) => {
                                 // Rate limit failed auth attempts per IP
-                                if !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), 10, Duration::from_secs(60)) {
+                                // (live-tunable; 0 = disabled).
+                                if ws_auth_max > 0 && !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), ws_auth_max, Duration::from_secs(ws_auth_window_secs)) {
                                     let err = OutgoingMessage {
                                         msg_type: "auth_error".to_string(),
                                         channel_id: None,
@@ -557,7 +615,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
                     }
             _ => {
                         // Rate limit non-auth first messages per IP
-                        if !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), 10, Duration::from_secs(60)) {
+                        // (live-tunable; 0 = disabled).
+                        if ws_auth_max > 0 && !WS_AUTH_RATE_LIMITER.check_and_increment(&format!("ws_auth:{}", client_ip), ws_auth_max, Duration::from_secs(ws_auth_window_secs)) {
                             let err = OutgoingMessage {
                                 msg_type: "auth_error".to_string(),
                                 channel_id: None,
@@ -707,7 +766,35 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, client_ip: Strin
     let user_id_clone = user_id.clone();
 
     let mut recv_task = tokio::spawn(async move {
+        // Per-connection inbound budget (admin-configurable, default 32 MiB /
+        // 10 s). A message is already capped by the upgrade limits, so this
+        // only ever trips on a sustained flood — at which point the socket is
+        // closed instead of the server grinding through it. 0 = no budget.
+        let budget_window =
+            std::time::Duration::from_secs(budget_window_secs.max(1));
+        let budget_bytes = budget_bytes as usize;
+        let mut window_start = std::time::Instant::now();
+        let mut window_bytes: usize = 0;
         while let Some(Ok(msg)) = receiver.next().await {
+            let size = match &msg {
+                Message::Text(text) => text.len(),
+                Message::Binary(data) => data.len(),
+                _ => 0,
+            };
+            if size > 0 {
+                if window_start.elapsed() >= budget_window {
+                    window_start = std::time::Instant::now();
+                    window_bytes = 0;
+                }
+                window_bytes = window_bytes.saturating_add(size);
+                if budget_bytes > 0 && window_bytes > budget_bytes {
+                    tracing::warn!(
+                        "WS inbound budget exceeded for user {}; closing connection",
+                        user_id_clone
+                    );
+                    break;
+                }
+            }
             match msg {
                 Message::Text(text) => {
                     handle_ws_message(text.as_str(), &state_clone, &user_id_clone).await;
@@ -759,7 +846,7 @@ pub(crate) async fn deliver_encrypted_notification(
     notification_type: &str,
     payload: &str,
 ) {
-    let blind_type = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("notif_type:{}", notification_type));
+    let blind_type = state.client_hmac_hex(&format!("notif_type:{}", notification_type));
     for uid in user_ids {
         if state.ws_manager.is_user_connected(uid).await {
             if let Ok(enc) = state.db.encrypt_notification_for_user(uid, payload) {
@@ -771,7 +858,7 @@ pub(crate) async fn deliver_encrypted_notification(
                 state.ws_manager.broadcast_to_users(&[uid.clone()], &wrapper.to_string()).await;
             }
         } else {
-            let _ = state.db.save_pending_notification(uid, notification_type, payload, state.config.hmac_key.as_bytes());
+            let _ = state.db.save_pending_notification(uid, notification_type, payload, state.config.client_key.as_bytes());
         }
     }
 }
@@ -941,12 +1028,18 @@ async fn handle_ws_binary(
 
     let room_id = voice_room_id(&room_type, &channel_id, &dm_channel_id);
 
-    // Rate limit
-    if !VOICE_SIGNAL_LIMITER.check_and_increment(
-        &format!("voice_media:{}", user_id),
-        3000,
-        Duration::from_secs(10),
-    ) {
+    // Rate limit (admin-tunable: Runtime Limits → voice media budget).
+    let (voice_max, voice_window): (u32, u64) = {
+        let t = state.runtime_tuning.read().unwrap();
+        (t.voice_media_max, t.voice_media_window_secs)
+    };
+    if voice_max > 0
+        && !VOICE_SIGNAL_LIMITER.check_and_increment(
+            &format!("voice_media:{}", user_id),
+            voice_max,
+            Duration::from_secs(voice_window),
+        )
+    {
         return;
     }
 
@@ -1127,7 +1220,7 @@ async fn handle_ws_message(
                 server_id: Some(server_id_clone),
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
-                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_id: state.client_hmac_hex(user_id),
                     sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: message.channel_id,
@@ -1314,7 +1407,7 @@ async fn handle_ws_message(
                 server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
-                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_id: state.client_hmac_hex(user_id),
                     sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: String::new(),
@@ -1363,7 +1456,7 @@ async fn handle_ws_message(
                                 "type": "dm_new",
                                 "dm_channel_id": dm_channel_id,
                             });
-                            let _ = state.db.save_pending_notification(member_id, "dm_new", &dm_notif.to_string(), state.config.hmac_key.as_bytes());
+                            let _ = state.db.save_pending_notification(member_id, "dm_new", &dm_notif.to_string(), state.config.client_key.as_bytes());
                         }
                     }
                 }
@@ -1454,7 +1547,7 @@ async fn handle_ws_message(
                 server_id: Some(server_id.clone()),
                 dm_channel_id: None,
                 message: Some(OutgoingChatMessage {
-                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_id: state.client_hmac_hex(user_id),
                     sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: message.channel_id,
@@ -1578,7 +1671,7 @@ async fn handle_ws_message(
                 server_id: None,
                 dm_channel_id: Some(message.dm_channel_id.clone()),
                 message: Some(OutgoingChatMessage {
-                    sender_id: crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), user_id),
+                    sender_id: state.client_hmac_hex(user_id),
                     sender_user_id: Some(user_id.to_string()),
                     id: message.id,
                     channel_id: String::new(),

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "wipe-overlay",
+  "description": "The native always-on \"clear all app data\" overlay window (box-wipe.html). It renders a button and a panel and needs exactly one thing from the shell: the event channel. No window control, no webview API, no filesystem, no shell, no app commands.",
+  "windows": ["box-wipe"],
+  "permissions": ["core:event:default"]
+}

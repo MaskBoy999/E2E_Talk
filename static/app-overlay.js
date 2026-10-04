@@ -40,6 +40,17 @@
  *     identity data — re-typing it after every wipe is pure friction), and
  *   - the native vault/session ticket dies with the storage it lives in.
  *
+ * On **desktop** the button itself is no longer drawn here at all: the shell
+ * owns a separate, tiny, always-on-top window (`static/box-wipe.html`) that it
+ * creates at launch and never navigates, so the control survives the states
+ * this file cannot reach — the WebView's own error page, a blank/grey boot,
+ * anything where no script of ours runs. The shell sets
+ * `__E2E_NATIVE_WIPE_OVERLAY__` in those windows before any page script runs,
+ * and this file then keeps its other jobs: the liveness beacon below,
+ * `window.__appWipe`, and the `box:wipe-requested` handler that runs the page
+ * half of a wipe. Android has no second window to put the button in, so there
+ * the page still draws it.
+ *
  * Hiding the button: pressing it opens a small panel, and "Hide" drops the
  * button for the rest of this *run of the app*. The flag rides in `window.name`,
  * which is the one piece of state that does exactly that: the browser keeps it
@@ -282,11 +293,11 @@
         panel.setAttribute('aria-label', 'Clear all app data');
         panel.setAttribute('data-app-wipe-panel', '');
         panel.innerHTML =
-            '<div style="font-size:14px;font-weight:700;margin-bottom:6px">Clear all app data</div>' +
-            '<div style="color:#949ba4;margin-bottom:12px">Erases every login, key, setting and cached file ' +
+            '<div class="u-0df13a66" >Clear all app data</div>' +
+            '<div class="u-4633c681" >Erases every login, key, setting and cached file ' +
             'stored on this device, and forgets the saved server connection — you will have to enter the ' +
             'address again. Messages stay on the server; they are not deleted. This cannot be undone.</div>' +
-            '<div data-app-wipe-status style="min-height:16px;margin-bottom:10px;font-size:12px;color:#949ba4"></div>' +
+            '<div class="u-28ee9863" data-app-wipe-status ></div>' +
             '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
             '<button type="button" data-app-wipe-erase style="' + BTN +
             'border-color:#ed4245;background:rgba(237,66,69,0.12);color:#ed4245">Erase everything</button>' +
@@ -380,10 +391,37 @@
      * the app" true in every state, not just the happy one.
      */
     function ensureButton() {
+        if (nativeOverlayOwnsButton()) return; // the shell's own window draws it (desktop)
         if (hiddenState() !== 'none') return;
         if (!document.body) return;
         if (_button && _button.isConnected) return;
         buildButton();
+    }
+
+    /** Whether the shell draws the button in its own always-on overlay window. */
+    function nativeOverlayOwnsButton() {
+        try { return !!window.__E2E_NATIVE_WIPE_OVERLAY__; } catch (_) { return false; }
+    }
+
+    /**
+     * The shell's half of the wipe, asked over `box:wipe-requested`
+     * (src-tauri/src/lib.rs): sign out server-side while the token still
+     * exists, then drop everything JS can reach. The shell runs its own half
+     * regardless — that is why the button lives there now — so this only ever
+     * runs against a live page, and a page that is not running simply never
+     * answers.
+     */
+    function listenForShellWipe() {
+        var t = tauri();
+        if (!t || !t.event || typeof t.event.listen !== 'function') return;
+        try {
+            var p = t.event.listen('box:wipe-requested', function () {
+                try { if (window.VoiceManager && VoiceManager.leaveVoiceChannel) VoiceManager.leaveVoiceChannel(); } catch (_) {}
+                try { var w = window.ws; if (w && w.close) w.close(); } catch (_) {}
+                serverLogout().then(wipeLocalData);
+            });
+            if (p && typeof p.catch === 'function') p.catch(function () {});
+        } catch (_) {}
     }
 
     function boot() {
@@ -401,6 +439,10 @@
         try {
             if (/[?&]mini=1\b/.test(window.location.search)) return;
         } catch (_) {}
+        // Run the shell's half of a wipe when it asks (see listenForShellWipe),
+        // on every platform: on a phone the page still owns the button, and on
+        // desktop a live page is still the thing that can sign out server-side.
+        listenForShellWipe();
         ensureButton();
         // Re-assert when the top-level DOM changes, but never after the user hid
         // it (ensureButton() checks that itself). Two shallow observers: the

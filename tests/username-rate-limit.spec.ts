@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { apiLogin } from './_auth-helpers';
 
 const BASE = 'https://localhost:3443';
 
@@ -17,31 +18,11 @@ async function registerUser(page: Page, uname: string, password = 'password123')
     await page.waitForTimeout(1000);
 }
 
-/** Compute the client-side login hash the same way auth.js does. */
-async function loginHash(page: Page, username: string, password: string): Promise<string> {
-    return page.evaluate(async ({ username, password }) => {
-        const res = await fetch('/api/auth-params/' + encodeURIComponent(username));
-        const params = await res.json();
-        if (params.encrypted_hash_key && params.hash_key_salt && params.hash_key_nonce) {
-            const hashKeyB64 = (window as any).E2ECrypto.decryptWithPassword(
-                params.encrypted_hash_key, password, params.hash_key_salt, params.hash_key_nonce
-            );
-            if (hashKeyB64) {
-                const bytes = new Uint8Array((window as any).E2ECrypto.base64ToArrayBuffer(hashKeyB64));
-                return (window as any).E2ECrypto.hmacHex(bytes, password);
-            }
-        }
-        return password;
-    }, { username, password });
-}
+// Attempt a login exactly like the client does (nonce + signature; a wrong
+// password fails to decrypt the hash_key, so the body carries no credential —
+// a normal failed attempt that feeds the failure counter).
+const attemptLogin = apiLogin;
 
-/** Attempt a login via the API with the client-side hash. */
-async function attemptLogin(page: Page, username: string, password: string) {
-    const hash = await loginHash(page, username, password);
-    return page.request.post(`${BASE}/api/login`, {
-        data: { username, password: hash },
-    });
-}
 
 test.describe('S8: Per-username login failure rate limit', () => {
 

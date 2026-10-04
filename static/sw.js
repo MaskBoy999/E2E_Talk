@@ -27,7 +27,12 @@
 // v20: `style.css?v=34` — the hover-revealed message receipt is out of flow, so
 // hovering a message no longer pushes it up under the pointer (see the
 // `.msg-status` rules in style.css).
-const CACHE_NAME = 'e2e-chat-v20';
+// v23: `doc-preview.js?v=9` — the XLSX view renders in the same sandboxed
+// frame the DOCX view uses; no SheetJS HTML reaches the app origin.
+// v24: `crypto.js?v=12` — login only ever sends the raw password for an
+// account the server flags as pre-hash legacy; typos and auth-params outages
+// fail closed.
+const CACHE_NAME = 'e2e-chat-v24';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

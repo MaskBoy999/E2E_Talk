@@ -3,6 +3,18 @@ import { test, expect, type Page } from '@playwright/test';
 /**
  * The "clear all app data" control (static/app-overlay.js).
  *
+ * On **desktop** the shell no longer lets a page draw this button at all: it
+ * owns an always-on-top window of its own (`static/box-wipe.html`, see
+ * `src-tauri/src/wipe_overlay.rs`) that survives the WebView's own error page,
+ * a blank/grey boot and a host that is gone for good — states where no script
+ * of ours runs. The shell marks those windows with
+ * `__E2E_NATIVE_WIPE_OVERLAY__` before any page script runs, so the page draws
+ * nothing and keeps only its other jobs: the `box:page-alive` beacon,
+ * `window.__appWipe`, and the `box:wipe-requested` handler that runs the page
+ * half of a wipe. Android has no second window to put the control in, so
+ * there the rules in (1) and (2) below still apply — the page draws the only
+ * button, and hides it for the rest of the run.
+ *
  * The rule changed: it is drawn **only inside the native shell**, never in an
  * ordinary browser. A page-drawn button showed up in the browser too — the tell
  * that it was website chrome rather than part of the app — and the vault lock
@@ -36,6 +48,28 @@ const TAURI_RECORDING_STUB = () => {
 /** A plain browser, i.e. no shell and therefore no page-drawn wipe control. */
 const NO_SHELL = () => {
     delete (window as any).__TAURI__;
+};
+
+/**
+ * The desktop shell: it tells the page that the shell's own window draws the
+ * button, and records what the page listens for and emits.
+ */
+const NATIVE_DESKTOP_STUB = () => {
+    (window as any).__E2E_NATIVE_WIPE_OVERLAY__ = true;
+    (window as any).__emits = [];
+    (window as any).__listeners = {} as Record<string, Array<(e?: unknown) => void>>;
+    (window as any).__TAURI__ = {
+        core: { invoke: async () => null },
+        event: {
+            emit: async (name: string) => {
+                (window as any).__emits.push(name);
+            },
+            listen: async (name: string, cb: (e?: unknown) => void) => {
+                ((window as any).__listeners[name] ||= []).push(cb);
+                return () => {};
+            },
+        },
+    };
 };
 
 /** A quiet box shell for the flows that only need the button to exist. */
@@ -239,5 +273,48 @@ test.describe('the clear-all-data overlay is native-app only', () => {
         expect(left.token, 'the session must be gone').toBeNull();
         expect(left.probe, 'every localStorage key must be gone').toBeNull();
         expect(left.cookie).not.toContain('probe_cookie');
+    });
+
+    test('on desktop the shell owns the button: the page draws none, and still beacons', async ({ page }) => {
+        await page.addInitScript(NATIVE_DESKTOP_STUB);
+
+        // Signed in — the page that used to carry the button.
+        await register(page, false);
+        await expect(page.locator('#app-wipe-button')).toHaveCount(0);
+
+        // The address screen too: the shell's window covers it as well, so a
+        // second, page-drawn button there would be a duplicate.
+        await page.goto(`${BASE}/box-setup.html`);
+        await expect(page.locator('#app-wipe-button')).toHaveCount(0);
+
+        // The page keeps its liveness beacon: silence from here is what tells the
+        // shell the main window is showing something that runs no script at all
+        // (src-tauri/src/lib.rs, PAGE_ALIVE_EVENT — the dead-page watchdog).
+        await expect.poll(() => page.evaluate(() => (window as any).__emits || []))
+            .toContain('box:page-alive');
+    });
+
+    test('a native wipe asks the page for its half: sign out, then drop local data', async ({ page }) => {
+        await page.addInitScript(NATIVE_DESKTOP_STUB);
+        await register(page, false);
+
+        await page.evaluate(() => {
+            localStorage.setItem('a_probe_key', 'left-behind');
+            document.cookie = 'probe_cookie=1;path=/';
+        });
+
+        // The shell speaks the event the page listens for (WIPE_REQUESTED_EVENT).
+        const heard = await page.evaluate(() => Object.keys((window as any).__listeners || {}));
+        expect(heard).toContain('box:wipe-requested');
+
+        await page.evaluate(() => {
+            ((window as any).__listeners['box:wipe-requested'] || []).forEach((cb: (e?: unknown) => void) => cb({}));
+        });
+
+        // Token first (the logout call needs it), then everything JS can reach.
+        await expect.poll(() => page.evaluate(() => localStorage.getItem('token')), { timeout: 20000 }).toBeNull();
+        expect(await page.evaluate(() => localStorage.getItem('a_probe_key')), 'every localStorage key must go').toBeNull();
+        // The shell's own half — the WebView's storage and the saved connection —
+        // runs regardless of this page (see tests/box-wipe-overlay.spec.ts).
     });
 });

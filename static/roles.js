@@ -567,7 +567,7 @@
         if (!list) return;
         list.innerHTML = '';
         if (state.roles.length === 0) {
-            list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:6px 0">No roles</div>';
+            list.innerHTML = '<div class="u-87bb6d45" >No roles</div>';
             var btn = document.getElementById('create-role-btn');
             if (btn) {
                 var canCreate = (has(bit('CREATE_ROLES')) || has(bit('MANAGE_ROLES'))) && state.myPosition > 0;
@@ -584,10 +584,10 @@
             var owInner = document.createElement('div');
             owInner.className = 'role-row';
             owInner.innerHTML =
-                '<span class="role-tier-badge" style="background:var(--accent);color:#fff">0</span>' +
-                '<span class="role-dot" style="background:var(--accent)"></span>' +
-                '<span class="role-row-name" style="font-weight:600">Owner</span>' +
-                '<span class="role-badge" style="background:var(--accent);color:#fff;border-color:var(--accent)">you</span>';
+                '<span class="role-tier-badge u-9881221c" >0</span>' +
+                '<span class="role-dot u-36d30510" ></span>' +
+                '<span class="role-row-name u-eed0f8fb" >Owner</span>' +
+                '<span class="role-badge u-86ebd977" >you</span>';
             ownerRow.appendChild(owInner);
             list.appendChild(ownerRow);
         }
@@ -737,8 +737,8 @@
             everyoneRow.className = 'role-row role-everyone-row';
             everyoneRow.dataset.roleId = everyoneRole.id;
             everyoneRow.innerHTML =
-                '<span class="role-tier-badge" style="visibility:hidden">-</span>' +
-                '<span class="role-dot" style="background:#99aab5"></span>' +
+                '<span class="role-tier-badge u-e775556b" >-</span>' +
+                '<span class="role-dot u-d90da29c" ></span>' +
                 '<span class="role-row-name">@everyone</span>' +
                 '<span class="role-badge">everyone</span>';
             everyoneRow.addEventListener('click', function () { selectRole(everyoneRole.id); });
@@ -1210,7 +1210,7 @@
         function renderPermBoxes() {
             var roleId = roleSelect.value;
             var role = roleById(roleId);
-            if (!role) { boxes.innerHTML = '<div style="color:var(--text-muted);padding:8px">No role selected</div>'; return; }
+            if (!role) { boxes.innerHTML = '<div class="u-d19057a7" >No role selected</div>'; return; }
             var ow = null;
             if (role.overwrites) {
                 ow = role.overwrites.filter(function (o) {
@@ -1221,7 +1221,7 @@
             TIERS.forEach(function (tier) {
                 var group = document.createElement('div');
                 group.style.marginBottom = '10px';
-                group.innerHTML = '<div style="color:var(--text-muted);font-size:11px;font-weight:600;text-transform:uppercase;margin-bottom:4px;letter-spacing:0.5px">' + escapeHtml(tier.label) + '</div>';
+                group.innerHTML = '<div class="u-16efc4cc" >' + escapeHtml(tier.label) + '</div>';
                 PERMS.filter(function (p) { return p.tier === tier.id; }).forEach(function (p) {
                     var value = 'inherit';
                     if (ow) {

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark">
+<title>Clear all app data</title>
+<!--
+  The **native** always-on "clear all app data" overlay.
+
+  The desktop shell loads this file into its own tiny always-on-top window
+  (src-tauri/src/lib.rs, WIPE_LABEL) — not into any page of the app, and not
+  into anything the host's website can reach. That is the entire point: the
+  button has to exist while the main window is showing the WebView's own error
+  page ("can't reach this page"), a blank/grey document, or a page whose boot
+  failed — states in which no page script of ours runs at all.
+
+  The page draws; the shell decides. Geometry, showing/hiding and the wipe
+  itself are Rust's (WIPE_OPEN_EVENT, WIPE_CLOSE_EVENT, WIPE_HIDE_EVENT,
+  WIPE_RUN_EVENT there); this file renders the two states and emits those four
+  events. Outside the shell — the file is also served by the website, like every
+  other static file — it does nothing at all (`__TAURI__` is absent).
+-->
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: transparent; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px; line-height: 1.5; color: #dbdee1;
+    -webkit-user-select: none; user-select: none;
+  }
+  body[data-open="0"] #panel { display: none; }
+  body[data-open="1"] #compact { display: none; }
+
+  #compact { height: 100%; display: flex; align-items: center; justify-content: center; }
+  #wipe-button {
+    width: 38px; height: 38px; border-radius: 50%; padding: 0;
+    border: 1px solid #3f4147; background: rgba(43,45,49,.92); color: #dbdee1;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    opacity: .8; box-shadow: 0 6px 18px rgba(0,0,0,.45);
+    transition: opacity .15s, transform .15s;
+  }
+  #wipe-button:hover { opacity: 1; }
+  #wipe-button:active { transform: scale(.94); }
+
+  #panel {
+    height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px;
+    background: #1e1f22; border: 1px solid #3f4147; border-radius: 12px;
+    padding: 14px 14px 12px; box-shadow: 0 18px 50px rgba(0,0,0,.55);
+  }
+  .title { font-size: 14px; font-weight: 700; color: #f2f3f5; }
+  .explain { color: #b5bac1; }
+  #wipe-status { min-height: 1em; color: #949ba4; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+  .row button {
+    font: inherit; font-weight: 600; padding: 8px 13px; border-radius: 8px;
+    cursor: pointer; border: 1px solid #3f4147; background: #2b2d31; color: #dbdee1;
+  }
+  .row button:hover { background: #35373c; }
+  #wipe-erase { border-color: #ed4245; background: rgba(237,66,69,.12); color: #ed4245; }
+  #wipe-erase:hover { background: rgba(237,66,69,.2); }
+  #wipe-erase:disabled { opacity: .6; cursor: default; }
+</style>
+</head>
+<body data-open="0">
+
+<div id="compact">
+  <button id="wipe-button" type="button" title="Clear all app data (and hide this button)"
+          aria-label="Clear all app data">
+    <!-- A shield with a slash through it: "wipe", not "delete a message". -->
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 3l7 3v6c0 4-3 7.4-7 9-4-1.6-7-5-7-9V6l7-3z"/><line x1="4" y1="20" x2="20" y2="4"/>
+    </svg>
+  </button>
+</div>
+
+<div id="panel" role="dialog" aria-label="Clear all app data">
+  <div class="title">Clear all app data</div>
+  <div class="explain">
+    Erases every login, key, setting and cached file stored on this device, and
+    forgets the saved server connection &mdash; you will have to enter the address
+    again. Messages stay on the server; they are not deleted. This cannot be undone.
+  </div>
+  <div id="wipe-status"></div>
+  <div class="row">
+    <button id="wipe-erase" type="button">Erase everything</button>
+    <button id="wipe-hide" type="button">Hide this button</button>
+    <button id="wipe-cancel" type="button">Cancel</button>
+  </div>
+</div>
+
+<script src="box-wipe.js?v=1"></script>
+</body>
+</html>

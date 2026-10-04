@@ -1397,6 +1397,13 @@ impl Database {
             let _ = conn.execute_batch(&format!("ALTER TABLE users ADD COLUMN {}", col));
         }
 
+        // Migration 094 (F3): replay-resistant login. login_public_key holds the
+        // base64 Ed25519 public key derived by the client from the same secret
+        // as the login credential. Login accepts only a fresh server nonce +
+        // signature, so a captured credential can never be replayed. The key is
+        // required at registration and rotated on every password change.
+        let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN login_public_key TEXT");
+
         // Data migration: normalize legacy space-separated CURRENT_TIMESTAMP values
         // ("YYYY-MM-DD HH:MM:SS") to fixed-width RFC3339 ("YYYY-MM-DDTHH:MM:SS.000000Z")
         // so lexicographic ordering is consistent with newly-inserted messages.
@@ -1467,13 +1474,18 @@ impl Database {
 
     // --- Users ---
 
-    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, friend_code_hash: Option<&str>, friend_code_hash_salt: Option<&str>, encrypted_friend_code: Option<&str>, friend_code_salt: Option<&str>, friend_code_nonce: Option<&str>, encrypted_hash_key: Option<&str>, hash_key_salt: Option<&str>, hash_key_nonce: Option<&str>) -> Result<User, String> {
+    /// `login_public_key` (F3): base64 Ed25519 public key derived by the client
+    /// from the same secret as the login credential. When present, /api/login
+    /// only accepts a nonce-bound signature made with the matching private key —
+    /// the transmitted credential can never be replayed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_user(&self, username: &str, password_hash: &str, identity_public_key: Option<&[u8]>, friend_code_hash: Option<&str>, friend_code_hash_salt: Option<&str>, encrypted_friend_code: Option<&str>, friend_code_salt: Option<&str>, friend_code_nonce: Option<&str>, encrypted_hash_key: Option<&str>, hash_key_salt: Option<&str>, hash_key_nonce: Option<&str>, login_public_key: Option<&str>) -> Result<User, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let id = Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO users (id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce],
+            "INSERT INTO users (id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce, login_public_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![id, username, password_hash, identity_public_key, friend_code_hash, friend_code_hash_salt, encrypted_friend_code, friend_code_salt, friend_code_nonce, encrypted_hash_key, hash_key_salt, hash_key_nonce, login_public_key],
         )
         .map_err(|e| {
             if e.to_string().contains("UNIQUE") {
@@ -3337,7 +3349,7 @@ impl Database {
         encrypted_blob: Option<&str>,
         blob_salt: Option<&str>,
         blob_nonce: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         // All writes land in ONE transaction: a partial password change (new
         // hash stored but blobs still wrapped with the old password) would
@@ -3382,7 +3394,37 @@ impl Database {
 
         if let (Some(b), Some(s), Some(n)) = (encrypted_blob, blob_salt, blob_nonce) {
             upsert_user_key_blob(&tx, user_id, b, s, n)?;
+            // The change is a NEW authoritative revision of the blob: it is
+            // wrapped with the new password, so it has to be newer than every
+            // save composed under the old one. Bump `rev` here, in the same
+            // transaction — otherwise the revision still matches what a
+            // client had in hand, and a save that was already in flight
+            // (built from the OLD password) was accepted a moment later and
+            // silently replaced this blob with an unopenable one; every other
+            // device then pulled a blob the new password could not decrypt.
+            if key_blob_has_column(&tx, "rev") {
+                tx.execute(
+                    "UPDATE user_key_blobs SET rev = COALESCE(rev, 0) + 1 WHERE user_id = ?1",
+                    params![user_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
+        // Hand the resulting revision back to the caller: the client's blob
+        // mirror should continue from the authoritative copy instead of
+        // retrying on the revision it had before the change (which now 409s).
+        let new_rev: i64 = if key_blob_has_column(&tx, "rev") {
+            tx.query_row(
+                "SELECT COALESCE(rev, 0) FROM user_key_blobs WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0)
+        } else {
+            0
+        };
         // A password change revokes EVERY other signed-in session in the same
         // transaction: the new password may be required to re-enter, so old
         // sessions must not keep running. The current device (keep_session_id)
@@ -3393,7 +3435,8 @@ impl Database {
             params![user_id, keep_session_id],
         )
         .map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(new_rev)
     }
 
     pub fn get_user_key_blob(&self, user_id: &str) -> Result<Option<(String, String, String, bool, Option<String>, i64)>, String> {
@@ -7389,13 +7432,25 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
-    /// H3: replace the stored password verifier (used by the self-healing
-    /// upgrade when a legacy bare client-hash credential verifies successfully).
-    pub fn update_password_hash(&self, user_id: &str, new_hash: &str) -> Result<(), String> {
+    /// F3: the account's Ed25519 login public key (base64). Registration and
+    /// password change both require one, so a NULL here is a dead account:
+    /// /api/login accepts nothing else.
+    pub fn get_login_public_key(&self, username: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT login_public_key FROM users WHERE username = ?1",
+            params![username],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|_| "User not found".to_string())
+    }
+
+    /// F3: store the account's login public key (registration + password change).
+    pub fn set_login_public_key(&self, user_id: &str, public_key: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE users SET password_hash = ?1 WHERE id = ?2",
-            params![new_hash, user_id],
+            "UPDATE users SET login_public_key = ?1 WHERE id = ?2",
+            params![public_key, user_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())

@@ -54,7 +54,13 @@ test.describe('document views on a phone', () => {
         test.setTimeout(180000);
         await register(page);
 
-        const report = await page.evaluate(async () => {
+        // The docx and xlsx renderers run inside sandboxed frames with an opaque
+        // origin (see `tests/security-review-fixes.spec.ts`), so the page itself
+        // cannot read their DOM — that is the security property. The fixtures
+        // still build inside the page, but the loop runs here: preview one file,
+        // read what the page can see, and for the sandboxed views read the frame
+        // through the browser's own frame tree, which a test can.
+        await page.evaluate(async () => {
             const DP = (window as any).DocPreview;
 
             // JSZip is what the ZIP / PPTX / DOCX fixtures are built with; the
@@ -142,30 +148,31 @@ test.describe('document views on a phone', () => {
                 return await zip.generateAsync({ type: 'blob' });
             }
 
-            const fixtures: { type: string; name: string; mime: string; blob: () => Promise<Blob> | Blob }[] = [
-                { type: 'docx', name: 'protocol.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', blob: docxBlob },
-                { type: 'pdf', name: 'protocol.pdf', mime: 'application/pdf', blob: pdfBlob },
-                { type: 'xlsx', name: 'grades.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', blob: xlsxBlob },
-                { type: 'csv', name: 'grades.csv', mime: 'text/csv', blob: () => new Blob(['a,b\n1,2\n3,4'], { type: 'text/csv' }) },
-                { type: 'zip', name: 'stuff.zip', mime: 'application/zip', blob: zipBlob },
-                { type: 'pptx', name: 'deck.pptx', mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', blob: pptxBlob },
-            ];
+            const fixtures: Record<string, { name: string; mime: string; blob: () => Promise<Blob> | Blob }> = {
+                docx: { name: 'protocol.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', blob: docxBlob },
+                pdf: { name: 'protocol.pdf', mime: 'application/pdf', blob: pdfBlob },
+                xlsx: { name: 'grades.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', blob: xlsxBlob },
+                csv: { name: 'grades.csv', mime: 'text/csv', blob: () => new Blob(['a,b\n1,2\n3,4'], { type: 'text/csv' }) },
+                zip: { name: 'stuff.zip', mime: 'application/zip', blob: zipBlob },
+                pptx: { name: 'deck.pptx', mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', blob: pptxBlob },
+            };
 
-            const out: any = {};
-            for (const f of fixtures) {
+            (window as any).__docViewFixture = async (type: string) => {
+                const f = fixtures[type];
                 DP.close();
                 const blob = await f.blob();
                 DP.previewDocument(blob, f.name, f.mime);
                 // The slowest renderer is docx-preview; the others land fast.
-                await new Promise((r) => setTimeout(r, f.type === 'docx' ? 4000 : 2500));
+                await new Promise((r) => setTimeout(r, type === 'docx' ? 4000 : 2500));
+            };
 
+            (window as any).__docViewReport = (type: string) => {
                 const overlay = document.getElementById('doc-preview-overlay');
                 const modal = document.getElementById('doc-preview-modal');
                 const content = document.getElementById('doc-preview-content');
                 const text = content ? content.textContent || '' : '';
                 const modalRect = modal ? modal.getBoundingClientRect() : null;
-                const section = content ? content.querySelector('section') as HTMLElement | null : null;
-                out[f.type] = {
+                return {
                     opened: !!overlay && !!content,
                     stuckLoading: /Loading document/.test(text),
                     failed: /Failed to render|Error rendering/i.test(text),
@@ -176,31 +183,52 @@ test.describe('document views on a phone', () => {
                         ? !!(content.querySelector('canvas') || content.querySelector('table')
                             || content.querySelector('section') || content.querySelector('pre')
                             || content.querySelector('.doc-view-slide')
+                            || content.querySelector('iframe.docx-sandbox, iframe.xlsx-sandbox')
                             || (content.textContent || '').trim().length > 5)
                         : false,
                     // Per-type proof that the *content* arrived, not just a
-                    // chrome element (a slide counter, a page count).
+                    // chrome element (a slide counter, a page count). The two
+                    // sandboxed views report through their frame: docx sets its
+                    // height only after docx-preview finished; xlsx stamps the
+                    // sheet name onto the frame after SheetJS rendered it.
                     hasContent: {
-                        docx: /quick brown fox/.test(text),
+                        docx: !!(content?.querySelector('iframe.docx-sandbox') as HTMLElement | null)?.style.height,
                         pdf: !!content?.querySelector('canvas'),
-                        xlsx: !!content?.querySelector('table'),
+                        xlsx: !!content?.querySelector('iframe.xlsx-sandbox[data-rendered]'),
                         csv: !!content?.querySelector('table'),
                         zip: /readme\.txt/.test(text),
                         pptx: /Hello Presentation/.test(text),
-                    }[f.type] === true,
-                    // docx only: the Word "sheet" must fit the column, and the
-                    // text has to still be there.
-                    sectionWidth: section ? Math.round(section.getBoundingClientRect().width) : -1,
-                    sectionScrollOverflow: section ? Math.max(0, section.scrollWidth - section.clientWidth) : -1,
-                    hasWords: /quick brown fox/.test(text),
+                    }[type] === true,
                 };
-                DP.close();
-                await new Promise((r) => setTimeout(r, 300));
-            }
-            return { out, viewport: window.innerWidth };
+            };
         });
 
-        const rows = Object.entries(report.out) as [string, any][];
+        const out: any = {};
+        for (const type of ['docx', 'pdf', 'xlsx', 'csv', 'zip', 'pptx']) {
+            await page.evaluate((t) => (window as any).__docViewFixture(t), type);
+            out[type] = await page.evaluate((t) => (window as any).__docViewReport(t), type);
+
+            if (type === 'docx' || type === 'xlsx') {
+                // Read the sandboxed frame through the browser's own frame tree:
+                // the per-file content proof, and for docx the reflow proof.
+                const frame = page.frameLocator(`iframe.${type}-sandbox`);
+                if (type === 'docx') {
+                    await expect(frame.locator('text=quick brown fox').first()).toBeVisible();
+                    const bodyOverflow = await frame.locator('body').evaluate((el) =>
+                        Math.max(0, (el as HTMLElement).scrollWidth - (el as HTMLElement).clientWidth));
+                    expect(bodyOverflow, 'docx: the Word layout is wider than the device width')
+                        .toBeLessThanOrEqual(2);
+                } else {
+                    await expect(frame.locator('table')).toBeVisible();
+                    await expect(frame.locator('td', { hasText: 'Alice' }).first()).toBeVisible();
+                }
+            }
+
+            await page.evaluate(() => (window as any).DocPreview.close());
+            await new Promise((r) => setTimeout(r, 300));
+        }
+
+        const rows = Object.entries(out) as [string, any][];
         expect(rows.length).toBe(6);
 
         for (const [type, r] of rows) {
@@ -217,15 +245,8 @@ test.describe('document views on a phone', () => {
             expect(r.overflowPx, `${type}: the view overflows the phone horizontally`).toBeLessThanOrEqual(2);
         }
 
-        const docx = report.out.docx;
-        // Cause 2: a Word page is 794px wide; the phone is 390.
-        expect(docx.sectionWidth, 'docx: the Word sheet was not reflowed to the device width')
-            .toBeLessThanOrEqual(PHONE.width + 4);
-        expect(docx.sectionScrollOverflow, 'docx: the Word sheet is cut off at its right edge').toBeLessThanOrEqual(2);
-        expect(docx.hasWords, 'docx: the document text is missing').toBe(true);
-
         // Cause 3: a 960px slide canvas, scaled rather than cropped.
-        expect(report.out.pptx.overflowPx, 'pptx: slides overflow the phone').toBeLessThanOrEqual(2);
+        expect(out.pptx.overflowPx, 'pptx: slides overflow the phone').toBeLessThanOrEqual(2);
     });
 
     test('the same views open full-screen-shaped on a desktop viewport', async ({ page }) => {

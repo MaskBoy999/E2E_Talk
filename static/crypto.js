@@ -328,6 +328,115 @@ var E2ECrypto = (() => {
         return hex;
     }
 
+    // ---- F3: replay-resistant login signing ----
+    // The legacy login credential is K = HMAC-SHA256(hash_key, password) and was
+    // sent verbatim on every login, so one captured request was a permanent
+    // password-equivalent. Supported clients now derive a deterministic Ed25519
+    // keypair from the same secret instead:
+    //     seed = HMAC-SHA256(key = K, msg = "e2e:login-signing-seed:v1")
+    // Every device that can already log in (it has hash_key + password) derives
+    // the same keypair, so the multi-device one-account model is unchanged. The
+    // server stores only the PUBLIC half and challenges every login with a
+    // single-use nonce, which the client signs — a captured login request
+    // carries nothing replayable.
+    var LOGIN_SIGNING_SEED_LABEL = 'e2e:login-signing-seed:v1';
+
+    function loginSigningSeed(hashKeyBytes, password) {
+        // libsodium's hmacsha256 takes exactly a 32-byte key; K is 32 bytes.
+        var k = hmacSHA256(hashKeyBytes, new TextEncoder().encode(password));
+        var seed = hmacSHA256(k, new TextEncoder().encode(LOGIN_SIGNING_SEED_LABEL));
+        _secureZero(k);
+        return seed;
+    }
+
+    function deriveLoginKeypair(hashKeyBytes, password) {
+        var seed = loginSigningSeed(hashKeyBytes, password);
+        var kp = sodium.crypto_sign_seed_keypair(seed);
+        _secureZero(seed);
+        return {
+            publicKey: arrayBufferToBase64(kp.publicKey),
+            privateKey: new Uint8Array(kp.privateKey)
+        };
+    }
+
+    function deriveLoginPublicKey(hashKeyBytes, password) {
+        var kp = deriveLoginKeypair(hashKeyBytes, password);
+        _secureZero(kp.privateKey);
+        return kp.publicKey;
+    }
+
+    function loginChallengeMessage(username, nonce) {
+        return 'e2e-login-v1|' + username + '|' + nonce;
+    }
+
+    function signLoginChallenge(hashKeyBytes, password, username, nonce) {
+        var kp = deriveLoginKeypair(hashKeyBytes, password);
+        var sig = sodium.crypto_sign_detached(
+            new TextEncoder().encode(loginChallengeMessage(username, nonce)),
+            kp.privateKey
+        );
+        _secureZero(kp.privateKey);
+        return arrayBufferToBase64(sig);
+    }
+
+    // Build the /api/login body for the current protocol. Never throws and
+    // never carries the raw password: the account signs a fresh single-use
+    // nonce with the Ed25519 key derived from (hash_key, password). If the
+    // hash_key can't be obtained (wrong password, unknown username, or an
+    // auth-params outage) the body is just the username — a normal failed
+    // login the server refuses. The kill-switch path sends its decrypted proof
+    // instead. The raw password is the client-side root of every key and never
+    // leaves the client (SECURITY_REVIEW_FIXES.md §6.3).
+    async function loginRequestBody(username, password) {
+        var body = { username: username };
+        var params = null;
+        var hashKeyBytes = null;
+        try {
+            var res = await fetch('/api/auth-params/' + encodeURIComponent(username));
+            if (res.ok) {
+                params = await res.json();
+                if (params.encrypted_hash_key && params.hash_key_salt && params.hash_key_nonce) {
+                    var b64 = decryptWithPassword(
+                        params.encrypted_hash_key, password,
+                        params.hash_key_salt, params.hash_key_nonce
+                    );
+                    if (b64) {
+                        hashKeyBytes = new Uint8Array(base64ToArrayBuffer(b64));
+                        // auth.js caches the decrypted hash_key after a successful
+                        // login (e2e_auth_key, for reauth); keep that contract.
+                        window._loginAuthKeyB64 = b64;
+                    }
+                }
+            }
+        } catch (_) {}
+        if (hashKeyBytes) {
+            // Signed account: nonce-bound proof, no reusable credential.
+            if (params.login_public_key && params.login_nonce) {
+                body.login_nonce = params.login_nonce;
+                body.login_signature = signLoginChallenge(hashKeyBytes, password, username, params.login_nonce);
+            }
+            _secureZero(hashKeyBytes);
+            return body;
+        }
+        // Kill switch: the real password didn't decrypt the hash_key. Send the
+        // client-decrypted verifier as the proof — never the raw kill-switch
+        // password.
+        if (params && params.has_kill_switch && params.kill_switch_verifier_encrypted
+            && params.kill_switch_wrap_salt && params.kill_switch_wrap_nonce) {
+            var v = decryptWithPassword(
+                params.kill_switch_verifier_encrypted, password,
+                params.kill_switch_wrap_salt, params.kill_switch_wrap_nonce
+            );
+            if (v) {
+                body.kill_switch_proof = v;
+                return body;
+            }
+        }
+        // Nothing to prove: the body is just the username, and the server
+        // refuses it. The raw password never leaves the client.
+        return body;
+    }
+
     // ---- E2E search blind-index tokens ----
     // Each searchable keyword of a message becomes HMAC-SHA256(key, "search-index-v1:" + word),
     // keyed by the channel/DM encryption key (or its rotation history). The
@@ -825,6 +934,12 @@ var E2ECrypto = (() => {
         decryptWithPassword: decryptWithPassword,
         hmacHex: hmacHex,
         sha256Hex: sha256Hex,
+        // F3 — replay-resistant login signing + /api/login body builder
+        deriveLoginKeypair: deriveLoginKeypair,
+        deriveLoginPublicKey: deriveLoginPublicKey,
+        signLoginChallenge: signLoginChallenge,
+        loginChallengeMessage: loginChallengeMessage,
+        loginRequestBody: loginRequestBody,
         searchTokensForText: searchTokensForText,
         searchQueryTokens: searchQueryTokens,
 

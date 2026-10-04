@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execSync } from 'child_process';
+import { apiLogin } from './_auth-helpers';
 
 const BASE = 'https://localhost:3443';
 const DB = 'server/e2e_chat.db';
@@ -69,37 +70,33 @@ test.describe('H3: pass-the-hash (server-side password verifier)', () => {
         });
         expect(replay.status()).toBe(401);
 
-        // The real credential still logs in.
-        const ok = await request.post(`${BASE}/api/login`, {
-            data: { username: uname, password: credential },
-        });
+        // A signed login (the current client protocol) still works.
+        const ok = await apiLogin(page, uname, 'password123');
         expect(ok.status()).toBe(200);
     });
 
-    test('legacy bare-credential rows self-upgrade on first successful login', async ({ page, request }) => {
+    test('legacy bare-credential rows and keyless accounts cannot log in at all', async ({ page, request }) => {
         const uname = 'h3b_' + Date.now();
         const { user } = await registerUser(page, uname);
         const credential = await loginHash(page, uname, 'password123');
 
-        // Simulate an account created before the fix: stored value is the bare
-        // client credential (the old insecure scheme).
-        dbExec('UPDATE users SET password_hash = ?1 WHERE id = ?2', [credential, user.id]);
+        // Simulate an account from the retired schemes: bare client credential
+        // and no login_public_key. The development-stage decision is that there
+        // is no fallback left for either — such rows are dead, not upgraded.
+        dbExec('UPDATE users SET password_hash = ?1, login_public_key = NULL WHERE id = ?2', [credential, user.id]);
         expect(dbQuery('SELECT password_hash FROM users WHERE id = ?1', [user.id])[0][0]).toBe(credential);
 
-        // First successful login upgrades it in place to the $e2e$ verifier.
-        const ok = await request.post(`${BASE}/api/login`, {
+        // The credential is not accepted (the login request no longer has a
+        // credential field, and no signature can be verified without a key)...
+        const cred = await request.post(`${BASE}/api/login`, {
             data: { username: uname, password: credential },
         });
-        expect(ok.status()).toBe(200);
-        const upgraded = dbQuery('SELECT password_hash FROM users WHERE id = ?1', [user.id])[0][0] as string;
-        expect(upgraded.startsWith('$e2e$')).toBe(true);
-        expect(upgraded).not.toBe(credential);
+        expect(cred.status()).toBe(401);
 
-        // And now the stored value is NOT replayable either.
-        const replay = await request.post(`${BASE}/api/login`, {
-            data: { username: uname, password: upgraded },
-        });
-        expect(replay.status()).toBe(401);
+        // ...and nothing self-upgraded on the way.
+        const stored = dbQuery('SELECT password_hash FROM users WHERE id = ?1', [user.id])[0][0] as string;
+        expect(stored).toBe(credential);
+        expect(stored.startsWith('$e2e$')).toBe(false);
     });
 });
 

@@ -12347,13 +12347,13 @@
             if (peers[i] && peers[i].localIp) { localIp = peers[i].localIp; break; }
         }
         if (!localIp) {
-            return '<div style="margin-top:4px">▸ <b>Network</b>  [unknown — no ICE candidates yet (join a call)]</div>';
+            return '<div class="u-96ad6099" >▸ <b>Network</b>  [unknown — no ICE candidates yet (join a call)]</div>';
         }
         var same = sameLanAsBox(location.hostname, localIp);
         var verdict = same === null
             ? 'box host is not a private LAN address — direct-path question does not apply'
             : (same ? 'same LAN as the box — direct path possible' : 'different networks — expect a relayed path');
-        return '<div style="margin-top:4px">▸ <b>Network</b>  [' + esc(String(localIp)) + ' → ' + esc(location.hostname) + ' — ' + verdict + ']</div>';
+        return '<div class="u-96ad6099" >▸ <b>Network</b>  [' + esc(String(localIp)) + ' → ' + esc(location.hostname) + ' — ' + verdict + ']</div>';
     }
 
     // ── 1.3 (FEATURE_PLAN.md): audio output routing ────────────────────────
@@ -12635,22 +12635,22 @@
     }
 
     function diagPeerHtml(p) {
-        var html = '<div style="margin-top:4px">▸ <b>' + esc(shortUid(p.uid)) + '</b>  [' + esc(p.connectionState) + (p.signalingState ? ' / ' + esc(p.signalingState) : '') + (p.error ? ' / ' + esc(p.error) : '') + (typeof p.pingMs === 'number' ? ' / ping ' + Math.round(p.pingMs) + ' ms' : '') + ']</div>';
+        var html = '<div class="u-96ad6099" >▸ <b>' + esc(shortUid(p.uid)) + '</b>  [' + esc(p.connectionState) + (p.signalingState ? ' / ' + esc(p.signalingState) : '') + (p.error ? ' / ' + esc(p.error) : '') + (typeof p.pingMs === 'number' ? ' / ping ' + Math.round(p.pingMs) + ' ms' : '') + ']</div>';
         ['audio', 'video'].forEach(function (k) {
             var s = p.senders[k];
             var r = p.receivers[k];
             if (s) {
-                var warn = (k === 'video' && s.tracks > 0 && s.frames === 0) ? ' <span style="color:#f0b232">' + icon('warning') + ' no frames encoded (they see you black?)</span>' : '';
-                html += '<div style="padding-left:12px">send ' + k + (s.tracks > 1 ? ' ×' + s.tracks : '') + ': frames ' + s.frames + ' · pkts ' + s.packets + ' · loss ' + s.loss + (typeof s.rttMs === 'number' ? ' · rtt ' + Math.round(s.rttMs) + ' ms' : '') + ' · ' + fmtBytes(s.bytes) + ' · [E2EE ' + (s.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (s.trackStates.length ? ' · ' + s.trackStates.join(',') : '') + warn + '</div>';
+                var warn = (k === 'video' && s.tracks > 0 && s.frames === 0) ? ' <span class="u-6ae894ad" >' + icon('warning') + ' no frames encoded (they see you black?)</span>' : '';
+                html += '<div class="u-154255d2" >send ' + k + (s.tracks > 1 ? ' ×' + s.tracks : '') + ': frames ' + s.frames + ' · pkts ' + s.packets + ' · loss ' + s.loss + (typeof s.rttMs === 'number' ? ' · rtt ' + Math.round(s.rttMs) + ' ms' : '') + ' · ' + fmtBytes(s.bytes) + ' · [E2EE ' + (s.transform ? '<span class="u-dbaf6fc2" >✓</span>' : '<span class="u-abfdf04f" >✗</span>') + ']' + (s.trackStates.length ? ' · ' + s.trackStates.join(',') : '') + warn + '</div>';
             }
             if (r) {
-                var warn2 = (k === 'video' && r.tracks > 0 && r.frames === 0) ? ' <span style="color:#f0b232">' + icon('warning') + ' no frames decoded (black feed)</span>' : '';
-                html += '<div style="padding-left:12px">recv ' + k + (r.tracks > 1 ? ' ×' + r.tracks : '') + ': frames ' + r.frames + ' · pkts ' + r.packets + ' · loss ' + r.loss + (typeof r.jitterMs === 'number' ? ' · jitter ' + Math.round(r.jitterMs) + ' ms' : '') + ' · ' + fmtBytes(r.bytes) + ' · [E2EE ' + (r.transform ? '<span style="color:#57f287">✓</span>' : '<span style="color:#f23f42">✗</span>') + ']' + (r.trackStates.length ? ' · ' + r.trackStates.join(',') : '') + warn2 + '</div>';
+                var warn2 = (k === 'video' && r.tracks > 0 && r.frames === 0) ? ' <span class="u-6ae894ad" >' + icon('warning') + ' no frames decoded (black feed)</span>' : '';
+                html += '<div class="u-154255d2" >recv ' + k + (r.tracks > 1 ? ' ×' + r.tracks : '') + ': frames ' + r.frames + ' · pkts ' + r.packets + ' · loss ' + r.loss + (typeof r.jitterMs === 'number' ? ' · jitter ' + Math.round(r.jitterMs) + ' ms' : '') + ' · ' + fmtBytes(r.bytes) + ' · [E2EE ' + (r.transform ? '<span class="u-dbaf6fc2" >✓</span>' : '<span class="u-abfdf04f" >✗</span>') + ']' + (r.trackStates.length ? ' · ' + r.trackStates.join(',') : '') + warn2 + '</div>';
             }
         });
         var reasons = diagReasons(p);
         if (reasons.length) {
-            html += '<div style="padding-left:12px;margin-top:3px;color:#f0b232">' + reasons.join('<br>') + '</div>';
+            html += '<div class="u-7aad4784" >' + reasons.join('<br>') + '</div>';
         }
         return html;
     }
@@ -12665,28 +12665,28 @@
         var stateColor = d.state === 'error' ? '#f23f42' : (d.state === 'capturing' ? '#57f287' : 'var(--text-primary)');
         rows.push('<div>▸ <b>Screen share</b>  [<span style="color:' + stateColor + '">' + esc(d.state) + '</span>' + (d.path ? ' / ' + esc(d.path) : '') + ']</div>');
         if (d.blockedBy) {
-            rows.push('<div style="padding-left:12px">' + icon('warning') + ' not attempted: ' + esc(d.blockedBy) + '</div>');
+            rows.push('<div class="u-154255d2" >' + icon('warning') + ' not attempted: ' + esc(d.blockedBy) + '</div>');
         }
         if (d.lastError) {
-            rows.push('<div style="padding-left:12px">' + icon('warning') + ' last error: ' + esc(String(d.lastError)) + '</div>');
+            rows.push('<div class="u-154255d2" >' + icon('warning') + ' last error: ' + esc(String(d.lastError)) + '</div>');
         }
         if (d.probe) {
             var p = d.probe;
-            rows.push('<div style="padding-left:12px">bridge: tauri ' + (p.hasTauri ? '✓' : '✗')
+            rows.push('<div class="u-154255d2" >bridge: tauri ' + (p.hasTauri ? '✓' : '✗')
                 + ' · invoke ' + (p.hasInvoke ? '✓' : '✗')
                 + ' · Channel ' + (p.hasChannel ? '✓' : '✗')
                 + ' · android-ua ' + (p.isAndroid ? '✓' : '✗')
                 + ' · getDisplayMedia ' + (p.hasGetDisplayMedia ? '✓' : '✗') + '</div>');
         }
         if (d.path === 'native') {
-            rows.push('<div style="padding-left:12px">picker ' + (d.pickerShown ? 'shown' : 'not shown')
+            rows.push('<div class="u-154255d2" >picker ' + (d.pickerShown ? 'shown' : 'not shown')
                 + ' · frames ' + d.frames
                 + ' · decoded ' + d.decoded
                 + ' · dropped ' + d.dropped
                 + ' · ' + fmtBytes(d.bytes)
                 + (d.w ? ' · ' + d.w + '×' + d.h + ' @' + (d.fps || 0) + 'fps' : '') + '</div>');
             if (d.lastFrameAt) {
-                rows.push('<div style="padding-left:12px">last frame ' + Math.max(0, Math.round((Date.now() - d.lastFrameAt) / 1000)) + 's ago</div>');
+                rows.push('<div class="u-154255d2" >last frame ' + Math.max(0, Math.round((Date.now() - d.lastFrameAt) / 1000)) + 's ago</div>');
             }
             // App audio. "Off" (nobody asked for it) and "error" (the device
             // refused) are different findings, so they read differently.
@@ -12699,19 +12699,19 @@
                     + (d.audioBytes ? ' · ' + fmtBytes(d.audioBytes) : '')
                     + (d.audioError ? ' — ' + esc(d.audioError) : '') + '</div>');
                 if (d.audioState === 'error') {
-                    rows.push('<div style="padding-left:12px;color:#f0b232">' + icon('warning') + ' the screen audio was refused — Android only mirrors apps that allow playback capture (DRM/copy-protected audio never can), and the capture policy is per-app.</div>');
+                    rows.push('<div class="u-2eded3b0" >' + icon('warning') + ' the screen audio was refused — Android only mirrors apps that allow playback capture (DRM/copy-protected audio never can), and the capture policy is per-app.</div>');
                 }
             }
             if (d.state === 'capturing' && d.frames === 0) {
-                rows.push('<div style="padding-left:12px;color:#f0b232">' + icon('warning') + ' the capture started but no frames have arrived — the native side is not producing images (is the foreground-service type mediaProjection actually applied?).</div>');
+                rows.push('<div class="u-2eded3b0" >' + icon('warning') + ' the capture started but no frames have arrived — the native side is not producing images (is the foreground-service type mediaProjection actually applied?).</div>');
             } else if (d.state === 'capturing' && d.decoded === 0) {
-                rows.push('<div style="padding-left:12px;color:#f0b232">' + icon('warning') + ' frames arrive but none decode — the WebView is not painting the captured JPEGs (out of memory, or a broken frame).</div>');
+                rows.push('<div class="u-2eded3b0" >' + icon('warning') + ' frames arrive but none decode — the WebView is not painting the captured JPEGs (out of memory, or a broken frame).</div>');
             }
         }
         if (d.path === null && d.state === 'idle') {
-            rows.push('<div style="padding-left:12px;color:var(--text-muted)">No screen share attempted this session.</div>');
+            rows.push('<div class="u-28814632" >No screen share attempted this session.</div>');
         }
-        return '<div style="margin-bottom:6px">' + rows.join('') + '</div>';
+        return '<div class="u-4e420aff" >' + rows.join('') + '</div>';
     }
 
     function renderVoiceDiag() {
@@ -12727,11 +12727,11 @@
             // by then the call may already be over.
             if (!peers.length) {
                 list.innerHTML = screenDiagHtml() + networkDiagHtml(peers)
-                    + '<div style="color:var(--text-muted)">Not in a call — join a voice channel or DM call to see per-peer stats.</div>';
+                    + '<div class="u-5872de20" >Not in a call — join a voice channel or DM call to see per-peer stats.</div>';
                 return;
             }
             var html = screenDiagHtml() + networkDiagHtml(peers) + peers.map(diagPeerHtml).join('');
-            html += '<div style="color:var(--text-muted);margin-top:6px">Updated ' + new Date(when).toLocaleTimeString() + ' · ' + peers.length + ' peer(s)</div>';
+            html += '<div class="u-c9ec6e7b" >Updated ' + new Date(when).toLocaleTimeString() + ' · ' + peers.length + ' peer(s)</div>';
             list.innerHTML = html;
         });
     }

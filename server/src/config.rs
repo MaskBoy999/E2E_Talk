@@ -27,7 +27,17 @@ pub struct Config {
     /// Override with UPLOAD_DIR (absolute or relative to the launch cwd).
     pub upload_dir: String,
     pub jwt_secret: String,
+    /// Master HMAC key. **Never leaves the server**: it hashes friend codes
+    /// and server invite codes, where the input space is small enough that a
+    /// published key would let an attacker compute hashes offline.
     pub hmac_key: String,
+    /// Purpose-limited key derived from `hmac_key` and published to clients
+    /// via /api/hmac-key. Clients need it to compute the sender/reaction/user
+    /// pseudonyms the server puts in responses (isOwn matching, presence
+    /// resolution) and the blocked-friend-requests hash. Deriving it means a
+    /// leaked/published client key can no longer be used to compute friend or
+    /// invite code hashes.
+    pub client_key: String,
     pub tls_cert_path: Option<String>,
     pub tls_key_path: Option<String>,
     /// TURN server URLs for WebRTC calls (e.g. "turn:turn.example.com:3478").
@@ -78,6 +88,23 @@ fn load_optional_env(env_var: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Derive the client-facing pseudonym key from the master key. Domain-separated
+/// HKDF-style construction (HMAC(master, label)) so the two keys can never be
+/// the same value even for a degenerate master key, and rotating the label is
+/// the only "migration" needed if the purpose ever changes.
+fn derive_client_key(master: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(master.as_bytes())
+        .expect("HMAC accepts keys of any length");
+    mac.update(b"e2e:client-pseudonym-key:v1");
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 fn load_or_generate_key(env_var: &str, prefix: &str) -> String {
@@ -142,6 +169,7 @@ impl Config {
 
         let jwt_secret = load_or_generate_key("JWT_SECRET", "JWT_SECRET");
         let hmac_key = load_or_generate_key("HMAC_KEY", "HMAC_KEY");
+        let client_key = derive_client_key(&hmac_key);
 
         Self {
             port: std::env::var("PORT")
@@ -159,6 +187,7 @@ impl Config {
             },
             jwt_secret,
             hmac_key,
+            client_key,
             tls_cert_path: std::env::var("TLS_CERT_PATH").ok(),
             tls_key_path: std::env::var("TLS_KEY_PATH").ok(),
             // TURN: comma-separated URLs (e.g. "turn:a.example.com:3478,turns:b.example.com:5349")

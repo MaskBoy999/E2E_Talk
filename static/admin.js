@@ -54,8 +54,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const arBtn = document.getElementById('auto-refresh-btn');
     if (arBtn) arBtn.addEventListener('click', toggleAutoRefresh);
 
-    // Clear stale HttpOnly token cookie that might interfere with admin password setup
-    fetch('/api/logout', { method: 'POST' }).catch(function() {});
+    // Clear stale HttpOnly token cookie that might interfere with admin password setup.
+    // Housekeeping, not a sign-out: `cookie_only=1` suppresses the server's
+    // `Clear-Site-Data` reply, which would otherwise wipe this origin's
+    // localStorage (including a regular user session) as a side effect of
+    // merely opening the admin page.
+    fetch('/api/logout?cookie_only=1', { method: 'POST' }).catch(function() {});
 
     // Invalidate any existing admin session so the user must re-enter the password
     invalidateAdminSession();
@@ -894,8 +898,8 @@ function renderUsers(users) {
             '<td class="blob-cell">' + escapeHtml(truncate(u.profile_banner_file_key || '', 20)) + '</td>' +
             '<td>' + (u.friend_requests_disabled ? 'Yes' : 'No') + '</td>' +
             (u.two_factor_enabled
-                ? '<td><span style="color:#43b581;font-weight:600;">ON</span> <button class="btn-delete-sm" data-2fa-uid="' + escapeHtml(u.id) + '" data-2fa-uname="' + escapeHtml(u.username) + '">Disable</button></td>'
-                : '<td style="color:#666;">Off</td>') +
+                ? '<td><span class="u-481b67c4" >ON</span> <button class="btn-delete-sm" data-2fa-uid="' + escapeHtml(u.id) + '" data-2fa-uname="' + escapeHtml(u.username) + '">Disable</button></td>'
+                : '<td class="u-6a8c41db" >Off</td>') +
             '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_profile_data || '', 30)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.friend_code_hash || '', 20)) + '</td>' +
             '<td class="blob-cell">' + escapeHtml(truncate(u.encrypted_hash_key || '', 20)) + '</td>' +
@@ -1197,7 +1201,123 @@ function renderFiles(rows) {
 // --- Admin Config ---
 async function loadAdminConfig() { await loadTabData("/api/admin/admin-config", "adminConfig", renderAdminConfig); }
 
-// --- Runtime limits (G2) — live-tunable without a restart ---
+// --- Runtime limits (G2 + finding 7) — live-tunable without a restart ---
+// Every formerly hardcoded limit is declared here once: the fields are rendered
+// from this schema and load/save read the same list, so the UI cannot drift
+// from the payload shape. Size fields carry a KB/MB/GB unit selector.
+const RT_SIZE_FIELDS = [
+    { key: 'ws_max_message_bytes', label: 'WebSocket: max message size' },
+    { key: 'ws_max_frame_bytes', label: 'WebSocket: max frame size' },
+    { key: 'ws_socket_budget_bytes', label: 'WebSocket: per-socket inbound budget' },
+    { key: 'body_limit_default_bytes', label: 'Request body: default limit' },
+    { key: 'body_limit_import_bytes', label: 'Request body: admin import limit' },
+    { key: 'body_limit_vault_bytes', label: 'Request body: vault upload limit' },
+];
+// Size caps that are not request bodies: the icon-pack slot cap is served to
+// the client through /api/client-config, so raising it here is enough. The
+// chunk cap is the server's per-write bound for file uploads.
+const RT_MISC_SIZE_FIELDS = [
+    { key: 'icon_slot_max_bytes', label: 'Icon pack: max encrypted slot size' },
+    { key: 'upload_chunk_max_bytes', label: 'File upload: max chunk size' },
+];
+const RT_SECONDS_FIELDS = [
+    { key: 'ws_socket_budget_window_secs', label: 'WebSocket: inbound budget window (seconds)' },
+    { key: 'request_timeout_secs', label: 'Whole-request timeout (seconds)' },
+];
+// Every rate limit is a (max, window) pair; the window half is tunable too, so
+// a "10 per 5 min" can become "10 per hour" without a rebuild.
+const RT_WINDOW_FIELDS = [
+    { key: 'mutation_window_secs', label: 'Mutation budget window (default 10s)' },
+    { key: 'login_window_secs', label: 'Login / 2FA window (default 300s)' },
+    { key: 'kill_switch_window_secs', label: 'Kill-switch window (default 300s)' },
+    { key: 'reauth_window_secs', label: 'Re-auth window (default 300s)' },
+    { key: 'auth_params_window_secs', label: 'auth-params window (default 60s)' },
+    { key: 'register_ip_window_secs', label: 'Registration per-IP window (default 600s)' },
+    { key: 'join_server_window_secs', label: 'Server-join window (default 600s)' },
+    { key: 'friend_request_window_secs', label: 'Friend-request window (default 600s)' },
+    { key: 'hmac_key_window_secs', label: 'hmac-key window (default 60s)' },
+    { key: 'client_config_window_secs', label: 'client-config window (default 60s)' },
+    { key: 'search_window_secs', label: 'Search window (default 60s)' },
+    { key: 'ws_auth_window_secs', label: 'WS auth window (default 60s)' },
+    { key: 'voice_media_window_secs', label: 'Voice media window (default 10s)' },
+    { key: 'create_server_window_secs', label: 'Server-creation window (default 3600s)' },
+    { key: 'admin_login_window_secs', label: 'Admin login window (default 300s)' },
+    { key: 'login_fail_notify_window_secs', label: 'Failed-login notify window (default 600s)' },
+];
+const RT_COUNT_FIELDS = [
+    { key: 'ws_auth_max', label: 'WS auth attempts / IP / minute' },
+    { key: 'login_ip_max', label: 'Login attempts / IP / 5 min' },
+    { key: 'login_user_max', label: 'Login attempts / username / 5 min' },
+    { key: 'login_user_fail_max', label: 'Failed passwords / username / 15 min' },
+    { key: 'register_ip_max', label: 'Registrations / IP / 10 min' },
+    { key: 'kill_switch_ip_max', label: 'Kill-switch attempts / IP / 5 min' },
+    { key: 'kill_switch_user_max', label: 'Kill-switch attempts / account / 5 min' },
+    { key: 'login_2fa_ip_max', label: '2FA code attempts / IP / 5 min' },
+    { key: 'login_fail_notify_max', label: 'Failed-login notifications / account / 10 min' },
+    { key: 'auth_params_ip_max', label: 'auth-params fetches / IP / minute' },
+    { key: 'reauth_ip_max', label: 'Re-auth attempts / IP / 5 min' },
+    { key: 'reauth_user_max', label: 'Re-auth attempts / account / 5 min' },
+    { key: 'create_server_max', label: 'Server creations / account / hour' },
+    { key: 'admin_login_ip_max', label: 'Admin logins / IP / 5 min' },
+    { key: 'hmac_key_ip_max', label: 'hmac-key fetches / IP / minute' },
+    { key: 'client_config_ip_max', label: 'client-config fetches / IP / minute' },
+    { key: 'search_ip_max', label: 'Search requests / IP / minute' },
+    { key: 'friend_request_ip_max', label: 'Friend requests / IP / 10 min' },
+    { key: 'friend_request_user_max', label: 'Friend requests / account / 10 min' },
+    { key: 'register_user_max', label: 'Registrations / username / 5 min' },
+    { key: 'join_server_user_max', label: 'Server joins / account / 10 min' },
+    { key: 'voice_media_max', label: 'Voice media frames / account / 10 s' },
+];
+// Seconds + windows + counts all render as plain number inputs.
+const RT_GENERIC_FIELDS = RT_SECONDS_FIELDS.concat(RT_WINDOW_FIELDS, RT_COUNT_FIELDS);
+const RT_UNITS = ['B', 'KB', 'MB', 'GB'];
+
+function rtBytesToUnit(bytes) {
+    const b = Number(bytes) || 0;
+    if (b > 0 && b % (1024 * 1024 * 1024) === 0) return { value: b / (1024 * 1024 * 1024), unit: 'GB' };
+    if (b > 0 && b % (1024 * 1024) === 0) return { value: b / (1024 * 1024), unit: 'MB' };
+    if (b > 0 && b % 1024 === 0) return { value: b / 1024, unit: 'KB' };
+    return { value: b, unit: 'B' };
+}
+
+function rtUnitToBytes(value, unit) {
+    const factor = { B: 1, KB: 1024, MB: 1024 * 1024, GB: 1024 * 1024 * 1024 }[unit] || 1;
+    return Math.max(0, Math.round((Number(value) || 0) * factor));
+}
+
+function rtFieldHtml(field, kind) {
+    const label = '<label for="rt-f-' + field.key + '" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">' +
+        escapeHtml(field.label) + ' <span id="rt-src-' + field.key + '" class="rt-source"></span></label>';
+    if (kind === 'size') {
+        return '<div>' + label +
+            '<div style="display:flex;gap:8px;">' +
+            '<input type="number" id="rt-f-' + field.key + '" min="0" class="modal-input" style="flex:1;box-sizing:border-box;" />' +
+            '<select id="rt-u-' + field.key + '" class="modal-input" style="width:72px;">' +
+            RT_UNITS.map((u) => '<option value="' + u + '">' + u + '</option>').join('') + '</select></div></div>';
+    }
+    return '<div>' + label +
+        '<input type="number" id="rt-f-' + field.key + '" min="0" class="modal-input" style="width:100%;box-sizing:border-box;" /></div>';
+}
+
+function rtSectionHtml(title, fields, kind) {
+    return '<div class="u-b794d9f8" >' +
+        '<div class="u-d6be19aa" >' + escapeHtml(title) + '</div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">' +
+        fields.map((f) => rtFieldHtml(f, kind)).join('') + '</div></div>';
+}
+
+(function rtBuildDynamicFields() {
+    const host = document.getElementById('rt-dynamic-fields');
+    if (!host) return;
+    host.innerHTML =
+        rtSectionHtml('WebSocket protection', RT_SIZE_FIELDS.slice(0, 3), 'size') +
+        rtSectionHtml('Request bodies', RT_SIZE_FIELDS.slice(3), 'size') +
+        rtSectionHtml('Icons & upload chunks', RT_MISC_SIZE_FIELDS, 'size') +
+        rtSectionHtml('Timeouts', RT_SECONDS_FIELDS, 'count') +
+        rtSectionHtml('Auth rate limits', RT_COUNT_FIELDS, 'count') +
+        rtSectionHtml('Rate-limit windows', RT_WINDOW_FIELDS, 'count');
+})();
+
 async function loadRuntimeConfig() {
     try {
         const res = await fetch('/api/admin/runtime-config', { headers: { 'Authorization': 'Bearer ' + sessionStorage.getItem('admin_token') } });
@@ -1214,6 +1334,22 @@ async function loadRuntimeConfig() {
         document.getElementById('rt-src-file-size').textContent = '(' + (src.max_file_size_mb || 'db') + ')';
         const redactEl = document.getElementById('rt-redact-ips');
         if (redactEl) redactEl.checked = !!cfg.admin_audit_redact_ips;
+        // Finding 7 — schema-driven fields (sizes in KB/MB/GB, seconds, counts).
+        RT_SIZE_FIELDS.forEach((f) => {
+            const v = rtBytesToUnit(cfg[f.key]);
+            const input = document.getElementById('rt-f-' + f.key);
+            const unit = document.getElementById('rt-u-' + f.key);
+            if (input) input.value = v.value;
+            if (unit) unit.value = v.unit;
+        });
+        RT_GENERIC_FIELDS.forEach((f) => {
+            const input = document.getElementById('rt-f-' + f.key);
+            if (input) input.value = cfg[f.key] != null ? cfg[f.key] : 0;
+        });
+        RT_SIZE_FIELDS.concat(RT_MISC_SIZE_FIELDS, RT_GENERIC_FIELDS).forEach((f) => {
+            const badge = document.getElementById('rt-src-' + f.key);
+            if (badge) badge.textContent = '(' + ((src && src[f.key]) || 'default') + ')';
+        });
         setRtStatus('Loaded');
     } catch (e) {
         setRtStatus('Load failed: ' + e.message, true);
@@ -1236,6 +1372,16 @@ async function saveRuntimeConfig() {
         max_file_size_mb: parseInt(document.getElementById('rt-max-file-size-mb').value, 10) || 0,
         ...(redactEl ? { admin_audit_redact_ips: redactEl.checked } : {}),
     };
+    // Finding 7 — include every schema-driven limit (sizes converted to bytes).
+    RT_SIZE_FIELDS.concat(RT_MISC_SIZE_FIELDS).forEach((f) => {
+        const input = document.getElementById('rt-f-' + f.key);
+        const unit = document.getElementById('rt-u-' + f.key);
+        if (input) payload[f.key] = rtUnitToBytes(input.value, unit ? unit.value : 'B');
+    });
+    RT_GENERIC_FIELDS.forEach((f) => {
+        const input = document.getElementById('rt-f-' + f.key);
+        if (input) payload[f.key] = parseInt(input.value, 10) || 0;
+    });
     try {
         const res = await fetch('/api/admin/runtime-config', {
             method: 'PUT',
@@ -1305,7 +1451,7 @@ function rtTimeAgo(unixTs) {
 
 function renderUsageBucket(el, rows, limit, nameKey) {
     if (!rows || rows.length === 0) {
-        el.innerHTML = '<span style="color:var(--text-muted);opacity:.6">No active buckets</span>';
+        el.innerHTML = '<span class="u-8c82a048" >No active buckets</span>';
         return;
     }
     el.innerHTML = rows.map((r) => {
@@ -1330,12 +1476,12 @@ async function loadRateLimitUsage() {
         renderUsageBucket(usersEl, data.users, data.users && data.users.length ? data.users[0].limit : 0, 'username');
         renderUsageBucket(ipsEl, data.ips, data.ips && data.ips.length ? data.ips[0].limit : 0, 'ip');
         if (!data.recent_429s || data.recent_429s.length === 0) {
-            hitsEl.innerHTML = '<span style="color:var(--text-muted);opacity:.6">No 429s in the last ' + data.window_seconds + 's window</span>';
+            hitsEl.innerHTML = '<span class="u-8c82a048" >No 429s in the last ' + data.window_seconds + 's window</span>';
         } else {
             hitsEl.innerHTML = data.recent_429s.map((h) =>
                 '<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid var(--border,#2a2a3a);">' +
-                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;">' + escapeHtml(h.username) + '</span>' +
-                '<span style="color:#8a8fa3;white-space:nowrap;">' + escapeHtml(h.ip) + ' · ' + rtTimeAgo(h.ts) + '</span></div>'
+                '<span class="u-804e7a6f" >' + escapeHtml(h.username) + '</span>' +
+                '<span class="u-b3052253" >' + escapeHtml(h.ip) + ' · ' + rtTimeAgo(h.ts) + '</span></div>'
             ).join('');
         }
         if (updatedEl) updatedEl.textContent = 'updated ' + rtTimeAgo(data.last_updated);
@@ -2015,7 +2161,7 @@ async function openImportPreview(table) {
                     const col = cols[i] || '';
                     const isId = /_id$|^id$|key|nonce|salt|token|hash|blob|payload|cipher/i.test(col);
                     const cls = isId ? 'id-cell' : 'blob-cell';
-                    const txt = v === null ? '<i style="color:#777">NULL</i>' : String(v);
+                    const txt = v === null ? '<i class="u-ac34f065" >NULL</i>' : String(v);
                     const long = txt.length > 60;
                     return '<td class="' + cls + '"' + (long ? ' title="' + escapeHtml(txt) + '"' : '') + '>' +
                         (long ? escapeHtml(truncate(txt, 60)) : escapeHtml(txt)) + '</td>';
@@ -2023,7 +2169,7 @@ async function openImportPreview(table) {
             ).join('');
         }
     } catch (err) {
-        if (bodyEl) bodyEl.innerHTML = '<tr><td class="empty-state" style="color:#ed4245">Failed: ' + escapeHtml(err.message) + '</td></tr>';
+        if (bodyEl) bodyEl.innerHTML = '<tr><td class="empty-state u-66b6af1c" >Failed: ' + escapeHtml(err.message) + '</td></tr>';
         if (subEl) subEl.textContent = '';
     }
 }
@@ -2039,7 +2185,7 @@ async function loadRawTables() {
         if (countEl) countEl.textContent = rows.length + ' tables';
         renderRawTablesList();
     } catch (err) {
-        if (listEl) listEl.innerHTML = '<span style="color:#ed4245">Failed to load tables: ' + escapeHtml(err.message) + '</span>';
+        if (listEl) listEl.innerHTML = '<span class="u-66b6af1c" >Failed to load tables: ' + escapeHtml(err.message) + '</span>';
     }
 }
 function renderRawTablesList() {
@@ -2050,8 +2196,8 @@ function renderRawTablesList() {
     const filtered = rows.filter(t => !q || t.name.toLowerCase().includes(q) || String(t.count).includes(q));
     listEl.innerHTML = filtered.map(t =>
         '<button type="button" class="tab-btn" data-raw-table="' + escapeHtml(t.name) + '" style="font-size:12px;padding:6px 12px;border:1px solid #444;">' +
-        escapeHtml(t.name) + ' <span style="color:#999">(' + t.count + ')</span></button>'
-    ).join('') || '<span style="color:var(--text-muted)">No tables match.</span>';
+        escapeHtml(t.name) + ' <span class="u-d9fe14b1" >(' + t.count + ')</span></button>'
+    ).join('') || '<span class="u-5872de20" >No tables match.</span>';
     listEl.querySelectorAll('[data-raw-table]').forEach(btn => {
         btn.addEventListener('click', () => openRawTable(btn.getAttribute('data-raw-table')));
     });
@@ -2080,7 +2226,7 @@ async function openRawTable(name) {
                     const col = cols[i] || '';
                     const isId = /_id$|^id$|key|nonce|salt|token|hash|blob|payload|cipher/i.test(col);
                     const cls = isId ? 'id-cell' : 'blob-cell';
-                    const txt = v === null ? '<i style="color:#777">NULL</i>' : String(v);
+                    const txt = v === null ? '<i class="u-ac34f065" >NULL</i>' : String(v);
                     const long = txt.length > 60;
                     return '<td class="' + cls + '"' + (long ? ' title="' + escapeHtml(txt) + '"' : '') + '>' +
                         (long ? escapeHtml(truncate(txt, 60)) : escapeHtml(txt)) + '</td>';
@@ -2088,7 +2234,7 @@ async function openRawTable(name) {
             ).join('');
         }
     } catch (err) {
-        if (bodyEl) bodyEl.innerHTML = '<tr><td class="empty-state" style="color:#ed4245">Failed: ' + escapeHtml(err.message) + '</td></tr>';
+        if (bodyEl) bodyEl.innerHTML = '<tr><td class="empty-state u-66b6af1c" >Failed: ' + escapeHtml(err.message) + '</td></tr>';
         if (countEl) countEl.textContent = '';
     }
 }

@@ -161,8 +161,13 @@ document.addEventListener('DOMContentLoaded', () => {
     function clearStaleCookies() {
         // Clear client-side non-HttpOnly cookies first
         clearClientCookies();
-        // Then ask the server to clear the HttpOnly cookie
-        fetch('/api/logout', { method: 'POST', credentials: 'include' }).catch(function() {});
+        // Then ask the server to clear the HttpOnly cookie. `cookie_only=1`
+        // keeps the server from replying with `Clear-Site-Data: "storage"`,
+        // which would wipe everything the wipe above just deliberately
+        // preserved (session-duration prefs, media caches): this call is
+        // cookie housekeeping on the login page, not a sign-out. The real
+        // sign-out paths still post without the flag and evict everything.
+        fetch('/api/logout?cookie_only=1', { method: 'POST', credentials: 'include' }).catch(function() {});
     }
     clearStaleCookies();
 
@@ -203,6 +208,59 @@ document.addEventListener('DOMContentLoaded', () => {
         errorDiv.style.display = 'block';
     }
 
+    // ── F3: client-side password strength + breach check ────────────────
+    // The server only ever receives the derived verifier, so it cannot enforce
+    // strength; this is the only place a policy can live. The meter is
+    // advisory, an obviously terrible password (single class, repeated chars,
+    // all digits) is rejected, and a breach warning is shown when the password
+    // is found in Have I Been Pwned's k-anonymity API — only the first 5 hex
+    // chars of its SHA-1 ever leave the device, and the check fails open
+    // (offline/self-hosted installs still work).
+    function passwordStrength(pw) {
+        var classes = 0;
+        if (/[a-z]/.test(pw)) classes++;
+        if (/[A-Z]/.test(pw)) classes++;
+        if (/[0-9]/.test(pw)) classes++;
+        if (/[^A-Za-z0-9]/.test(pw)) classes++;
+        var score = classes;
+        if (pw.length >= 8) score++;
+        if (pw.length >= 12) score++;
+        if (/^(.)\1+$/.test(pw)) score = 0;   // aaaaaaaa
+        if (/^\d+$/.test(pw)) score = Math.min(score, 1); // 12345678
+        if (score <= 0) return { score: 0, label: 'Very weak', color: '#f04747', reason: 'Use letters, digits and symbols — not a single repeated character.' };
+        if (score <= 2) return { score: score, label: 'Weak', color: '#f0a047', reason: 'Mix upper/lowercase letters, digits and symbols; 12+ characters is better.' };
+        if (score <= 4) return { score: score, label: 'Good', color: '#f0d047', reason: '' };
+        return { score: score, label: 'Strong', color: '#2ecc71', reason: '' };
+    }
+
+    function updatePwMeter(pw) {
+        var bar = document.getElementById('register-pw-bar');
+        var label = document.getElementById('register-pw-label');
+        if (!bar || !label) return;
+        if (!pw) { bar.style.width = '0%'; label.textContent = ''; return; }
+        var s = passwordStrength(pw);
+        bar.style.width = Math.min(100, 20 + s.score * 16) + '%';
+        bar.style.background = s.color;
+        label.textContent = s.label;
+        label.style.color = s.color;
+    }
+
+    // NOTE: a breach-corpus lookup (HIBP k-anonymity) used to run here. It was
+    // removed because it required naming an external origin in `connect-src`,
+    // which this app deliberately avoids (see the F3 rule in
+    // tests/security-hardening-f.spec.ts: no third-party origin anywhere, so
+    // the app keeps working offline and no outside party sits in the page's
+    // request path). The strength floor below is what actually blocks weak
+    // passwords; a breach check can come back as a server-side proxy, which is
+    // the only place this project makes outbound calls (reqwest, as web push
+    // already does).
+
+    (function wirePwMeter() {
+        var pwInput = document.getElementById('register-password');
+        if (!pwInput) return;
+        pwInput.addEventListener('input', function () { updatePwMeter(pwInput.value); });
+    })();
+
     function setLoading(form, loading) {
         const btn = form.querySelector('button[type="submit"]');
         btn.disabled = loading;
@@ -224,61 +282,20 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoading(loginForm, true);
 
         try {
-            // Step 1: Fetch encrypted hash_key from server
-            let hashKeyBytes = null;
-            let ksVerifier = null;
-            try {
-                const paramsRes = await fetch('/api/auth-params/' + encodeURIComponent(username));
-                if (paramsRes.ok) {
-                    const params = await paramsRes.json();
-                    if (params.encrypted_hash_key && params.hash_key_salt && params.hash_key_nonce) {
-                        const hashKeyB64 = E2ECrypto.decryptWithPassword(
-                            params.encrypted_hash_key, password,
-                            params.hash_key_salt, params.hash_key_nonce
-                        );
-                        if (hashKeyB64) {
-                            hashKeyBytes = new Uint8Array(E2ECrypto.base64ToArrayBuffer(hashKeyB64));
-                            // Cache for reauth — stored AFTER _secReKey below
-                            // so secure-storage encrypts with the password-derived key.
-                            window._loginAuthKeyB64 = hashKeyB64;
-                        }
-                    }
-                    // Kill Switch: the real password didn't decrypt the hash_key,
-                    // so try the kill-switch verifier (Argon2id-wrapped with the
-                    // kill-switch password). The raw kill-switch password is NEVER
-                    // sent to the server — only this client-decrypted verifier.
-                    if (!hashKeyBytes && params.has_kill_switch
-                        && params.kill_switch_verifier_encrypted
-                        && params.kill_switch_wrap_salt
-                        && params.kill_switch_wrap_nonce) {
-                        const v = E2ECrypto.decryptWithPassword(
-                            params.kill_switch_verifier_encrypted, password,
-                            params.kill_switch_wrap_salt, params.kill_switch_wrap_nonce
-                        );
-                        if (v) ksVerifier = v;
-                    }
-                }
-            } catch (_) {}
-
-            // Step 2: Determine password to send (hashed for new users, raw for legacy)
-            var loginPassword;
-            if (hashKeyBytes) {
-                loginPassword = E2ECrypto.hmacHex(hashKeyBytes, password);
-            } else if (ksVerifier) {
-                // Kill-switch attempt — send an empty password plus the proof;
-                // the server must never see the raw kill-switch password.
-                loginPassword = '';
-            } else {
-                // Legacy fallback: auth-params not available (user registered before
-                // client-side hashing). Send raw password — server detects Argon2 hash.
-                loginPassword = password;
-            }
+            // Step 1+2: Build the login body. Accounts registered by a supported
+            // client sign a fresh single-use server nonce with a deterministic
+            // Ed25519 key derived from (hash_key, password), so the reusable
+            // credential never crosses the wire (finding 3). Legacy accounts
+            // send the credential plus their derived public key — the server
+            // upgrades them to signed logins on success. Kill-switch attempts
+            // keep their decrypted-proof shape (never the raw password).
+            const loginBody = await E2ECrypto.loginRequestBody(username, password);
 
             // Step 3: Attempt login
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password: loginPassword, kill_switch_proof: ksVerifier || undefined, duration_seconds: getSessionDurationSecs(), device_id: getWsDeviceId(), device_name: getDeviceName() })
+                body: JSON.stringify(Object.assign(loginBody, { duration_seconds: getSessionDurationSecs(), device_id: getWsDeviceId(), device_name: getDeviceName() }))
             });
 
             const data = await res.json();
@@ -430,6 +447,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     const hmacData = await hmacRes.json();
                     if (hmacData.hmac_key) {
                         localStorage.setItem('e2e_hmac_key', hmacData.hmac_key);
+                        // Keep in lockstep with HMAC_KEY_CACHE_VERSION in chat.js:
+                        // a cache written by an older derivation is ignored there.
+                        localStorage.setItem('e2e_hmac_key_version', '2');
                     }
                 }
             } catch (_) {}
@@ -529,6 +549,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // F3 — strength floor: reject obviously terrible passwords; warn
+        // (without blocking) on weak or breached ones.
+        var strength = passwordStrength(password);
+        if (strength.score <= 1) {
+            showError('Password is too weak. ' + strength.reason);
+            return;
+        }
+
         if (password !== confirmPassword) {
             showError('Passwords do not match');
             return;
@@ -546,6 +574,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const hashKeyB64 = E2ECrypto.arrayBufferToBase64(hashKey);
             const encryptedHashKey = E2ECrypto.encryptWithPassword(hashKeyB64, password);
             const hashedPassword = E2ECrypto.hmacHex(hashKey, password);
+            // F3 — derive the deterministic Ed25519 login key from the same
+            // secret. The server stores only the public half; logins sign a
+            // fresh nonce instead of transmitting the credential.
+            const loginPublicKey = E2ECrypto.deriveLoginPublicKey(hashKey, password);
 
             // Cache for later use (reauth, etc.) — stored AFTER _secReKey below
             // so secure-storage encrypts with the password-derived key.
@@ -584,6 +616,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     username, password: hashedPassword,
+                    login_public_key: loginPublicKey,
                     duration_seconds: getSessionDurationSecs(),
                     device_id: getWsDeviceId(),
                     device_name: getDeviceName(),
@@ -640,7 +673,11 @@ document.addEventListener('DOMContentLoaded', () => {
             // with the password-derived key, making them decryptable on index.html.
             E2ECrypto.saveIdentityKeyPair(keypair, data.user.id);
             if (_authKeyB64) localStorage.setItem('e2e_auth_key', _authKeyB64);
-            if (hmacKey) localStorage.setItem('e2e_hmac_key', hmacKey);
+            if (hmacKey) {
+                localStorage.setItem('e2e_hmac_key', hmacKey);
+                // See HMAC_KEY_CACHE_VERSION in chat.js.
+                localStorage.setItem('e2e_hmac_key_version', '2');
+            }
             localStorage.setItem('e2e_friend_code', friendCode);
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));

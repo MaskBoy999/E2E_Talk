@@ -1,5 +1,78 @@
 # PROGRESS
 
+## Raw-password lockdown, legacy fallbacks removed, post-quantum audit (0.2.43)
+
+**Post-quantum audit: the transport is already hybrid, the E2EE layer is not.**
+`POST_QUANTUM_AUDIT.md` inventories every hidden asset against a
+record-now-decrypt-later adversary. The TLS leg is already PQ — rustls's
+`prefer-post-quantum` default (aws-lc-rs) negotiates X25519MLKEM768, verified
+live with OpenSSL 3.5.6 (`Negotiated TLS1.3 group: X25519MLKEM768`). The
+application-layer E2EE is the gap: message/key envelopes, per-server keys,
+file keys, call keys and the server notification escrow all use X25519 ECDH,
+so recorded ciphertext becomes readable once X25519 falls. The symmetric
+layer (XChaCha20-Poly1305, AES-256-GCM, Argon2id, HMAC/SHA-256, JWT HS256,
+TOTP) is PQ-safe and stays. Plan: hybrid X25519+ML-KEM-768 envelopes behind a
+version byte (libsodium has no ML-KEM — vendor @noble/post-quantum; Rust gets
+ml-kem/ml-dsa), hybrid Ed25519+ML-DSA-65 login signatures, hybrid call-key
+envelopes, and explicit residuals for the WebRTC DTLS and Web Push P-256 legs
+that cannot be fixed app-side.
+
+**Finding 8 closed: XLSX previews now render in the docx sandbox.** The last
+document view that built attacker-supplied HTML in the key-bearing origin is
+gone. `static/doc-preview.js` gained `xlsxSandboxDocument()` — a second
+opaque-origin frame (`sandbox="allow-scripts"`, CSP pinned to the vendored
+SheetJS build) where the workbook is parsed and the `sheet_to_html` output is
+built; the app receives only sheet names, the rendered height and a truncation
+flag over `postMessage`. Sheet switches go back over the same channel, the
+height report preserves the old sizing (the view grows with the sheet, a wide
+sheet scrolls inside the frame), and closing the modal releases the listener and
+watchdog. `static/style.css` gained the shared `.docx-sandbox, .xlsx-sandbox {
+width: 100% }` rule (the docx frame had no width rule, so it no longer sits at
+the iframe default width either); `doc-preview.js?v=9` and SW cache v23.
+Tests: `doc-preview` / `doc-large-file` / `doc-view-phone` / `doc-view-aspect`
+21/21 — the phone spec was stale against the already-shipped docx sandbox and
+now reads both sandboxed views through the browser's frame tree (docx text and
+phone-width reflow, xlsx table and cells); `security-review-fixes.spec.ts`
+gained an xlsx sandbox test that also proves no document table enters the app
+DOM, 18/18. `SECURITY_REVIEW_FIXES.md` §1/§2.3/§6.2 updated; finding 8 closed.
+
+**Raw-password constraint pinned — and every legacy login fallback removed.**
+The regression test the request asked for exposed a live gap before it could
+pass: `loginRequestBody()` fell back to the raw password whenever the hash_key
+could not be decrypted, so a typo'd password, an unknown username or an
+`/api/auth-params` outage handed the server the client-side root (a probe
+captured `"password":"Rp9-…-wrong"` on the wire). Since the app is still in
+development and all accounts are test accounts, the compatibility paths went
+with it: the raw-password fallback, the keyless-account credential login and
+its in-place upgrade, the pre-hash `$argon2id$` verifier, the bare-credential
+compare and the temporary `legacy_raw_password` auth-params flag are gone.
+`/api/login` now accepts only a nonce-bound Ed25519 signature from the account's
+`login_public_key`; registration and password change both require that key, and
+reauth fails closed instead of sending the raw password when the auth key is
+missing. The client-side blob flows are unchanged: key bundle, hash_key,
+identity escrow and friend code are still re-wrapped with the NEW raw password
+locally (Argon2id + XChaCha20-Poly1305) and the signing key rotates with them —
+password-change 4/4 (key blob intact, identity + friend code recovery, 2FA
+after the change), blob-recovery and auth-flow-full green. The regression
+tests: register + correct / wrong / unknown / outage login POSTs carry no
+encoding of the raw password (raw, base64, percent-encoded), the SQLite files
+(`e2e_chat.db`, `-wal`, `-shm`) are scanned in UTF-8 and UTF-16LE with the
+fresh username as positive control, and a stubbed auth-params response
+(`legacy_raw_password: true`, missing hash key) proves the client ignores
+anything that asks for the raw password. `crypto.js?v=12`, `chat.js?v=82`; SW
+cache v24. security-review-fixes 20/20; the kill-switch + security-fixes +
+auth/2FA batches green (35 passed, 1 skipped after the fix); the first run
+caught one real regression — dropping the unknown-user early return made bogus
+usernames feed the per-account failure limiter and pre-empt the kill-switch
+throttle, so that guard is back. Wipe overlay suites re-run unchanged:
+`app-wipe-overlay` 7/7, `box-wipe-overlay` 2 passed + 1 skipped (the real erase
+stays opt-in).
+
+**Files:** `static/{crypto,chat}.js`, `static/{index,login}.html`, `static/sw.js`,
+`server/src/{auth,db,handlers}.rs`, `tests/{security-review-fixes,security-fixes,
+password-change,kill-switch,username-rate-limit,_auth-helpers}.ts`,
+`SECURITY_REVIEW_FIXES.md`, `PROGRESS.md`, `POST_QUANTUM_AUDIT.md`
+
 ## A message selects from where you point, and the app window is never a dead end (0.2.42)
 
 Both reports here are about states the app *looked* right in, and both ship in
@@ -9477,3 +9550,110 @@ where it is the authoritative check.
 `packaging/aur/build-in-container.sh`,
 `tests/arch-packaging.spec.ts`, `.gitattributes`
 
+### 159. Security work: findings status, the key-blob race, every limit tunable, CSS extracted
+
+**The 12 findings:** 1 (security headers), 2 (Tauri shell CSP), 3 (nonce-signed
+logins), 4 (derived HMAC key), 6 (cross-site/null-Origin + DNS-rebinding
+defence), 7 (rate/size limits), 9 (pinned actions + provenance), 12 (HSTS +
+logout eviction) are done and covered by tests. 8 is done for `.docx` only
+(XLSX/PPTX/PDF previews still open). **5, 10 and 11 were never implemented and
+their text is nowhere in the repo** — recorded as open in
+`SECURITY_REVIEW_FIXES.md` §6 rather than guessed at.
+
+**Every rate and size limit is now admin-tunable.** The gaps left were the
+*halves* of limits and three bare literals: all 16 rate-limit **windows** (a
+"10 per 5 min" is not tunable while the 5 min is fixed; 0 seconds is rejected),
+the per-username registration budget, the per-account server-join budget, the
+voice-media budget, the icon-pack slot cap (now served through
+`/api/client-config`, so `icon-packs.js` checks the same number the server
+enforces) and the per-chunk upload bound. That is 21 new fields on top of the
+existing 32, all rendered from one schema in `admin.js` with db/env/default
+source badges and applied live.
+
+**Password change could still lose the re-wrapped key blob** — three separate
+holes, all closed. `loadDecryptedPassword()` reads `window._vaultSessionPassword`
+first and nothing updated it on a change, so every save after the change was
+wrapped with the OLD password; the first save of a page load was blind
+(`base_rev: null`) and the server must accept blind writes, so a save composed
+before the change landed after it and won; and the change itself did not bump
+`user_key_blobs.rev`. Fixes: the session password is swapped (and the change
+response's revision adopted) before any queued save can run, the pending blob
+debounce is cancelled before the POST, the mirror reads the blob once to learn
+the revision so every write is optimistic, and `change_password_credentials()`
+bumps `rev` in the same transaction and returns it. `tests/password-change.spec.ts`
+4/4 (was 3/4) after a probe that showed the clobbering PUT directly.
+
+**Hardcoded CSS:** `tools/inline-style-to-class.mjs` has now been applied to
+every app file — `index.html`, `admin.html`, `login.html`, `pair.html`, and the
+JS that builds markup (204 more attributes → 134 classes), and `admin.html`'s two
+`<style>` blocks plus the `css-spin` keyframes moved into `style.css` verbatim.
+Left in place deliberately: `display:` values (both app code and 347 test
+assertions read `element.style.display` as a visibility flag — needs an
+accessor refactor first), runtime-built values (concatenation and `${}`, which
+cannot be a static class), the standalone
+pages that never load `style.css` (`box-setup.html`, `test-secure-*`), and
+`doc-preview.js`'s sandboxed frame.
+
+**Multi-device:** the security work added no session or device cap — sessions
+remain unlimited per account (only same-device rows collapse), and a second
+device still logs in with just the password. The one deliberate sign-out is a
+password change revoking *other* sessions (pre-existing behaviour, in the same
+transaction), which the suite covers.
+
+**Verified:** `password-change` 4/4, `admin-runtime-config` 11/11,
+`custom-css` 10/10, `security-review-fixes` + `security-headers` +
+`security-hardening-f` + `markdown-xss` in the same run; `cargo test --release`
+for the server. Not committed — the whole security effort is still uncommitted
+on `test`.
+
+**Files:** `server/src/{main,handlers,ws,db}.rs`, `static/{chat,admin,icon-packs,
+secure-storage,style}.{js,css}`, `static/{index,admin,login,pair}.html`,
+`tools/inline-style-to-class.mjs`, `SECURITY_REVIEW_FIXES.md`,
+`tests/{password-change,admin-runtime-config,custom-css}.spec.ts`
+
+
+**The "erase everything" control is a native window now, not page chrome (ask C).**
+`static/app-overlay.js` drew it inside the main WebView, which is exactly the
+control that disappears when the WebView cannot run a page: Chromium's own error
+page (dead host), a blank/grey boot after an update, a failed script load. The
+watchdog (`watch_closed_host` / `watch_page_alive`) rescued those by navigating
+back to the address screen, but it moved the user and still needed a page.
+Desktop now owns a separate always-on-top window: `src-tauri/src/wipe_overlay.rs`
+creates `static/box-wipe.html` at launch, anchors it to the bottom-left of the
+main (or setup) window, follows it on Moved/Resized/Focused plus a 1 s backstop,
+hides with it when minimized / hidden to the tray, and never navigates it. The
+page half of the wipe is still the page's (`box:wipe-requested` -> logout + the
+JS wipe); the shell half runs always and needs no page
+(`clear_all_browsing_data()` — HttpOnly cookies, every origin's localStorage,
+IndexedDB, caches — then the saved address + pin, then the address screen).
+"Hide this button" hides it for the run only (memory flag). The overlay page's
+capability grants `core:event:default` and nothing else. Android keeps the
+page-drawn button (there is no second window there) and its
+`box:clear-connection` path now also runs the native clearing. Files:
+`src-tauri/src/wipe_overlay.rs`, `src-tauri/capabilities/wipe-overlay.json`,
+`static/box-wipe.{html,js}`, `static/app-overlay.js` (stops drawing when
+`__E2E_NATIVE_WIPE_OVERLAY__` is set), `src-tauri/src/lib.rs` (init script on the
+main/setup windows, window-event sync, AppState flags). Tests:
+`tests/box-wipe-overlay.spec.ts` (a real build over CDP: the window exists with
+its button while the main window is blanked, panel arming, and an opt-in
+destructive erase), the desktop rules in `tests/app-wipe-overlay.spec.ts`, and
+the anchor-geometry unit test in `cargo test` (15/15).
+
+**Security findings, second pass.** Findings 4/6/7/9/12 and the TURN half of
+V17 were re-checked against the review text and are all in place (per-purpose
+derived HMAC key; Host allow-list + Fetch Metadata + null-Origin rejection; every
+rate/size limit live in the admin panel — 52 values, verified field-by-field
+against the server's payload; SHA-pinned actions + provenance; CSP, HSTS without
+`preload`, COOP/COEP/CORP, Permissions-Policy, X-Robots-Tag, Clear-Site-Data;
+per-session TURN credentials from `TURN_SECRET` with a TTL). Findings 5/10/11 are
+design/documentation items: §6 of `SECURITY_REVIEW_FIXES.md` now carries the
+review's wording plus the padding/jitter plan, the MLS/ratchet direction and the
+written crypto-agility + hybrid X25519/ML-KEM migration plan (ASVS 11.1.4). The
+docx preview was already sandboxed; XLSX/PPTX/PDF were checked sink-by-sink
+(CSV/PPTX use `textContent`, PDF renders to canvas, XLSX output is escaped by
+SheetJS) and the remaining XLSX-in-a-frame work is scoped in §6.2.
+
+**Files:** `src-tauri/src/{wipe_overlay,lib}.rs`,
+`src-tauri/capabilities/wipe-overlay.json`, `static/box-wipe.{html,js}`,
+`static/{app-overlay.js,index,login,box-setup}.html`, `static/sw.js`,
+`tests/{app-wipe-overlay,box-wipe-overlay}.spec.ts`, `SECURITY_REVIEW_FIXES.md`

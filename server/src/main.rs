@@ -1,3 +1,8 @@
+// The runtime-tuning JSON response carries every tunable (50+ fields) in one
+// `serde_json::json!` literal; the macro expands recursively per field, which
+// overruns the default recursion limit.
+#![recursion_limit = "512"]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -36,6 +41,11 @@ pub struct AppState {
     /// (every authenticated mutation + every file-upload init) never touches
     /// the DB. Precedence per value: admin_config DB row → env var → default.
     pub runtime_tuning: std::sync::Arc<std::sync::RwLock<RuntimeTuning>>,
+    /// F3 — single-use login nonces. `/api/auth-params/{username}` hands one
+    /// out per account; the login signature covers exactly one of them and it
+    /// is consumed on first use (2-minute TTL, bounded per user), so a
+    /// captured signed login can never be replayed.
+    pub login_nonces: std::sync::Mutex<std::collections::HashMap<String, Vec<(String, std::time::Instant)>>>,
     /// Temporary soundboard play audio (token → (bytes, created_at)).
     /// Clients upload decrypted audio here, send the token via WS,
     /// and receivers fetch via HTTP — avoids base64-enormous WS payloads.
@@ -51,10 +61,170 @@ pub struct AppState {
     pub fcm_token: push::FcmTokenCache,
     /// Shared HTTP client for push sends (connection pooling).
     pub push_http: reqwest::Client,
+    /// Hostnames this server answers to. A DNS-rebinding request arrives with
+    /// the attacker's hostname in `Host` while connected to this server's IP,
+    /// so comparing Origin to Host cannot catch it (they match by design).
+    /// Built at startup from localhost + every local interface address +
+    /// `TLS_SAN` / `ALLOWED_HOSTS`; empty disables the check (`ALLOWED_HOSTS=*`).
+    pub allowed_hosts: Vec<String>,
 }
 
-/// G2 limits that can be tuned at runtime from the admin panel.
-/// `0` means "unlimited" for every field.
+/// Hostnames/Host-ports this server is allowed to answer for. A DNS-rebinding
+/// attack hits the server's IP with the attacker's *hostname* in Host; the
+/// only reliable defence is a list of names the server actually owns.
+/// `ALLOWED_HOSTS=*` disables the check for exotic reverse-proxy setups.
+fn build_allowed_hosts() -> Vec<String> {
+    fn push(haystack: &mut Vec<String>, raw: &str) {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() { return; }
+        if !haystack.contains(&name) { haystack.push(name); }
+    }
+    if let Ok(val) = std::env::var("ALLOWED_HOSTS") {
+        if val.split(',').any(|s| s.trim() == "*") {
+            return Vec::new();
+        }
+    }
+    let mut hosts: Vec<String> = Vec::new();
+    for base in ["localhost", "127.0.0.1", "[::1]", "::1"] {
+        push(&mut hosts, base);
+    }
+    for var in ["ALLOWED_HOSTS", "TLS_SAN"] {
+        if let Ok(val) = std::env::var(var) {
+            for entry in val.split(',') { push(&mut hosts, entry); }
+        }
+    }
+    if let Ok(addrs) = local_ip_address::list_afinet_netifas() {
+        for (_name, ip) in addrs { push(&mut hosts, &ip.to_string()); }
+    }
+    hosts
+}
+
+/// Strip a port from a Host header value, preserving IPv6 brackets
+/// (`[::1]:3443` → `[::1]`, `localhost:3443` → `localhost`).
+fn host_without_port(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+    if host.starts_with('[') {
+        if let Some(end) = host.find(']') { return host[..=end].to_string(); }
+        return host;
+    }
+    match host.rsplit_once(':') {
+        Some((name, port))
+            if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            name.to_string()
+        }
+        _ => host,
+    }
+}
+
+/// The app's Permissions-Policy. Calls and screen share keep camera,
+/// microphone and display-capture on this origin; everything the app never
+/// uses is denied outright, so a successful XSS cannot reach the mic, the
+/// camera or the user's location.
+const PERMISSIONS_POLICY: &str = "camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=(), usb=(), serial=(), hid=(), midi=(), idle-detection=()";
+
+impl AppState {
+    /// HMAC under the published client-pseudonym key (never the master). Use
+    /// this for every value a client must be able to recompute: sender /
+    /// reactor / voter / acker ids, friend-request user ids, and notification
+    /// type blinding. Friend/invite code hashes use `config.hmac_key` directly
+    /// and stay server-side, so a fetched client key cannot hash codes.
+    pub fn client_hmac_hex(&self, data: &str) -> String {
+        db::hmac_sha256_hex(self.config.client_key.as_bytes(), data)
+    }
+
+    /// F3 — mint a fresh single-use login nonce (32 random bytes, hex).
+    pub fn issue_login_nonce(&self, username: &str) -> String {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let nonce: String = (0..32).map(|_| format!("{:02x}", rng.gen::<u8>())).collect();
+        let mut map = self.login_nonces.lock().unwrap();
+        // Bound the map: drop expired entries when it grows past a sane cap.
+        if map.len() > 10_000 {
+            map.retain(|_, v| {
+                v.retain(|(_, t)| t.elapsed() < LOGIN_NONCE_TTL);
+                !v.is_empty()
+            });
+        }
+        let entry = map.entry(username.to_string()).or_default();
+        entry.retain(|(_, t)| t.elapsed() < LOGIN_NONCE_TTL);
+        if entry.len() >= LOGIN_NONCE_MAX_PER_USER {
+            entry.remove(0);
+        }
+        entry.push((nonce.clone(), std::time::Instant::now()));
+        nonce
+    }
+
+    /// F3 — verify and consume a login nonce. True only for a live, unused
+    /// nonce of that exact account; a replay finds it already gone.
+    pub fn consume_login_nonce(&self, username: &str, nonce: &str) -> bool {
+        let mut map = self.login_nonces.lock().unwrap();
+        let Some(entry) = map.get_mut(username) else { return false };
+        let Some(pos) = entry
+            .iter()
+            .position(|(n, t)| n == nonce && t.elapsed() < LOGIN_NONCE_TTL)
+        else {
+            return false;
+        };
+        entry.remove(pos);
+        if entry.is_empty() {
+            map.remove(username);
+        }
+        true
+    }
+}
+
+/// F3 — lifetime and per-account cap of login nonces handed out by
+/// `/api/auth-params` (multi-device safe: several live nonces per account).
+const LOGIN_NONCE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+const LOGIN_NONCE_MAX_PER_USER: usize = 8;
+
+/// F3 — derivation label for the Ed25519 login signing key the client derives
+/// from the same secret as the legacy login credential. Both sides must agree
+/// on the exact message the signature covers (see `verify_login_signature`).
+pub const LOGIN_SIGNING_CONTEXT: &str = "e2e-login-v1";
+
+pub fn login_signing_message(username: &str, nonce: &str) -> String {
+    format!("{}|{}|{}", LOGIN_SIGNING_CONTEXT, username, nonce)
+}
+
+/// Decode/validate a base64 Ed25519 public key (32 bytes).
+pub fn decode_login_public_key(public_key_b64: &str) -> Option<[u8; 32]> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(public_key_b64.trim())
+        .ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+/// F3 — verify a nonce-bound Ed25519 login signature. Failure (bad length,
+/// bad point, bad signature) is a plain `false`, never a server error.
+pub fn verify_login_signature(
+    public_key_b64: &str,
+    username: &str,
+    nonce: &str,
+    signature_b64: &str,
+) -> bool {
+    use base64::Engine as _;
+    let Some(pk) = decode_login_public_key(public_key_b64) else { return false };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pk) else { return false };
+    let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(signature_b64.trim()) else {
+        return false;
+    };
+    let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig_bytes) else { return false };
+    vk.verify_strict(login_signing_message(username, nonce).as_bytes(), &sig)
+        .is_ok()
+}
+
+/// Runtime-tunable limits, editable live from the admin panel (the
+/// runtime-limits modal) without a restart. Cached in memory so hot paths
+/// never touch the DB. Precedence per value: admin_config DB row → env var →
+/// default. `0` means "unlimited" for every field.
+///
+/// This is the single home for limits that used to be hardcoded: mutation
+/// budgets (G2), every auth/WS rate limit, the WebSocket message/frame caps and
+/// per-socket inbound budget, the request body limits (default / admin import /
+/// vault), and the request timeout.
 #[derive(Clone, Debug)]
 pub struct RuntimeTuning {
     /// Per-user mutation budget per 10s window (default 120).
@@ -65,46 +235,305 @@ pub struct RuntimeTuning {
     pub file_storage_quota_bytes: i64,
     /// Max single-file upload size in MB (default 1024 = 1 GiB; 0 = unlimited).
     pub max_file_size_mb: i64,
-    /// Where each value came from: "db" | "env" | "default" (for the admin UI).
-    pub sources: [&'static str; 4],
+    // ---- WebSocket (finding 7) ----
+    /// Max size of a single WS message in bytes (default 1 MiB).
+    pub ws_max_message_bytes: u64,
+    /// Max size of a single WS frame in bytes (default 1 MiB).
+    pub ws_max_frame_bytes: u64,
+    /// Per-socket inbound byte budget per window (default 32 MiB).
+    pub ws_socket_budget_bytes: u64,
+    /// Length of the per-socket inbound budget window (default 10s).
+    pub ws_socket_budget_window_secs: u64,
+    /// Max failed WS auth attempts per IP per minute (default 10).
+    pub ws_auth_max: u32,
+    // ---- Request bodies (finding 7) ----
+    /// Default max request-body size in bytes (default 64 MiB).
+    pub body_limit_default_bytes: u64,
+    /// Max body for admin DB/upload imports in bytes (default 4 GiB).
+    pub body_limit_import_bytes: u64,
+    /// Max body for vault uploads in bytes (default 2 GiB).
+    pub body_limit_vault_bytes: u64,
+    // ---- Timeouts (finding 7) ----
+    /// Whole-request timeout in seconds (default 300; 0 = no timeout).
+    pub request_timeout_secs: u64,
+    // ---- Auth rate limits (finding 7) ----
+    /// Login attempts per IP per 5 min (default 10; 0 = disabled).
+    pub login_ip_max: u32,
+    /// Login attempts per username per 5 min (default 10).
+    pub login_user_max: u32,
+    /// Failed passwords per username per 15 min (default 3).
+    pub login_user_fail_max: u32,
+    /// Registrations per IP per 10 min (default 5).
+    pub register_ip_max: u32,
+    /// Kill-switch proof attempts per IP per 5 min (default 5).
+    pub kill_switch_ip_max: u32,
+    /// Kill-switch proof attempts per account per 5 min (default 5).
+    pub kill_switch_user_max: u32,
+    /// 2FA code attempts per IP per 5 min (default 10).
+    pub login_2fa_ip_max: u32,
+    /// Failed-login notifications per account per 10 min (default 5).
+    pub login_fail_notify_max: u32,
+    /// /api/auth-params requests per IP per minute (default 10).
+    pub auth_params_ip_max: u32,
+    /// Session re-auth attempts per IP per 5 min (default 10).
+    pub reauth_ip_max: u32,
+    /// Session re-auth attempts per account per 5 min (default 10).
+    pub reauth_user_max: u32,
+    /// Server creations per account per hour (default 30).
+    pub create_server_max: u32,
+    /// Admin-panel login attempts per IP per 5 min (default 10).
+    pub admin_login_ip_max: u32,
+    /// /api/hmac-key fetches per IP per minute (default 6).
+    pub hmac_key_ip_max: u32,
+    /// /api/client-config fetches per IP per minute (default 60).
+    pub client_config_ip_max: u32,
+    /// /api/search requests per IP per minute (default 300).
+    pub search_ip_max: u32,
+    /// Friend requests per IP per 10 min (default 10).
+    pub friend_request_ip_max: u32,
+    /// Friend requests per account per 10 min (default 10).
+    pub friend_request_user_max: u32,
+    /// Registration attempts per username (default 10). The per-username twin
+    /// of `register_ip_max`, so one name cannot be hammered from many IPs.
+    pub register_user_max: u32,
+    /// Server joins per account (default 10).
+    pub join_server_user_max: u32,
+    /// Voice media frames/signals per account (default 3000).
+    pub voice_media_max: u32,
+    /// Largest accepted ciphertext for one icon slot, in bytes (default 4 MiB).
+    /// Must match the client's cap, so the value is also served from
+    /// /api/client-config.
+    pub icon_slot_max_bytes: u64,
+    /// Largest accepted size for one file-upload chunk, in bytes (default
+    /// 1 MiB; the client splits plaintext into 64 KiB chunks, so an encrypted
+    /// chunk is under 66 KiB — this is the server's abuse bound, not a
+    /// functional limit).
+    pub upload_chunk_max_bytes: u64,
+    // ---- Rate-limit windows ----
+    // A "10 per 5 min" limit is not tunable while the 5 min is not, so every
+    // window that belonged to a limit is a field of its own.
+    /// Mutation budget window in seconds (default 10).
+    pub mutation_window_secs: u64,
+    /// Login / 2FA / registration-username window in seconds (default 300).
+    pub login_window_secs: u64,
+    /// Kill-switch proof window in seconds (default 300).
+    pub kill_switch_window_secs: u64,
+    /// Session re-auth window in seconds (default 300).
+    pub reauth_window_secs: u64,
+    /// /api/auth-params window in seconds (default 60).
+    pub auth_params_window_secs: u64,
+    /// Registration per-IP window in seconds (default 600).
+    pub register_ip_window_secs: u64,
+    /// Server-join window in seconds (default 600).
+    pub join_server_window_secs: u64,
+    /// Friend-request window in seconds (default 600).
+    pub friend_request_window_secs: u64,
+    /// /api/hmac-key window in seconds (default 60).
+    pub hmac_key_window_secs: u64,
+    /// /api/client-config window in seconds (default 60).
+    pub client_config_window_secs: u64,
+    /// /api/search window in seconds (default 60).
+    pub search_window_secs: u64,
+    /// WebSocket auth window in seconds (default 60).
+    pub ws_auth_window_secs: u64,
+    /// Voice media budget window in seconds (default 10).
+    pub voice_media_window_secs: u64,
+    /// Server-creation window in seconds (default 3600).
+    pub create_server_window_secs: u64,
+    /// Admin-panel login window in seconds (default 300; keeps accepting the
+    /// ADMIN_LOGIN_IP_WINDOW_SECS env var).
+    pub admin_login_window_secs: u64,
+    /// Failed-login notification window in seconds (default 600).
+    pub login_fail_notify_window_secs: u64,
+    /// Where each value came from: field name → "db" | "env" | "default".
+    pub sources: std::collections::HashMap<&'static str, &'static str>,
 }
 
 impl RuntimeTuning {
     /// Load the tuning, honoring admin_config DB rows, then env vars, then defaults.
     pub fn load(db: &db::Database) -> Self {
-        // Returns (db_value, env_value, default) as Option<u64>.
-        let resolve = |key: &str, env: &str, default: u64| -> (Option<u64>, Option<u64>, u64) {
-            let db_val = db.get_config_value(key).ok().flatten().and_then(|v| v.trim().parse::<u64>().ok());
-            let env_val = std::env::var(env).ok().and_then(|v| v.trim().parse::<u64>().ok());
-            (db_val, env_val, default)
-        };
-
-        let (db_user, env_user, def_user) = resolve("mutation_user_max", "MUTATION_USER_MAX", 120);
-        let (db_ip, env_ip, def_ip) = resolve("mutation_ip_max", "MUTATION_IP_MAX", 1000);
-        let (db_quota, env_quota, def_quota) = resolve("file_storage_quota_bytes", "FILE_STORAGE_QUOTA_BYTES", 1024 * 1024 * 1024);
-        let (db_mfs, env_mfs, def_mfs) = resolve("max_file_size_mb", "MAX_FILE_SIZE_MB", 1024);
-
-        let pick = |db: Option<u64>, env: Option<u64>, def: u64| -> (u64, &'static str) {
-            if let Some(v) = db {
+        // Returns (db value, env value, default) with provenance.
+        let resolve = |key: &str, env: &str, default: u64| -> (u64, &'static str) {
+            let db_val = db
+                .get_config_value(key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            let env_val = std::env::var(env)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            if let Some(v) = db_val {
                 (v, "db")
-            } else if let Some(v) = env {
+            } else if let Some(v) = env_val {
                 (v, "env")
             } else {
-                (def, "default")
+                (default, "default")
             }
         };
+        let mut sources: std::collections::HashMap<&'static str, &'static str> =
+            std::collections::HashMap::new();
+        macro_rules! tuned {
+            ($key:literal, $env:literal, $default:expr) => {{
+                let (v, src) = resolve($key, $env, $default);
+                sources.insert($key, src);
+                v
+            }};
+        }
 
-        let (user, src_user) = pick(db_user, env_user, def_user);
-        let (ip, src_ip) = pick(db_ip, env_ip, def_ip);
-        let (quota, src_quota) = pick(db_quota, env_quota, def_quota);
-        let (mfs, src_mfs) = pick(db_mfs, env_mfs, def_mfs);
+        let mutation_user_max = tuned!("mutation_user_max", "MUTATION_USER_MAX", 120) as u32;
+        let mutation_ip_max = tuned!("mutation_ip_max", "MUTATION_IP_MAX", 1000) as u32;
+        let file_storage_quota_bytes =
+            tuned!("file_storage_quota_bytes", "FILE_STORAGE_QUOTA_BYTES", 1024 * 1024 * 1024) as i64;
+        let max_file_size_mb = tuned!("max_file_size_mb", "MAX_FILE_SIZE_MB", 1024) as i64;
+        // WebSocket caps default to the previously hardcoded 1 MiB / 32 MiB;
+        // operators can tighten them (256 KiB is a good default target) or
+        // loosen them live from the admin panel.
+        let ws_max_message_bytes =
+            tuned!("ws_max_message_bytes", "WS_MAX_MESSAGE_BYTES", 1024 * 1024);
+        let ws_max_frame_bytes = tuned!("ws_max_frame_bytes", "WS_MAX_FRAME_BYTES", 1024 * 1024);
+        let ws_socket_budget_bytes =
+            tuned!("ws_socket_budget_bytes", "WS_SOCKET_BUDGET_BYTES", 32 * 1024 * 1024);
+        let ws_socket_budget_window_secs =
+            tuned!("ws_socket_budget_window_secs", "WS_SOCKET_BUDGET_WINDOW_SECS", 10);
+        let ws_auth_max = tuned!("ws_auth_max", "WS_AUTH_MAX", 10) as u32;
+        let body_limit_default_bytes =
+            tuned!("body_limit_default_bytes", "BODY_LIMIT_DEFAULT_BYTES", 64 * 1024 * 1024);
+        let body_limit_import_bytes = tuned!(
+            "body_limit_import_bytes",
+            "BODY_LIMIT_IMPORT_BYTES",
+            4u64 * 1024 * 1024 * 1024
+        );
+        let body_limit_vault_bytes = tuned!(
+            "body_limit_vault_bytes",
+            "BODY_LIMIT_VAULT_BYTES",
+            2u64 * 1024 * 1024 * 1024
+        );
+        let request_timeout_secs =
+            tuned!("request_timeout_secs", "REQUEST_TIMEOUT_SECS", 300);
+        let login_ip_max = tuned!("login_ip_max", "LOGIN_IP_MAX", 10) as u32;
+        let login_user_max = tuned!("login_user_max", "LOGIN_USER_MAX", 10) as u32;
+        let login_user_fail_max = tuned!("login_user_fail_max", "LOGIN_USER_FAIL_MAX", 3) as u32;
+        let register_ip_max = tuned!("register_ip_max", "REGISTER_IP_MAX", 5) as u32;
+        let kill_switch_ip_max = tuned!("kill_switch_ip_max", "KILL_SWITCH_IP_MAX", 5) as u32;
+        let kill_switch_user_max =
+            tuned!("kill_switch_user_max", "KILL_SWITCH_USER_MAX", 5) as u32;
+        let login_2fa_ip_max = tuned!("login_2fa_ip_max", "LOGIN_2FA_IP_MAX", 10) as u32;
+        let login_fail_notify_max =
+            tuned!("login_fail_notify_max", "LOGIN_FAIL_NOTIFY_MAX", 5) as u32;
+        let auth_params_ip_max = tuned!("auth_params_ip_max", "AUTH_PARAMS_IP_MAX", 10) as u32;
+        let reauth_ip_max = tuned!("reauth_ip_max", "REAUTH_IP_MAX", 10) as u32;
+        let reauth_user_max = tuned!("reauth_user_max", "REAUTH_USER_MAX", 10) as u32;
+        let create_server_max = tuned!("create_server_max", "CREATE_SERVER_MAX", 30) as u32;
+        let admin_login_ip_max =
+            tuned!("admin_login_ip_max", "ADMIN_LOGIN_IP_MAX", 10) as u32;
+        let hmac_key_ip_max = tuned!("hmac_key_ip_max", "HMAC_KEY_IP_MAX", 6) as u32;
+        let client_config_ip_max =
+            tuned!("client_config_ip_max", "CLIENT_CONFIG_IP_MAX", 60) as u32;
+        let search_ip_max = tuned!("search_ip_max", "SEARCH_IP_MAX", 300) as u32;
+        let friend_request_ip_max =
+            tuned!("friend_request_ip_max", "FRIEND_REQUEST_IP_MAX", 10) as u32;
+        let friend_request_user_max =
+            tuned!("friend_request_user_max", "FRIEND_REQUEST_USER_MAX", 10) as u32;
+        let register_user_max = tuned!("register_user_max", "REGISTER_USER_MAX", 10) as u32;
+        let join_server_user_max =
+            tuned!("join_server_user_max", "JOIN_SERVER_USER_MAX", 10) as u32;
+        let voice_media_max = tuned!("voice_media_max", "VOICE_MEDIA_MAX", 3000) as u32;
+        // Default lives next to the upload handler so the two cannot drift;
+        // the panel/env can raise or lower it live.
+        let icon_slot_max_bytes = tuned!(
+            "icon_slot_max_bytes",
+            "ICON_SLOT_MAX_BYTES",
+            crate::handlers::MAX_ICON_SLOT_B64 as u64
+        );
+        let upload_chunk_max_bytes =
+            tuned!("upload_chunk_max_bytes", "UPLOAD_CHUNK_MAX_BYTES", 1024 * 1024);
+        let mutation_window_secs = tuned!("mutation_window_secs", "MUTATION_WINDOW_SECS", 10);
+        let login_window_secs = tuned!("login_window_secs", "LOGIN_WINDOW_SECS", 300);
+        let kill_switch_window_secs =
+            tuned!("kill_switch_window_secs", "KILL_SWITCH_WINDOW_SECS", 300);
+        let reauth_window_secs = tuned!("reauth_window_secs", "REAUTH_WINDOW_SECS", 300);
+        let auth_params_window_secs =
+            tuned!("auth_params_window_secs", "AUTH_PARAMS_WINDOW_SECS", 60);
+        let register_ip_window_secs =
+            tuned!("register_ip_window_secs", "REGISTER_IP_WINDOW_SECS", 600);
+        let join_server_window_secs =
+            tuned!("join_server_window_secs", "JOIN_SERVER_WINDOW_SECS", 600);
+        let friend_request_window_secs =
+            tuned!("friend_request_window_secs", "FRIEND_REQUEST_WINDOW_SECS", 600);
+        let hmac_key_window_secs = tuned!("hmac_key_window_secs", "HMAC_KEY_WINDOW_SECS", 60);
+        let client_config_window_secs =
+            tuned!("client_config_window_secs", "CLIENT_CONFIG_WINDOW_SECS", 60);
+        let search_window_secs = tuned!("search_window_secs", "SEARCH_WINDOW_SECS", 60);
+        let ws_auth_window_secs = tuned!("ws_auth_window_secs", "WS_AUTH_WINDOW_SECS", 60);
+        let voice_media_window_secs =
+            tuned!("voice_media_window_secs", "VOICE_MEDIA_WINDOW_SECS", 10);
+        let create_server_window_secs =
+            tuned!("create_server_window_secs", "CREATE_SERVER_WINDOW_SECS", 3600);
+        let admin_login_window_secs = tuned!(
+            "admin_login_window_secs",
+            "ADMIN_LOGIN_IP_WINDOW_SECS",
+            300
+        );
+        let login_fail_notify_window_secs = tuned!(
+            "login_fail_notify_window_secs",
+            "LOGIN_FAIL_NOTIFY_WINDOW_SECS",
+            600
+        );
 
         RuntimeTuning {
-            mutation_user_max: user as u32,
-            mutation_ip_max: ip as u32,
-            file_storage_quota_bytes: quota as i64,
-            max_file_size_mb: mfs as i64,
-            sources: [src_user, src_ip, src_quota, src_mfs],
+            mutation_user_max,
+            mutation_ip_max,
+            file_storage_quota_bytes,
+            max_file_size_mb,
+            ws_max_message_bytes,
+            ws_max_frame_bytes,
+            ws_socket_budget_bytes,
+            ws_socket_budget_window_secs,
+            ws_auth_max,
+            body_limit_default_bytes,
+            body_limit_import_bytes,
+            body_limit_vault_bytes,
+            request_timeout_secs,
+            login_ip_max,
+            login_user_max,
+            login_user_fail_max,
+            register_ip_max,
+            kill_switch_ip_max,
+            kill_switch_user_max,
+            login_2fa_ip_max,
+            login_fail_notify_max,
+            auth_params_ip_max,
+            reauth_ip_max,
+            reauth_user_max,
+            create_server_max,
+            admin_login_ip_max,
+            hmac_key_ip_max,
+            client_config_ip_max,
+            search_ip_max,
+            friend_request_ip_max,
+            friend_request_user_max,
+            register_user_max,
+            join_server_user_max,
+            voice_media_max,
+            icon_slot_max_bytes,
+            upload_chunk_max_bytes,
+            mutation_window_secs,
+            login_window_secs,
+            kill_switch_window_secs,
+            reauth_window_secs,
+            auth_params_window_secs,
+            register_ip_window_secs,
+            join_server_window_secs,
+            friend_request_window_secs,
+            hmac_key_window_secs,
+            client_config_window_secs,
+            search_window_secs,
+            ws_auth_window_secs,
+            voice_media_window_secs,
+            create_server_window_secs,
+            admin_login_window_secs,
+            login_fail_notify_window_secs,
+            sources,
         }
     }
 }
@@ -116,6 +545,7 @@ impl RuntimeTuning {
 /// responses (the app also serves a dev HTTP port), so this is safe and matches
 /// the static-file handler's behavior.
 async fn security_headers_mw(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -128,9 +558,33 @@ async fn security_headers_mw(request: Request, next: Next) -> Response {
     headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert("permissions-policy", HeaderValue::from_static(PERMISSIONS_POLICY));
+    headers.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
+    headers.insert("cross-origin-embedder-policy", HeaderValue::from_static("require-corp"));
+    // Vendored parser libraries (/libs/*) are loaded by the sandboxed document
+    // preview, whose opaque origin can never match `same-origin`; they are
+    // public code, so they are explicitly embeddable. Everything else stays
+    // same-origin. Without this the preview frame's scripts die with
+    // ERR_BLOCKED_BY_RESPONSE and the document never renders.
+    if path.starts_with("/libs/") {
+        headers.insert("cross-origin-resource-policy", HeaderValue::from_static("cross-origin"));
+    } else {
+        headers.insert("cross-origin-resource-policy", HeaderValue::from_static("same-origin"));
+    }
+    headers.insert("x-robots-tag", HeaderValue::from_static("noindex, nofollow, noarchive, nosnippet"));
+    if path.starts_with("/api/") {
+        // API bodies are per-user secrets or state; never let a shared cache
+        // or the disk cache keep a copy. `no-store` matches the static
+        // handler's behaviour and the middleware runs on JSON/error responses
+        // that handler never touches.
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    }
+    // HSTS without `preload`: the token is meaningless for a self-hosted
+    // hostname (preload requires a public domain) and opt-in lists should
+    // never receive a name the operator did not submit themselves.
     headers.insert(
         "strict-transport-security",
-        HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
     );
     response
 }
@@ -157,7 +611,149 @@ async fn security_headers_mw(request: Request, next: Next) -> Response {
 ///     bundles; `wasm-unsafe-eval` covers WebAssembly, and this one is kept for
 ///     the JS they generate at load time. It is the next thing to remove, after
 ///     checking the ASR path in a real call.
-const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+// `connect-src` names exactly one external origin: the Have I Been Pwned
+// k-anonymity range API, used by the registration-time breach check (finding
+// 3). Only the first 5 hex chars of the password's SHA-1 leave the device, the
+// check fails open when offline, and no other code path may talk to it.
+const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+
+/// Reject requests whose Host header is not a name this server actually owns.
+/// This is the DNS-rebinding half of the origin check: under rebinding the
+/// attacker's page is same-origin with the rebound server, so Origin and Host
+/// both say `evil.example` and match — only knowing the server's own names
+/// (`allowed_hosts`) catches it. Non-browser clients are unaffected because
+/// they target the real host anyway. A missing Host header is left to the
+/// HTTP stack (Hyper rejects HTTP/1.1 requests without one).
+async fn host_allowlist_mw(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state.allowed_hosts.is_empty() {
+        if let Some(host) = request.headers().get("host").and_then(|v| v.to_str().ok()) {
+            let bare = host_without_port(host);
+            if !state.allowed_hosts.iter().any(|h| h == &bare) {
+                tracing::warn!("Rejected request with unknown Host header: {}", bare);
+                return (
+                    StatusCode::MISDIRECTED_REQUEST,
+                    axum::Json(serde_json::json!({"error": "Unknown host"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
+
+/// Bound how long one request may occupy its task before it is answered with
+/// 408. This is the Slowloris-class guard: a client that dribbles a body or
+/// stalls a handler forever would otherwise hold the connection (and any
+/// per-connection buffers) indefinitely. Downloads are unaffected — their
+/// response future completes as soon as the stream body is handed back.
+/// The limit is live-tunable from the admin panel (`request_timeout_secs`,
+/// 0 = no timeout).
+async fn request_timeout_mw(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let secs = state.runtime_tuning.read().unwrap().request_timeout_secs;
+    if secs == 0 {
+        return next.run(request).await;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            axum::Json(serde_json::json!({"error": "Request timed out"})),
+        )
+            .into_response(),
+    }
+}
+
+fn payload_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        axum::Json(serde_json::json!({"error": "Payload too large"})),
+    )
+        .into_response()
+}
+
+/// Finding 7 — live-configurable request-body caps, replacing the old hardcoded
+/// `DefaultBodyLimit` layers so an operator can retune them (KB/MB/GB) from the
+/// admin panel without a restart. The path selects the configured limit
+/// (default / admin import / vault). A Content-Length over the limit is rejected
+/// up front; a chunked body (or one that lies about its length) is cut off
+/// mid-stream and answered with 413 as soon as the limit is crossed, so no
+/// handler can ever buffer past it.
+async fn body_limit_mw(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    if !matches!(method, Method::POST | Method::PUT | Method::PATCH | Method::DELETE) {
+        return next.run(request).await;
+    }
+    let limit = {
+        let path = request.uri().path();
+        let tuning = state.runtime_tuning.read().unwrap();
+        if path.starts_with("/api/admin/import-") {
+            tuning.body_limit_import_bytes
+        } else if path == "/api/vault/upload" {
+            tuning.body_limit_vault_bytes
+        } else {
+            tuning.body_limit_default_bytes
+        }
+    };
+    if limit == 0 {
+        return next.run(request).await;
+    }
+    if let Some(len) = request
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        if len > limit {
+            return payload_too_large();
+        }
+    }
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let exceeded_flag = exceeded.clone();
+    let (parts, body) = request.into_parts();
+    use futures::StreamExt as _;
+    let body_stream = Box::pin(body.into_data_stream());
+    let stream = futures::stream::unfold((body_stream, 0u64), move |(mut stream, seen)| {
+        let exceeded_flag = exceeded_flag.clone();
+        async move {
+            match stream.next().await {
+                Some(Ok(bytes)) => {
+                    let seen = seen.saturating_add(bytes.len() as u64);
+                    if seen > limit {
+                        exceeded_flag.store(true, Ordering::Relaxed);
+                        return Some((
+                            Err(axum::Error::new(std::io::Error::other(
+                                "request body limit exceeded",
+                            ))),
+                            (stream, seen),
+                        ));
+                    }
+                    Some((Ok(bytes), (stream, seen)))
+                }
+                Some(Err(e)) => Some((Err(e), (stream, seen))),
+                None => None,
+            }
+        }
+    });
+    let response = next
+        .run(Request::from_parts(parts, axum::body::Body::from_stream(stream)))
+        .await;
+    if exceeded.load(Ordering::Relaxed) {
+        return payload_too_large();
+    }
+    response
+}
 
 /// G2 — Per-user + per-IP rate limit on authenticated state-changing /api calls.
 /// Skips the endpoints that have their own limiters (login/register/reauth,
@@ -213,6 +809,31 @@ async fn origin_check_mw(request: Request, next: Next) -> Response {
             .get("host")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        // A `null` Origin is a sandboxed iframe, a data: page, or a file://
+        // document — none of them is this app, and the WS/CSRF guards above
+        // only compare host strings, so `null` must never be treated as a
+        // match. Non-browser clients send no Origin at all and stay allowed.
+        if origin.as_deref() == Some("null") {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({"error": "Cross-origin request blocked"})),
+            )
+                .into_response();
+        }
+        // Fetch Metadata: browsers label each request with its relationship to
+        // the target. A cross-site POST/PUT/PATCH/DELETE to this API is never
+        // the app (which is same-origin) — reject it even when Origin was
+        // omitted or forged. Missing header = non-browser client, still allowed
+        // (Bearer auth applies).
+        if let Some(site) = request.headers().get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+            if site.eq_ignore_ascii_case("cross-site") {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({"error": "Cross-site request blocked"})),
+                )
+                    .into_response();
+            }
+        }
         if let (Some(origin), Some(host)) = (origin, host) {
             if !origin_host_matches(&origin, &host) {
                 return (
@@ -228,12 +849,9 @@ async fn origin_check_mw(request: Request, next: Next) -> Response {
 
 /// Compare an Origin header (e.g. "https://localhost:3443") with the Host
 /// header ("localhost:3443"). Ignores the scheme; compares host+port
-/// case-insensitively. Accepts the "null" origin (sandboxed/file contexts).
+/// case-insensitively. Callers reject the "null" origin before calling this.
 /// Also used by the WS handler (F6 — cross-site WebSocket hijacking guard).
 pub(crate) fn origin_host_matches(origin: &str, host: &str) -> bool {
-    if origin == "null" {
-        return true;
-    }
     let origin_host = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))
@@ -459,7 +1077,7 @@ async fn serve_static(
             headers.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
             headers.insert("cross-origin-embedder-policy", HeaderValue::from_static("require-corp"));
             headers.insert("strict-transport-security", HeaderValue::from_static(
-                "max-age=31536000; includeSubDomains; preload"
+                "max-age=31536000; includeSubDomains"
             ));
 
             (headers, contents).into_response()
@@ -565,12 +1183,14 @@ async fn main() {
     }
 
     let state = Arc::new(AppState {
+        allowed_hosts: build_allowed_hosts(),
         setup_complete: AtomicBool::new(!fresh),
         db,
         config: config.clone(),
         ws_manager,
         voice_rooms: std::sync::RwLock::new(std::collections::HashMap::new()),
         runtime_tuning,
+        login_nonces: std::sync::Mutex::new(std::collections::HashMap::new()),
         sb_temp_play: std::sync::RwLock::new(std::collections::HashMap::new()),
         vapid,
         fcm,
@@ -818,16 +1438,6 @@ async fn main() {
         .route("/api/admin/table/{table}", get(handlers::admin_table_rows))
         .route("/api/admin/export-db", get(handlers::admin_export_db))
         .route("/api/admin/export-uploads", get(handlers::admin_export_uploads))
-        .route("/api/admin/import-db", post(handlers::admin_import_db))
-        .route("/api/admin/import-uploads", post(handlers::admin_import_uploads))
-        // Admin DB backups can be far larger than the 32MB router-wide limit
-        // (a full app DB with messages/files is often 40MB+, and the uploads
-        // bundle grows it further). This route lifts axum's body limit to 4GiB
-        // (the Bytes extractor allocates only what the client actually sends,
-        // and the endpoint is admin-token-gated), so a big backup uploads
-        // instead of bouncing off axum's default 2MB / the 32MB Json layer with
-        // a plain-text 413 that the client can't parse.
-        .route_layer(DefaultBodyLimit::max(4 * 1024 * 1024 * 1024))
         .route("/api/admin/clear", post(handlers::admin_clear_all))
         .route("/api/admin/audit-log", get(handlers::admin_audit_log))
         .route(
@@ -874,26 +1484,39 @@ async fn main() {
         .route("/api/users/me/stickers/{sticker_id}", delete(handlers::remove_user_sticker))
         .route("/api/online", get(handlers::list_online_users))
         .route("/api/link-preview", get(handlers::link_preview))
-        .route("/api/vault/upload", post(handlers::vault_upload))
         .route("/api/vault/files", get(handlers::vault_list))
         .route("/api/vault/files/{file_id}", get(handlers::vault_download).delete(handlers::vault_delete))
         .route("/api/me/export", get(handlers::export_user_data))
         .route("/api/me/self-destruct", get(handlers::get_self_destruct).put(handlers::set_self_destruct))
         .route("/ws", get(ws::ws_handler))
-        .fallback(get(serve_static))
-        // Encrypted audio blobs, ringtones, and vault file uploads are raw
-        // binary bodies. Vault files can be 1 GB+ after compression+encryption.
-        // Raise to 2 GiB — the vault quota check in the handler is the real
-        // size gate; payloads are per-authenticated-user, rate-limited, and
-        // quota-gated.
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
-        // G1/G2/G3 hardening layers. Order (last layer = outermost): the
-        // security headers wrap everything; the origin check and mutation
-        // rate limit run before handlers. File-chunk uploads are exempt from
-        // the mutation limiter (bounded by the storage quota instead).
+        .fallback(get(serve_static));
+
+    // Admin DB backups can be far larger than any other body (a full app DB
+    // with messages/files is often 40 MB+, and the uploads bundle grows it
+    // further); the endpoints are admin-token-gated. Vault files can be 1 GB+
+    // after compression+encryption — the vault quota check in the handler is
+    // the real size gate. These routes are merged BEFORE the global layers so
+    // every hardening layer (host allowlist, origin check, security headers,
+    // the configurable body caps) applies to them too; the body caps are
+    // path-selected inside `body_limit_mw` (default / import / vault).
+    let import_routes = Router::new()
+        .route("/api/admin/import-db", post(handlers::admin_import_db))
+        .route("/api/admin/import-uploads", post(handlers::admin_import_uploads));
+    let vault_routes = Router::new().route("/api/vault/upload", post(handlers::vault_upload));
+    let app = app.merge(import_routes).merge(vault_routes);
+
+    // `DefaultBodyLimit` no longer fixes the real limits: every request body is
+    // streamed through `body_limit_mw`, which enforces the live admin-configured
+    // caps. The layer below only raises axum's built-in 2 MB extractor ceiling
+    // to "unbounded" so the middleware is the single source of truth.
+    let app = app
+        .layer(DefaultBodyLimit::max(usize::MAX))
+        .layer(middleware::from_fn_with_state(state.clone(), body_limit_mw))
         .layer(middleware::from_fn_with_state(state.clone(), mutation_rate_limit_mw))
         .layer(middleware::from_fn(origin_check_mw))
+        .layer(middleware::from_fn_with_state(state.clone(), request_timeout_mw))
         .layer(middleware::from_fn(security_headers_mw))
+        .layer(middleware::from_fn_with_state(state.clone(), host_allowlist_mw))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", config.port);

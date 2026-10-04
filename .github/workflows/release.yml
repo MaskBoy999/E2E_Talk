@@ -20,10 +20,10 @@ on:
   workflow_dispatch:
 
 # Publishing runs through `gh release` (see "Publish release assets"), which
-# needs write access to the repository contents. Without it the build succeeds
-# while the release keeps only whatever tauri-action managed to push.
-permissions:
-  contents: write
+# needs write access to the repository contents. That access is granted per JOB
+# below, not workflow-wide: every third-party action in this file is pinned to
+# a full commit SHA, and neither the pin nor the write scope would be worth
+# much if one compromised step could use a token that every other step holds.
 
 concurrency:
   group: release-${{ github.ref }}
@@ -48,6 +48,8 @@ jobs:
   # ---------------------------------------------------------------------------
   create-release:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       # `gh` resolves the repository from the git remote, so this job needs a
       # checkout: without one it is not inside a repository at all and every
@@ -55,7 +57,7 @@ jobs:
       # "Create release" was the only failing step, and the build legs (which
       # do check out) are where gh has always worked. `-R "$repo"` below is
       # the belt-and-braces half so the commands stay correct on their own.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
       - name: Create release
@@ -198,6 +200,12 @@ jobs:
   build:
     # The release object must exist before either leg uploads to it.
     needs: create-release
+    # contents: write  — publish installers/checksums to the release
+    # id-token+attestations: write — build-provenance attestation below
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -214,7 +222,7 @@ jobs:
     env:
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Tauri's Linux toolchain.
       - name: Install Linux dependencies
@@ -223,13 +231,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to a master-history commit (the action requires a SHA that is in
+      # master's history) and selects the toolchain via the input instead of the
+      # @rev, per dtolnay/rust-toolchain's own pinning instructions.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
 
@@ -300,7 +313,7 @@ jobs:
       # created once by the create-release job now; this step only ever builds.
       # It is also used for manual (non-tag) runs, which stay artifact-only.
       - name: Build installers
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         with:
           args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
 
@@ -328,7 +341,7 @@ jobs:
 
       - name: Upload installers (manual run)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-chat-${{ matrix.label }}
           path: src-tauri/target/**/release/bundle/**
@@ -352,6 +365,16 @@ jobs:
       # is idempotent, so this survives a re-run of the same tag (creating
       # was the part that used to fail with "already_exists").
       # ---------------------------------------------------------------------
+      # SLSA-style provenance for the bytes this job just built. Signed by
+      # GitHub's OIDC identity for this workflow; downstream users can verify
+      # with `gh attestation verify <file> -R <repo>`. The subject glob is the
+      # same bundle tree the checksum step covers.
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: 'src-tauri/target/release/bundle/**'
+
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash

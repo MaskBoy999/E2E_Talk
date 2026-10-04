@@ -17,6 +17,13 @@ mod linux_webview;
 mod config;
 #[cfg(windows)]
 mod win_webview;
+
+// Desktop: the native always-on "clear all app data" overlay window. See the
+// module docs — it exists so the wipe control (and the wipe itself) survives
+// the WebView's own error page, a blank/grey boot and a host that is gone for
+// good, none of which can run a page script to draw one.
+#[cfg(desktop)]
+mod wipe_overlay;
 // Desktop toast with an OS-enforced expiration (F3): the notification plugin
 // has no close on desktop, so `box:notify` bypasses it on Windows.
 #[cfg(desktop)]
@@ -266,6 +273,13 @@ pub struct AppState {
     /// `None` when it has never spoken or is currently hidden. See
     /// [`watch_page_alive`].
     pub page_alive_at: Mutex<Option<std::time::Instant>>,
+    /// The native wipe overlay (desktop, `wipe_overlay.rs`): hidden for the
+    /// rest of this run when the user presses "Hide this button". In memory on
+    /// purpose — a fresh launch always has the button back.
+    pub wipe_overlay_hidden: Mutex<bool>,
+    /// Whether the overlay is showing its panel (expanded) rather than the
+    /// button, so geometry and re-sync agree with what the page is showing.
+    pub wipe_panel_open: Mutex<bool>,
 }
 
 // ── Certificate pinning helpers ──────────────────────────────────────────
@@ -1190,6 +1204,11 @@ fn open_main_window(app: &tauri::AppHandle, server_url: &str) -> Result<(), Stri
         .disable_drag_drop_handler()
         // Navigation allowlist — see `nav_allowlist`.
         .on_navigation(nav_allowlist(app));
+
+    #[cfg(desktop)]
+    {
+        builder = builder.initialization_script(wipe_overlay::INIT_SCRIPT);
+    }
     if let Some(args) = webview_browser_args(gpu_disabled(app)) {
         builder = builder.additional_browser_args(&args);
     }
@@ -1269,6 +1288,11 @@ fn open_setup_in_main(app: &tauri::AppHandle) -> Result<(), String> {
         .title("E2E Chat — Setup")
         .inner_size(560.0, 660.0)
         .on_navigation(nav_allowlist(app));
+
+    #[cfg(desktop)]
+    {
+        builder = builder.initialization_script(wipe_overlay::INIT_SCRIPT);
+    }
     if let Some(args) = webview_browser_args(gpu_disabled(app)) {
         builder = builder.additional_browser_args(&args);
     }
@@ -1299,6 +1323,7 @@ fn open_setup(app: &tauri::AppHandle) -> Result<(), String> {
                 .inner_size(560.0, 660.0)
                 .resizable(false);
         if let Some(args) = webview_browser_args(gpu_disabled(app)) {
+            setup_builder = setup_builder.initialization_script(wipe_overlay::INIT_SCRIPT);
             setup_builder = setup_builder.additional_browser_args(&args);
         }
         match setup_builder.build()
@@ -1891,6 +1916,20 @@ pub fn run() {
             {
                 let for_wipe = handle.clone();
                 handle.listen(CLEAR_CONNECTION_EVENT, move |_| {
+                    // The emitting page has already signed out and wiped what
+                    // JS can reach. This adds the half only the shell can do —
+                    // the WebView's own storage, HttpOnly cookies included —
+                    // and then drops the saved address and pinned certificate.
+                    // Every platform: on Android the page still draws its own
+                    // button and asks this way, and the clearing is harmless
+                    // when the page's JS wipe already ran.
+                    if let Some(main) = for_wipe.get_webview_window(MAIN_LABEL) {
+                        if let Err(e) = main.clear_all_browsing_data() {
+                            eprintln!(
+                                "{CLEAR_CONNECTION_EVENT}: could not clear the WebView's storage: {e}"
+                            );
+                        }
+                    }
                     forget_connection(&for_wipe);
                 });
             }
@@ -2111,6 +2150,13 @@ pub fn run() {
             handle.manage(TrayUi::default());
             #[cfg(desktop)]
             build_tray(&handle)?;
+
+            // The native wipe overlay (desktop): created here, kept in place
+            // from here on. It is what makes "the button is always there" true
+            // even when the WebView cannot run a page at all — the error page,
+            // a blank boot, a host that stopped hosting forever.
+            #[cfg(desktop)]
+            wipe_overlay::install(&handle);
             Ok(())
         });
 
@@ -2128,6 +2174,19 @@ pub fn run() {
             if minimize && window.label() == MAIN_LABEL {
                 api.prevent_close();
                 let _ = window.hide();
+            }
+        }
+        // Keep the native wipe overlay glued to whichever window the user is
+        // looking at, and hidden when none of them is on screen (minimized,
+        // hidden to the tray). The overlay's own events are ignored: it is what
+        // gets positioned, not what it floats over.
+        if window.label() != wipe_overlay::LABEL {
+            match event {
+                WindowEvent::Moved(_)
+                | WindowEvent::Resized(_)
+                | WindowEvent::Focused(_)
+                | WindowEvent::CloseRequested { .. } => wipe_overlay::sync(window.app_handle()),
+                _ => {}
             }
         }
     });

@@ -6,7 +6,7 @@
     <title>E2E Chat - Login</title>
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=8">
+    <link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
@@ -41,7 +41,7 @@
                 <input type="text" id="login-2fa-code" placeholder="Code" required autocomplete="one-time-code" maxlength="12" inputmode="text">
                 <p id="login-2fa-error" class="error" style="display:none;"></p>
                 <button type="submit">Verify &amp; Log In</button>
-                <button type="button" id="login-2fa-back" style="background:none;border:none;color:var(--accent,#5865F2);cursor:pointer;margin-top:10px;font-size:13px;">&larr; Back to login</button>
+                <button class="u-102178bd" type="button" id="login-2fa-back" >&larr; Back to login</button>
             </form>
 
             <!-- Register Form -->
@@ -51,6 +51,13 @@
                 <div class="auth-input-row">
                     <input type="password" id="register-password" placeholder="Password (min 6 chars)" required minlength="6" autocomplete="new-password" class="auth-code-input">
                     <button type="button" class="toggle-visibility-btn" id="toggle-register-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
+                </div>
+                <!-- F3 — client-side strength meter. The server only ever sees
+                     the derived verifier, so password policy can only be
+                     enforced here. -->
+                <div class="pw-meter" id="register-pw-meter" aria-live="polite">
+                    <div class="pw-meter-track"><div class="pw-meter-bar" id="register-pw-bar"></div></div>
+                    <span class="pw-meter-label" id="register-pw-label"></span>
                 </div>
                 <div class="auth-input-row">
                     <input type="password" id="register-confirm-password" placeholder="Confirm password" required autocomplete="off" class="auth-code-input">
@@ -65,14 +72,14 @@
     </div>
     <script src="libsodium-sumo.js"></script>
     <script src="libsodium-wrappers.js"></script>
-<script src="crypto.js?v=10"></script>
+<script src="crypto.js?v=12"></script>
 <script src="keyvault.js?v=2"></script>
-<script src="secure-storage.js?v=4"></script>
+<script src="secure-storage.js?v=5"></script>
     <script src="ui-dialog.js?v=1"></script>
-    <script src="auth.js?v=12"></script>
+    <script src="auth.js?v=13"></script>
     <!-- The always-on "clear all app data" overlay (see app-overlay.js): the
          login screen is exactly where a wipe has to be reachable. -->
-    <script src="app-overlay.js?v=3"></script>
+    <script src="app-overlay.js?v=5"></script>
     <!-- Android shell: immersive system bars + Back closing the top layer.
          Inert in a browser and on desktop (see the file's header). -->
     <script src="box-shell.js?v=5"></script>

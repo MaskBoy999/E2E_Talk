@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import * as fs from 'fs';
 
 const BASE = 'https://localhost:3443';
 
@@ -19,320 +20,321 @@ async function registerAndLogin(page: Page) {
         const el = document.getElementById('loading-overlay');
         return !el || el.style.display === 'none' || el.style.opacity === '0' || !el.offsetParent;
     }, { timeout: 15000 }).catch(() => {});
-    await page.evaluate(() => { var el = document.getElementById('loading-overlay'); if(el) el.remove(); });
+    await page.evaluate(() => { var el = document.getElementById('loading-overlay'); if (el) el.remove(); });
     return username;
 }
 
 async function openCssTab(page: Page) {
+    // Dismiss any app modal (changelog, backup nags, …) that would swallow clicks.
+    await page.evaluate(() => {
+        document.querySelectorAll('.modal').forEach((m) => {
+            const el = m as HTMLElement;
+            if (m.id !== 'settings-modal' && m.id !== 'css-pw-modal') el.style.display = 'none';
+        });
+    });
     await page.click('#settings-btn');
     await page.waitForSelector('#settings-modal', { state: 'visible', timeout: 5000 });
     await page.click('.settings-tab[data-tab="custom-css-settings"]');
-    await page.waitForTimeout(500);
+    // The editor first renders a spinner, then fetches /api/user-css/slots.
+    await page.waitForSelector('#custom-css-editor-container [data-css-slot]', { timeout: 15000 });
 }
 
-test.describe('F14 · Custom CSS', () => {
+async function selectSlot(page: Page, slot: number) {
+    await page.click(`[data-css-slot="${slot}"]`);
+    // The active card gets its colored border; clicking re-renders asynchronously.
+    await page.waitForFunction((s) => {
+        const el = document.querySelector(`[data-css-slot="${s}"]`) as HTMLElement | null;
+        return !!el && el.style.borderColor !== '#333';
+    }, slot, { timeout: 15000 });
+    await page.waitForSelector(slot > 0 ? '#css-edit-slot, #css-save-slot' : '#css-refresh', { timeout: 10000 });
+}
 
-    test('CSS settings tab renders with textarea, buttons, and all 6 theme presets', async ({ page }) => {
+async function startEditing(page: Page) {
+    await page.click('#css-edit-slot');
+    await page.waitForSelector('#css-save-slot', { timeout: 10000 });
+}
+
+async function saveActiveSlot(page: Page, css: string) {
+    await startEditing(page);
+    await page.fill('#custom-css-textarea', css);
+    await page.click('#css-save-slot');
+    // The save PUT re-renders the panel out of edit mode.
+    await page.waitForSelector('#css-edit-slot', { timeout: 15000 });
+}
+
+/** The raw /api/user-css/slots payload (server-side truth, encrypted). */
+async function serverSlots(page: Page): Promise<any> {
+    return page.evaluate(() => (window as any).authFetch('/api/user-css/slots').then((r: any) => r.json()));
+}
+
+/** Text of the live `#custom-user-css` <style> element, '' when absent. */
+function appliedCss(page: Page) {
+    return page.evaluate(() => {
+        const el = document.getElementById('custom-user-css');
+        return el ? (el.textContent || '') : '';
+    });
+}
+
+test.describe('Custom CSS — 2 server-side slots + default', () => {
+
+    test('renders the 3 CSS sources and the default slot actions', async ({ page }) => {
         await registerAndLogin(page);
         await openCssTab(page);
-        expect(await page.locator('#custom-css-textarea').isVisible()).toBe(true);
-        expect(await page.locator('#css-save-local').isVisible()).toBe(true);
-        expect(await page.locator('#css-preview').isVisible()).toBe(true);
-        expect(await page.locator('#css-reset').isVisible()).toBe(true);
-        expect(await page.locator('#css-import').isVisible()).toBe(true);
-        expect(await page.locator('#css-export').isVisible()).toBe(true);
-        expect(await page.locator('#css-import-backup').isVisible()).toBe(true);
-        const presets = await page.locator('[data-preset]').count();
-        expect(presets).toBe(7); // default, performance, premium, neon, light, highcontrast, custom
+
+        await expect(page.locator('[data-css-slot]')).toHaveCount(3);
+        await expect(page.locator('[data-css-slot="0"]')).toContainText('Default');
+        await expect(page.locator('[data-css-slot="1"]')).toContainText('Slot 1');
+        await expect(page.locator('[data-css-slot="2"]')).toContainText('Slot 2');
+
+        const ta = page.locator('#custom-css-textarea');
+        await expect(ta).toBeVisible();
+        expect(await ta.evaluate((el) => (el as HTMLTextAreaElement).readOnly)).toBe(true);
+
+        // Default source: copy + refresh only; no save button until Edit.
+        await expect(page.locator('#css-copy')).toBeVisible();
+        await expect(page.locator('#css-refresh')).toBeVisible();
+        await expect(page.locator('#css-save-slot')).toHaveCount(0);
+
+        // The shipped stylesheet is loaded into the textarea for inspection.
+        await expect(ta).toHaveValue(/--bg-primary/, { timeout: 15000 });
     });
 
-    test('save local CSS persists in localStorage and applies', async ({ page }) => {
+    test('save to Slot 1 persists on the server and re-applies after reload', async ({ page }) => {
+        test.setTimeout(120000);
         await registerAndLogin(page);
         await openCssTab(page);
-        // Switch to custom mode first
-        await page.click('[data-preset="custom"]');
-        await page.waitForTimeout(300);
-        await page.fill('#custom-css-textarea', 'body { background: red !important; }');
-        await page.click('#css-save-local');
-        await page.waitForTimeout(500);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_text'))).toBe('body { background: red !important; }');
-        expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(true);
+        await selectSlot(page, 1);
+
+        const css = 'body { outline: 3px solid rgb(255, 0, 0) !important; }';
+        await saveActiveSlot(page, css);
+
+        await expect.poll(() => appliedCss(page), { timeout: 10000 }).toContain('outline: 3px solid');
+
+        const data = await serverSlots(page);
+        expect(data.active_slot).toBe(1);
+        expect(String(data.slot1.encrypted_css || '').length).toBeGreaterThan(0);
+        expect(data.slot1.nonce).toBeTruthy();
+        // Stored ciphertext, not plaintext.
+        expect(String(data.slot1.encrypted_css)).not.toContain('outline: 3px solid');
+
+        // A fresh load of the app auto-applies the active slot's CSS.
+        await page.reload();
+        await page.waitForFunction(() => {
+            const el = document.getElementById('loading-overlay');
+            return !el || el.style.display === 'none' || el.style.opacity === '0' || !el.offsetParent;
+        }, { timeout: 15000 }).catch(() => {});
+        await page.evaluate(() => { var el = document.getElementById('loading-overlay'); if (el) el.remove(); });
+        await expect.poll(() => appliedCss(page), { timeout: 20000 }).toContain('outline: 3px solid');
     });
 
-    test('reset removes CSS, localStorage, and preset selection', async ({ page }) => {
+    test('slots are independent: slot 1 and slot 2 keep different CSS', async ({ page }) => {
+        test.setTimeout(150000);
         await registerAndLogin(page);
         await openCssTab(page);
-        await page.click('[data-preset="performance"]');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBe('performance');
-        await page.click('#css-reset');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_text'))).toBeNull();
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBeNull();
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_mode'))).toBeNull();
-        expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(false);
+
+        await selectSlot(page, 1);
+        await saveActiveSlot(page, 'body { filter: hue-rotate(90deg) !important; }');
+
+        await selectSlot(page, 2);
+        await page.waitForFunction(() => {
+            const ta = document.getElementById('custom-css-textarea') as HTMLTextAreaElement | null;
+            return !!ta && ta.value.indexOf('Empty slot') !== -1;
+        }, null, { timeout: 10000 });
+        await saveActiveSlot(page, 'body { filter: invert(1) !important; }');
+
+        // Back to slot 1: its own CSS is decrypted and shown again.
+        await selectSlot(page, 1);
+        await page.waitForFunction(() => {
+            const ta = document.getElementById('custom-css-textarea') as HTMLTextAreaElement | null;
+            return !!ta && ta.value.indexOf('hue-rotate(90deg)') !== -1;
+        }, null, { timeout: 15000 });
+        await expect.poll(() => appliedCss(page), { timeout: 10000 }).toContain('hue-rotate(90deg)');
+
+        const data = await serverSlots(page);
+        expect(String(data.slot1.encrypted_css || '').length).toBeGreaterThan(0);
+        expect(String(data.slot2.encrypted_css || '').length).toBeGreaterThan(0);
+        expect(data.slot1.encrypted_css).not.toBe(data.slot2.encrypted_css);
     });
 
-    test('preview applies CSS without saving to localStorage', async ({ page }) => {
+    test('Preview applies CSS live without saving it', async ({ page }) => {
+        test.setTimeout(120000);
         await registerAndLogin(page);
         await openCssTab(page);
-        await page.click('[data-preset="custom"]');
-        await page.waitForTimeout(300);
-        await page.fill('#custom-css-textarea', 'body { background: green !important; }');
+        await selectSlot(page, 1);
+        await saveActiveSlot(page, 'body { border-color: rgb(1, 2, 3) !important; }');
+        const before = await serverSlots(page);
+
+        await startEditing(page);
+        await page.fill('#custom-css-textarea', 'body { border-color: rgb(9, 9, 9) !important; }');
         await page.click('#css-preview');
-        await page.waitForTimeout(500);
-        expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(true);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_text'))).toBeNull();
+        await expect.poll(() => appliedCss(page), { timeout: 10000 }).toContain('rgb(9, 9, 9)');
+
+        // Nothing was written to the server by Preview.
+        const after = await serverSlots(page);
+        expect(after.slot1.encrypted_css).toBe(before.slot1.encrypted_css);
+
+        // Cancel drops the preview and the saved CSS comes back.
+        await page.click('#css-cancel-edit');
+        await page.waitForSelector('#css-edit-slot', { timeout: 15000 });
+        await expect.poll(() => appliedCss(page), { timeout: 10000 }).toContain('rgb(1, 2, 3)');
     });
 
-    // ── Preset-specific tests ──
-
-    test('Performance preset: disables animations, blur, and shadows', async ({ page }) => {
+    test('Export without a password downloads an unencrypted .e2ecss file', async ({ page }) => {
+        test.setTimeout(120000);
         await registerAndLogin(page);
         await openCssTab(page);
-        await page.click('[data-preset="performance"]');
-        await page.waitForTimeout(500);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBe('performance');
-        const css = await page.evaluate(() => localStorage.getItem('custom_css_text') || '');
-        expect(css).toContain('animation: none');
-        expect(css).toContain('backdrop-filter: none');
-        expect(css).toContain('box-shadow: none');
-        expect(css).toContain('transition: none');
-        expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(true);
-    });
+        await selectSlot(page, 1);
+        const css = 'body { text-decoration: underline !important; }';
+        await saveActiveSlot(page, css);
 
-    test('Premium preset: glassmorphism, blur, and hover glow', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="premium"]');
-        await page.waitForTimeout(500);
-        const css = await page.evaluate(() => localStorage.getItem('custom_css_text') || '');
-        expect(css).toContain('backdrop-filter: blur');
-        expect(css).toContain('glassmorphism');
-        expect(css).toContain('transform: translateY');
-        expect(css).toContain('box-shadow: 0 0 16px');
-        expect(css).toContain('::-webkit-scrollbar-thumb');
-    });
-
-    test('Neon preset: cyberpunk neon glow effects', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="neon"]');
-        await page.waitForTimeout(500);
-        const css = await page.evaluate(() => localStorage.getItem('custom_css_text') || '');
-        expect(css).toContain('rgba(0, 255, 200,');
-        expect(css).toContain('#0a0a1a');
-        expect(css).toContain('#0d0d20');
-        expect(css).toContain('box-shadow: 0 0');
-        expect(css).toContain('border-radius: 8px');
-    });
-
-    test('Light preset: overrides CSS vars to light colors', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="light"]');
-        await page.waitForTimeout(500);
-        const css = await page.evaluate(() => localStorage.getItem('custom_css_text') || '');
-        expect(css).toContain('--bg-primary: #f5f5f5');
-        expect(css).toContain('--text-primary: #212121');
-        expect(css).toContain('background: #ffffff');
-        expect(css).toContain('color: #212121');
-        expect(css).toContain('#1976d2');
-    });
-
-    test('High Contrast preset: WCAG AAA with yellow focus outlines', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="highcontrast"]');
-        await page.waitForTimeout(500);
-        const css = await page.evaluate(() => localStorage.getItem('custom_css_text') || '');
-        expect(css).toContain('background: #000000');
-        expect(css).toContain('color: #ffffff');
-        expect(css).toContain('outline: 3px solid #ffff00');
-        expect(css).toContain('border: 2px solid #ffffff');
-        expect(css).toContain('animation: none');
-        expect(css).toContain('transition: none');
-    });
-
-    // ── Switching & lifecycle tests ──
-
-    test('clicking Default preset clears all CSS and preset', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="premium"]');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBe('premium');
-        await page.click('[data-preset="default"]');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBeNull();
-        const cssText = await page.evaluate(() => localStorage.getItem('custom_css_text'));
-        expect(cssText).toBe('');
-        expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(false);
-    });
-
-    test('switching presets updates textarea content', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="performance"]');
-        await page.waitForTimeout(300);
-        let taVal = await page.inputValue('#custom-css-textarea');
-        expect(taVal).toContain('animation: none');
-        await page.click('[data-preset="premium"]');
-        await page.waitForTimeout(300);
-        taVal = await page.inputValue('#custom-css-textarea');
-        expect(taVal).toContain('glassmorphism');
-        expect(taVal).not.toContain('animation: none');
-    });
-
-    test('manual CSS edit deselects preset', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="custom"]');
-        await page.waitForTimeout(300);
-        await page.fill('#custom-css-textarea', 'body { color: pink; }');
-        await page.click('#css-save-local');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBeNull();
-    });
-
-    test('reset clears preset selection visual state', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="premium"]');
-        await page.waitForTimeout(300);
-        await page.click('#css-reset');
-        await page.waitForTimeout(300);
-        const defaultBorder = await page.evaluate(() => {
-            const el = document.querySelector('[data-preset="default"]');
-            return el ? (el as HTMLElement).style.borderColor : '';
-        });
-        expect(defaultBorder).toBeTruthy();
-        const perfBorder = await page.evaluate(() => {
-            const el = document.querySelector('[data-preset="performance"]');
-            return el ? (el as HTMLElement).style.borderColor : '';
-        });
-        expect(perfBorder).toMatch(/#333|rgb\(51,\s*51,\s*51\)/);
-    });
-
-    test('importing a CSS file overwrites textarea and clears preset', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        await page.click('[data-preset="premium"]');
-        await page.waitForTimeout(300);
-        const fileContent = 'body { background: purple !important; }';
-        const tmpFile = '/tmp/test_import.css';
-        const fs = require('fs');
-        fs.writeFileSync(tmpFile, fileContent);
-        const fileInput = page.locator('#css-import-input');
-        await fileInput.setInputFiles(tmpFile);
-        await page.waitForTimeout(500);
-        const taVal = await page.inputValue('#custom-css-textarea');
-        expect(taVal).toBe(fileContent);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBeNull();
-    });
-
-    test('full cycle: neon -> edit -> save -> highcontrast -> reset -> clean', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        // Apply neon
-        await page.click('[data-preset="neon"]');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBe('neon');
-        // Switch to highcontrast
-        await page.click('[data-preset="highcontrast"]');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBe('highcontrast');
-        const css = await page.evaluate(() => localStorage.getItem('custom_css_text') || '');
-        expect(css).toContain('#000000');
-        expect(css).toContain('#ffff00');
-        // Reset
-        await page.click('#css-reset');
-        await page.waitForTimeout(300);
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_text'))).toBeNull();
-        expect(await page.evaluate(() => localStorage.getItem('custom_css_preset'))).toBeNull();
-        expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(false);
-    });
-
-    test('cycle through all 6 presets and verify each has unique CSS', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        const presetIds = ['default', 'performance', 'premium', 'neon', 'light', 'highcontrast'];
-        const seen = new Set<string>();
-        for (const id of presetIds) {
-            await page.click(`[data-preset="${id}"]`);
-            await page.waitForTimeout(300);
-            const css = await page.evaluate(() => localStorage.getItem('custom_css_text') || '');
-            if (css.length > 0) {
-                expect(seen.has(css)).toBe(false); // Each preset must be unique
-                seen.add(css);
-            }
-        }
-        expect(seen.size).toBe(5); // default is empty, 5 others have unique CSS
-    });
-
-    test('export button opens password modal', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
         await page.click('#css-export');
-        await page.waitForTimeout(300);
-        const modal = page.locator('#css-pw-modal');
-        expect(await modal.isVisible()).toBe(true);
-        expect(await page.locator('#css-pw-title').textContent()).toContain('Export CSS');
-    });
-
-    test('export without password option downloads plaintext file', async ({ page }) => {
-        await registerAndLogin(page);
-        await openCssTab(page);
-        // First apply some CSS
-        await page.click('[data-preset="performance"]');
-        await page.waitForTimeout(300);
-        // Click export
-        await page.click('#css-export');
-        await page.waitForTimeout(300);
-        // Check the no-password checkbox
+        await page.waitForSelector('#css-pw-modal', { state: 'visible', timeout: 5000 });
+        await expect(page.locator('#css-pw-title')).toHaveText('Export CSS');
         await page.check('#css-pw-nopw');
-        await page.waitForTimeout(200);
-        // Click confirm
+
         const [download] = await Promise.all([
             page.waitForEvent('download'),
             page.click('#css-pw-confirm-btn'),
         ]);
         expect(download.suggestedFilename()).toContain('.e2ecss');
+        const filePath = await download.path();
+        expect(filePath).toBeTruthy();
+        const backup = JSON.parse(fs.readFileSync(filePath as string, 'utf-8'));
+        expect(backup.app).toBe('e2e_chat');
+        expect(backup.kind).toBe('custom_css');
+        expect(backup.v).toBe(1);
+        expect(backup.payload.css).toBe(css);
+        expect(backup.encrypted_private_key).toBeFalsy();
     });
 
-    test('export with password encrypts the file', async ({ page }) => {
+    test('Export with a password encrypts the backup (and it decrypts)', async ({ page }) => {
+        test.setTimeout(120000);
         await registerAndLogin(page);
         await openCssTab(page);
-        await page.click('[data-preset="performance"]');
-        await page.waitForTimeout(300);
+        await selectSlot(page, 1);
+        const css = 'body { text-transform: uppercase !important; }';
+        await saveActiveSlot(page, css);
+
         await page.click('#css-export');
-        await page.waitForTimeout(300);
-        await page.fill('#css-pw-input', 'testpass123');
-        await page.fill('#css-pw-confirm-input', 'testpass123');
+        await page.waitForSelector('#css-pw-modal', { state: 'visible', timeout: 5000 });
+        await page.fill('#css-pw-input', 'csspass123');
+        await page.fill('#css-pw-confirm-input', 'csspass123');
+
         const [download] = await Promise.all([
             page.waitForEvent('download'),
             page.click('#css-pw-confirm-btn'),
         ]);
-        expect(download.suggestedFilename()).toContain('.e2ecss');
-        // Read file and verify it's encrypted (has salt, nonce, encrypted_private_key)
-        const path = await download.path();
-        if (path) {
-            const fs = require('fs');
-            const content = JSON.parse(fs.readFileSync(path, 'utf-8'));
-            expect(content.app).toBe('e2e_chat');
-            expect(content.kind).toBe('custom_css');
-            expect(content.salt).toBeTruthy();
-            expect(content.nonce).toBeTruthy();
-            expect(content.encrypted_private_key).toBeTruthy();
-        }
+        const filePath = await download.path();
+        expect(filePath).toBeTruthy();
+        const backup = JSON.parse(fs.readFileSync(filePath as string, 'utf-8'));
+        expect(backup.app).toBe('e2e_chat');
+        expect(backup.kind).toBe('custom_css');
+        expect(backup.salt).toBeTruthy();
+        expect(backup.nonce).toBeTruthy();
+        expect(backup.encrypted_private_key).toBeTruthy();
+        expect(backup.payload).toBeUndefined();
+
+        const decrypted = await page.evaluate((data) => {
+            return (window as any).E2ECrypto.decryptWithPassword(
+                data.encrypted_private_key, 'csspass123', data.salt, data.nonce);
+        }, backup);
+        expect(JSON.parse(decrypted).css).toBe(css);
+
+        const wrong = await page.evaluate((data) => {
+            return (window as any).E2ECrypto.decryptWithPassword(
+                data.encrypted_private_key, 'not-the-password', data.salt, data.nonce);
+        }, backup);
+        expect(wrong).toBeNull();
     });
 
-    test('import backup button opens file picker', async ({ page }) => {
+    test('Import Backup restores a plaintext backup into the active slot', async ({ page }, testInfo) => {
+        test.setTimeout(120000);
         await registerAndLogin(page);
         await openCssTab(page);
-        const fileInput = page.locator('#css-import-backup-input');
-        expect(await fileInput.isVisible()).toBe(false); // hidden file input
-        // Verify the import backup button exists
-        expect(await page.locator('#css-import-backup').isVisible()).toBe(true);
+        await selectSlot(page, 1);
+
+        const imported = 'body { letter-spacing: 2px !important; }';
+        const file = testInfo.outputPath('plain.e2ecss');
+        fs.writeFileSync(file, JSON.stringify({ app: 'e2e_chat', kind: 'custom_css', v: 1, payload: { css: imported } }));
+
+        await page.locator('#css-import-backup-input').setInputFiles(file);
+        await page.waitForSelector('#css-pw-modal', { state: 'visible', timeout: 5000 });
+        await expect(page.locator('#css-pw-title')).toHaveText('Import CSS');
+        await page.click('#css-pw-confirm-btn');
+
+        await expect.poll(() => appliedCss(page), { timeout: 15000 }).toContain('letter-spacing: 2px');
+        const data = await serverSlots(page);
+        expect(String(data.slot1.encrypted_css || '').length).toBeGreaterThan(0);
+    });
+
+    test('Import Backup refuses a wrong password and accepts the right one', async ({ page }, testInfo) => {
+        test.setTimeout(120000);
+        await registerAndLogin(page);
+        await openCssTab(page);
+        await selectSlot(page, 1);
+
+        const imported = 'body { word-spacing: 6px !important; }';
+        const backup = await page.evaluate((css) => {
+            const enc = (window as any).E2ECrypto.encryptWithPassword(JSON.stringify({ css }), 'backup-pass-1');
+            return {
+                app: 'e2e_chat', kind: 'custom_css', v: 1,
+                salt: enc.salt, nonce: enc.nonce, encrypted_private_key: enc.encrypted_private_key,
+            };
+        }, imported);
+        const file = testInfo.outputPath('encrypted.e2ecss');
+        fs.writeFileSync(file, JSON.stringify(backup));
+
+        await page.locator('#css-import-backup-input').setInputFiles(file);
+        await page.waitForSelector('#css-pw-modal', { state: 'visible', timeout: 5000 });
+
+        await page.fill('#css-pw-input', 'wrong-password');
+        await page.click('#css-pw-confirm-btn');
+        await expect(page.locator('#css-pw-error')).toBeVisible({ timeout: 5000 });
+        expect(await appliedCss(page)).not.toContain('word-spacing: 6px');
+
+        await page.fill('#css-pw-input', 'backup-pass-1');
+        await page.click('#css-pw-confirm-btn');
+        await expect.poll(() => appliedCss(page), { timeout: 15000 }).toContain('word-spacing: 6px');
+    });
+
+    test('Import .css file fills the editor and Save stores it', async ({ page }, testInfo) => {
+        test.setTimeout(120000);
+        await registerAndLogin(page);
+        await openCssTab(page);
+        await selectSlot(page, 1);
+        await startEditing(page);
+
+        const css = 'body { font-variant: small-caps !important; }';
+        const file = testInfo.outputPath('import.css');
+        fs.writeFileSync(file, css);
+        await page.locator('#css-import-file-input').setInputFiles(file);
+
+        await expect(page.locator('#custom-css-textarea')).toHaveValue(css);
+        await page.click('#css-save-slot');
+        await page.waitForSelector('#css-edit-slot', { timeout: 15000 });
+
+        await expect.poll(() => appliedCss(page), { timeout: 10000 }).toContain('small-caps');
+        const data = await serverSlots(page);
+        expect(String(data.slot1.encrypted_css || '').length).toBeGreaterThan(0);
+    });
+
+    test('Clear Slot deletes the stored CSS', async ({ page }) => {
+        test.setTimeout(120000);
+        await registerAndLogin(page);
+        await openCssTab(page);
+        await selectSlot(page, 1);
+        await saveActiveSlot(page, 'body { cursor: crosshair !important; }');
+
+        await startEditing(page);
+        // ui-dialog auto-answers confirm() under automation.
+        await page.click('#css-clear-slot');
+        await page.waitForFunction(() => {
+            const ta = document.getElementById('custom-css-textarea') as HTMLTextAreaElement | null;
+            return !!ta && ta.value.indexOf('Empty slot') !== -1;
+        }, null, { timeout: 15000 });
+
+        const data = await serverSlots(page);
+        expect(String((data.slot1 && data.slot1.encrypted_css) || '')).toBe('');
+        expect(await page.evaluate(() => !!document.getElementById('custom-user-css'))).toBe(false);
     });
 });

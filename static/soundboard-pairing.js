@@ -562,7 +562,7 @@
         if (!_sbClips) return;
         // Show loading state while fetching (only if cache is empty)
         if (_sbClipsCache.length === 0) {
-            _sbClips.innerHTML = '<div class="soundboard-empty" style="animation:sbPulse 1.2s ease-in-out infinite">Loading sounds...</div>';
+            _sbClips.innerHTML = '<div class="soundboard-empty u-74b9eb88" >Loading sounds...</div>';
         }
         try {
             var resp = await fetch('/api/soundboard/my', { headers: authHeaders() });

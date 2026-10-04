@@ -29,13 +29,19 @@
 (function () {
     'use strict';
 
-    // Largest ciphertext one slot may store. This is the SAME number (and the
-    // same units — the encrypted string the server receives) as
-    // MAX_ICON_SLOT_B64 in server/src/handlers.rs; when the two drifted, the
-    // page's own limit was *larger* than the server's, so a pack could pass every
-    // check here and still be rejected with a 413 that nothing looked at. The
-    // result was "the icon is there until I switch slots, then it is gone".
-    var MAX_SLOT_CIPHERTEXT = 4 * 1024 * 1024;
+    // Largest ciphertext one slot may store, in the SAME units the server
+    // receives (the encrypted string). The server's cap is the source of truth
+    // (Runtime Limits → icon_slot_max_bytes, default MAX_ICON_SLOT_B64) and is
+    // served through /api/client-config; this fallback only covers the window
+    // before that response arrives. When the two drifted, the page's limit was
+    // *larger* than the server's, so a pack could pass every check here and
+    // still be rejected with a 413 nothing looked at — "the icon is there until
+    // I switch slots, then it is gone".
+    var DEFAULT_MAX_SLOT_CIPHERTEXT = 4 * 1024 * 1024;
+    function maxSlotCiphertext() {
+        var v = window._iconSlotMaxBytes;
+        return (typeof v === 'number' && v > 0) ? v : DEFAULT_MAX_SLOT_CIPHERTEXT;
+    }
     var DEFAULT_GRID_ICON = 'file';
     var SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -601,9 +607,9 @@
     function saveSlot(slot, map) {
         return Promise.resolve().then(function () {
             var enc = encryptMap(map);
-            if (enc.encrypted_icons.length > MAX_SLOT_CIPHERTEXT) {
+            if (enc.encrypted_icons.length > maxSlotCiphertext()) {
                 throw new Error('That pack is ' + kb(enc.encrypted_icons.length) + ' once encrypted, and one icon slot '
-                    + 'can hold ' + kb(MAX_SLOT_CIPHERTEXT) + '. A picture icon is stored whole (so an animated one '
+                    + 'can hold ' + kb(maxSlotCiphertext()) + '. A picture icon is stored whole (so an animated one '
                     + 'keeps animating), which is what makes this big: crop the animation tighter, shorten it, or use '
                     + 'an .svg for that icon.');
             }
@@ -669,11 +675,11 @@
 
     function renderTab(container) {
         _container = container;
-        container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px">Loading icon packs…</div>';
+        container.innerHTML = '<div class="u-c6ba9b9a" >Loading icon packs…</div>';
         fetchSlots(true).then(function (data) {
             renderTabWith(container, data);
         }).catch(function () {
-            container.innerHTML = '<div style="color:var(--danger,#ed4245);font-size:13px">Could not load icon packs.</div>';
+            container.innerHTML = '<div class="u-da88ae84" >Could not load icon packs.</div>';
         });
     }
 
@@ -717,7 +723,7 @@
                 'opacity:' + (!isActive && c.id > 0 && !(c.id === 1 ? count1 : count2) ? '0.55' : '1'));
             card.innerHTML = '<div style="color:' + (isActive ? c.colour : '#ccc') + ';font-weight:600;font-size:13px">' +
                 window.escapeHtml(c.label) + (isActive ? ' ✓' : '') + '</div>' +
-                '<div style="color:#888;font-size:10px">' + window.escapeHtml(c.desc) + '</div>';
+                '<div class="u-f3a25817" >' + window.escapeHtml(c.desc) + '</div>';
             card.title = isActive ? 'Active — click to keep editing' : 'Click to activate and edit';
             card.addEventListener('click', function () {
                 if (c.id === 0) {
@@ -812,11 +818,11 @@
                 (entry ? '#4fc3f7' : 'var(--bg-border,#333)') + ';background:' +
                 (entry ? 'rgba(79,195,247,0.08)' : 'var(--bg-secondary,#1a1a2e)'));
             cell.title = entry ? name + ' — customised (click to replace)' : name + ' — click to upload a replacement';
-            cell.innerHTML = '<div style="height:24px">' + icon(name, 22) + '</div>' +
-                '<div style="font-size:10px;color:#888;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+            cell.innerHTML = '<div class="u-29a11d37" >' + icon(name, 22) + '</div>' +
+                '<div class="u-73aad2d4" >' +
                 window.escapeHtml(name) + '</div>' +
-                (entry ? '<div style="font-size:9px;color:#4fc3f7">custom</div>'
-                       : '<div style="font-size:9px;color:#555">built-in</div>');
+                (entry ? '<div class="u-fb1466ce" >custom</div>'
+                       : '<div class="u-6fd0e868" >built-in</div>');
             // Per-icon reset: present on EVERY icon (a built-in one gets a
             // disabled control), so resetting a single override is one click and
             // never touches the rest of the pack.

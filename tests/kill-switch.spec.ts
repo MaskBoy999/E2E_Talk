@@ -3,6 +3,7 @@ import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { dialogMessages, queuePromptAnswer } from './_ui-dialogs';
+import { apiLogin } from './_auth-helpers';
 
 const BASE = 'https://localhost:3443';
 const DB = 'server/e2e_chat.db';
@@ -163,12 +164,8 @@ test.describe('Kill Switch', () => {
         });
         expect(randomProof.status()).toBe(401);
 
-        // Account still exists and the real password still works.
-        const realHash = await loginHash(page, uname, 'password123');
-        const ok = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: realHash },
-        });
+        // Account still exists and a signed login still works (finding 3).
+        const ok = await apiLogin(page, uname, 'password123');
         expect(ok.status()).toBe(200);
     });
 
@@ -178,11 +175,10 @@ test.describe('Kill Switch', () => {
         const uname = 'ks_kick_' + ts;
         const { token, user } = await registerUser(page, uname);
 
-        // Create a SECOND session by logging in as a distinct device.
-        const hash = await loginHash(page, uname, 'password123');
-        const loginRes = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: hash, device_id: 'device-b', device_name: 'Device B', duration_seconds: 3600 },
+        // Create a SECOND session by logging in as a distinct device (a fresh
+        // nonce is signed — the same password on another device just works).
+        const loginRes = await apiLogin(page, uname, 'password123', {
+            device_id: 'device-b', device_name: 'Device B', duration_seconds: 3600,
         });
         expect(loginRes.status()).toBe(200);
         const tokenB = (await loginRes.json()).token;
@@ -415,8 +411,8 @@ test.describe('Kill Switch', () => {
         expect((await dialogMessages(page)).length).toBeGreaterThan(0);
 
         // Disarmed: the kill-switch columns are gone, so no proof can even be
-        // produced — the client sends the raw password (legacy path) and the
-        // server rejects it as a normal failed login. Account stays intact.
+        // produced — the request carries nothing the server accepts and is
+        // rejected as a normal failed login. Account stays intact.
         const after = await page.request.post(`${BASE}/api/login`, {
             headers: { 'Content-Type': 'application/json' },
             data: { username: uname, password: 'killpass99' },
@@ -425,11 +421,7 @@ test.describe('Kill Switch', () => {
         expect(dbQuery('SELECT COUNT(*) FROM users WHERE id = ?1', [user.id])[0][0]).toBe(1);
 
         // Real login still works after disarm.
-        const realHash = await loginHash(page, uname, 'password123');
-        const ok = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: realHash },
-        });
+        const ok = await apiLogin(page, uname, 'password123');
         expect(ok.status()).toBe(200);
     });
 

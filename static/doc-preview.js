@@ -175,7 +175,7 @@ var DocPreview = (function () {
         // The header owns its row and must not be squeezed by a long filename on
         // a phone; the close button stays a 40px tap target either way.
         header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px;border-bottom:1px solid var(--bg-border,#333);background:var(--bg-primary,#1a1a2e);flex-shrink:0';
-        header.innerHTML = '<span style="color:var(--text-primary,#eee);font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' +
+        header.innerHTML = '<span class="u-446bcd0c" >' +
             escapeHtml(title) + '</span>';
         var closeBtn = document.createElement('button');
         closeBtn.innerHTML = '<svg class="ui-icon" width="16" height="16"><use href="#icon-close"/></svg>';
@@ -190,7 +190,7 @@ var DocPreview = (function () {
         content.style.cssText = 'flex:1;overflow:auto;padding:0;position:relative;background:var(--bg-primary,#1a1a2e)';
 
         // Loading spinner
-        content.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted,#999)"><div style="text-align:center"><div style="display:inline-block;width:32px;height:32px;border:3px solid #444;border-top-color:var(--accent,#4fc3f7);border-radius:50%;animation:docSpin .6s linear infinite"></div><div style="margin-top:12px;font-size:13px">Loading document…</div></div></div>';
+        content.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted,#999)"><div class="u-91a87015" ><div style="display:inline-block;width:32px;height:32px;border:3px solid #444;border-top-color:var(--accent,#4fc3f7);border-radius:50%;animation:docSpin .6s linear infinite"></div><div class="u-b20d1a70" >Loading document…</div></div></div>';
 
         modal.appendChild(header);
         modal.appendChild(content);
@@ -269,7 +269,7 @@ var DocPreview = (function () {
     async function renderPdf(blob, container) {
         await loadPdfJs();
         if (!window.pdfjsLib) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">PDF.js failed to load</div>';
+            container.innerHTML = '<div class="u-111ad630" >PDF.js failed to load</div>';
             return;
         }
 
@@ -538,13 +538,51 @@ var DocPreview = (function () {
 
     // ── DOCX Preview ───────────────────────────────────────────────────
 
-    async function renderDocx(blob, container) {
-        await loadDocxPreview();
-        if (!window.docx) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">docx-preview failed to load</div>';
-            return;
-        }
+    /// The bootstrap document for the sandboxed DOCX frame. It is served as a
+    /// blob: document into an iframe with `sandbox="allow-scripts"` but NOT
+    /// `allow-same-origin`, so it runs in an opaque origin that cannot reach
+    /// the app origin — the one holding the E2EE key chain. Its own CSP is
+    /// locked to `default-src 'none'` plus exactly the two vendored parser
+    /// scripts, so a malicious .docx cannot fetch anything either.
+    function docxSandboxDocument(nonce, origin, narrow) {
+        var csp = "default-src 'none'; script-src " + origin + " 'nonce-" + nonce + "'; "
+            + "style-src 'unsafe-inline'; img-src blob: data: " + origin + "; "
+            + "font-src data: " + origin + "; object-src 'none'; frame-src 'none'; "
+            + "connect-src 'none'; base-uri 'none'; form-action 'none'";
+        var boot = `(function(){
+var nonce = ${JSON.stringify(nonce)};
+var narrow = ${narrow ? 'true' : 'false'};
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+function done(){parent.postMessage({type:"rendered",nonce:nonce,height:document.documentElement.scrollHeight},"*");}
+window.addEventListener("message",function(ev){
+var d=ev.data||{};if(d.nonce!==nonce||d.type!=="render-docx")return;
+var w=document.getElementById("w");
+try{
+docx.renderAsync(new Uint8Array(d.bytes),w,w,{
+className:narrow?"docx docx-narrow":"docx",
+breakPages:!narrow,ignoreWidth:narrow,ignoreHeight:narrow,
+inWrapper:!narrow,ignoreLastRenderedPageBreak:false,
+renderHeaders:true,renderFooters:true,renderFootnotes:true,renderEndnotes:true
+}).then(function(){done();})
+.catch(function(e){w.innerHTML='<div class="err">Error rendering document: '+esc(e&&e.message?e.message:e)+'</div>';done();});
+}catch(e){parent.postMessage({type:"error",nonce:nonce,message:String(e&&e.message?e.message:e)},"*");}
+});
+parent.postMessage({type:"ready",nonce:nonce},"*");
+})();`;
+        return '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            + '<meta http-equiv="Content-Security-Policy" content="' + csp + '">'
+            + '<style>html,body{margin:0;background:#fff;color:#333;font-family:Calibri,Arial,sans-serif}'
+            + '.wrap{max-width:800px;margin:0 auto;font-size:14px;line-height:1.6;width:100%}'
+            + '.wrap img{max-width:100%!important;height:auto!important}.wrap table{max-width:100%!important}'
+            + '.err{padding:20px;color:#c00}</style>'
+            + '</head><body><div class="wrap" id="w"></div>'
+            + '<script src="' + origin + '/libs/jszip.min.js"><\/script>'
+            + '<script src="' + origin + '/libs/docx-preview.min.js"><\/script>'
+            + '<script nonce="' + nonce + '">' + boot + '<\/script>'
+            + '</body></html>';
+    }
 
+    async function renderDocx(blob, container) {
         // Two renderings, one document. On a desktop-sized viewport a Word page
         // should look like a Word page: a white sheet with margins, page breaks
         // and all. On a phone that same fixed 794px sheet is *wider than the
@@ -556,130 +594,284 @@ var DocPreview = (function () {
         container.className = (container.className ? container.className + ' ' : '') + 'doc-view doc-view-docx';
         container.style.cssText += ';background:#fff;color:#333;padding:' + (narrow ? '10px' : '24px') + ';overflow:auto';
 
-        // A document is built for paper, and paper is narrower than a phone in
-        // portrait: images and tables are told to fit the column instead of
-        // pushing a horizontal scrollbar across every paragraph.
-        if (narrow) {
-            var fit = document.createElement('style');
-            fit.textContent = '.doc-view-docx img { max-width: 100% !important; height: auto !important; }'
-                + ' .doc-view-docx table { max-width: 100% !important; }'
-                + ' .doc-view-docx .docx-narrow { padding: 0 !important; }';
-            container.appendChild(fit);
-        }
+        // The document is untrusted input and docx-preview builds real HTML
+        // from it. Rather than trusting the parser to be perfect, the renderer
+        // runs in a sandboxed iframe (see docxSandboxDocument above). The
+        // parent cannot reach into the frame's DOM — which is exactly the
+        // security property — so the bytes go in over postMessage and only the
+        // measured height comes back.
+        var nonce = 'docx-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        var origin = location.origin;
 
-        var wrapper = document.createElement('div');
-        wrapper.className = 'docx-container';
-        wrapper.style.cssText = 'max-width:800px;margin:0 auto;font-family:Calibri,Arial,sans-serif;font-size:14px;line-height:1.6;width:100%';
-        container.appendChild(wrapper);
+        var frame = document.createElement('iframe');
+        frame.className = 'docx-sandbox';
+        frame.setAttribute('sandbox', 'allow-scripts');
+        frame.setAttribute('title', 'Document preview');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.setAttribute('src', URL.createObjectURL(new Blob([docxSandboxDocument(nonce, origin, narrow)], { type: 'text/html' })));
+        container.appendChild(frame);
 
-        try {
-            await docx.renderAsync(blob, wrapper, wrapper, {
-                className: narrow ? 'docx docx-narrow' : 'docx',
-                breakPages: !narrow,
-                ignoreWidth: narrow,
-                ignoreHeight: narrow,
-                inWrapper: !narrow,
-                ignoreLastRenderedPageBreak: false,
-                renderHeaders: true,
-                renderFooters: true,
-                renderFootnotes: true,
-                renderEndnotes: true
-            });
-        } catch (e) {
-            console.warn('DOCX render error:', e);
-            wrapper.innerHTML = '<div style="padding:20px;color:#c00">Error rendering document: ' + escapeHtml(e.message) + '</div>';
+        var bytesPromise = blob.arrayBuffer();
+        var finished = false;
+        var watchdog = null;
+        function finish(height) {
+            if (finished) return;
+            finished = true;
+            if (watchdog) clearTimeout(watchdog);
+            window.removeEventListener('message', onMessage);
+            if (typeof height === 'number' && height > 0) {
+                frame.style.height = Math.min(Math.max(height + 8, 240), 20000) + 'px';
+            }
+            try { URL.revokeObjectURL(frame.getAttribute('src')); } catch (_) {}
         }
+        function failNote(text) {
+            var note = document.createElement('div');
+            note.className = 'doc-view-note';
+            note.textContent = text;
+            container.appendChild(note);
+        }
+        function onMessage(ev) {
+            if (ev.source !== frame.contentWindow) return;
+            var d = ev.data || {};
+            if (d.nonce !== nonce) return;
+            if (d.type === 'ready') {
+                bytesPromise.then(function (buf) {
+                    // Transfer the buffer; a failed transfer (older engine) must
+                    // not kill the preview, so fall back to a structured clone.
+                    try {
+                        frame.contentWindow.postMessage({ type: 'render-docx', nonce: nonce, bytes: buf, narrow: narrow }, '*', [buf]);
+                    } catch (_) {
+                        frame.contentWindow.postMessage({ type: 'render-docx', nonce: nonce, bytes: buf, narrow: narrow }, '*');
+                    }
+                }).catch(function () {
+                    finish(0);
+                    failNote('Could not read the document.');
+                });
+            } else if (d.type === 'rendered') {
+                finish(d.height);
+            } else if (d.type === 'error') {
+                finish(0);
+                failNote('Error rendering document: ' + String(d.message || 'unknown error'));
+            }
+        }
+        window.addEventListener('message', onMessage);
+        // If the sandbox never answers (policy change, blocked blob:, OOM), say
+        // so instead of leaving a blank white box.
+        watchdog = setTimeout(function () {
+            if (finished) return;
+            finish(0);
+            failNote('Document preview failed to start — check the browser console.');
+        }, 20000);
     }
 
     // ── XLSX Preview ───────────────────────────────────────────────────
 
-    async function renderXlsx(blob, container) {
-        await loadSheetJs();
-        if (!window.XLSX) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">SheetJS failed to load</div>';
-            return;
+    /// The bootstrap document for the sandboxed XLSX frame. Same rules as the
+    /// DOCX one above: an opaque origin (`sandbox="allow-scripts"`, no
+    /// `allow-same-origin`), its own CSP locked to the vendored SheetJS build,
+    /// and the workbook bytes posted in. SheetJS both parses the file and
+    /// turns it into HTML **in here**, so the `sheet_to_html` sink (and the
+    /// parser itself) never run in the app origin — the parent only ever
+    /// learns sheet names, a rendered height and whether a sheet was windowed.
+    function xlsxSandboxDocument(nonce, origin, background) {
+        var csp = "default-src 'none'; script-src " + origin + " 'nonce-" + nonce + "'; "
+            + "style-src 'unsafe-inline'; img-src data: " + origin + "; "
+            + "object-src 'none'; frame-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'";
+        var boot = `(function(){
+var nonce = ${JSON.stringify(nonce)};
+document.documentElement.style.background = ${JSON.stringify(background)};
+document.body.style.background = ${JSON.stringify(background)};
+var w = document.getElementById("w");
+var book = null;
+var XLSX_MAX_ROWS = 500;
+var XLSX_MAX_COLS = 100;
+function report(sheet, truncated){
+    parent.postMessage({type:"rendered",nonce:nonce,sheet:sheet,truncated:truncated,
+        maxRows:XLSX_MAX_ROWS,maxCols:XLSX_MAX_COLS,
+        height:Math.ceil(w.getBoundingClientRect().height)},"*");
+}
+function renderSheet(name){
+    var sheet = book.Sheets[name];
+    var capped = sheet;
+    var truncated = false;
+    try {
+        if (sheet && sheet["!ref"]) {
+            var range = XLSX.utils.decode_range(sheet["!ref"]);
+            var lastRow = Math.min(range.e.r, range.s.r + XLSX_MAX_ROWS - 1);
+            var lastCol = Math.min(range.e.c, range.s.c + XLSX_MAX_COLS - 1);
+            truncated = (range.e.r > lastRow) || (range.e.c > lastCol);
+            if (truncated) {
+                capped = Object.assign({}, sheet);
+                capped["!ref"] = XLSX.utils.encode_range({ s: range.s, e: { r: lastRow, c: lastCol } });
+            }
         }
+    } catch (_) {}
+    w.innerHTML = XLSX.utils.sheet_to_html(capped, { editable: false });
+    report(name, truncated);
+}
+window.addEventListener("message",function(ev){
+    var d = ev.data || {};
+    if (d.nonce !== nonce) return;
+    try {
+        if (d.type === "render-xlsx") {
+            if (typeof XLSX === "undefined") {
+                parent.postMessage({type:"error",nonce:nonce,message:"SheetJS failed to load"},"*");
+                return;
+            }
+            book = XLSX.read(new Uint8Array(d.bytes), { type: "array" });
+            parent.postMessage({type:"sheets",nonce:nonce,names:book.SheetNames},"*");
+            if (book.SheetNames.length) renderSheet(book.SheetNames[0]);
+            else { w.innerHTML = '<div class="empty">This workbook has no sheets.</div>'; report("", false); }
+        } else if (d.type === "sheet") {
+            if (book) renderSheet(String(d.name));
+        }
+    } catch (e) {
+        parent.postMessage({type:"error",nonce:nonce,message:String(e && e.message ? e.message : e)},"*");
+    }
+});
+parent.postMessage({type:"ready",nonce:nonce},"*");
+})();`;
+        return '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            + '<meta http-equiv="Content-Security-Policy" content="' + csp + '">'
+            + '<style>html,body{margin:0;color:#ddd;'
+            + 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}'
+            + '#w table{border-collapse:collapse;width:100%;font-size:13px}'
+            + '#w td,#w th{border:1px solid #444;padding:4px 8px;white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis}'
+            + '#w th{background:#2a2a3e;font-weight:600;position:sticky;top:0}'
+            + '.empty{padding:20px;color:#999}.err{padding:20px;color:#c00}</style>'
+            + '</head><body><div id="w"></div>'
+            + '<script src="' + origin + '/libs/xlsx.full.min.js"><\/script>'
+            + '<script nonce="' + nonce + '">' + boot + '<\/script>'
+            + '</body></html>';
+    }
 
-        var arrayBuffer = await blob.arrayBuffer();
-        var workbook = XLSX.read(arrayBuffer, { type: 'array' });
-
+    async function renderXlsx(blob, container) {
+        container.className = (container.className ? container.className + ' ' : '') + 'doc-view doc-view-xlsx';
         container.style.cssText += ';background:var(--bg-primary,#1e1e2e);padding:16px;overflow:auto';
 
-        // Sheet tabs
+        // Sheet tabs, filled in once the frame has parsed the workbook and
+        // reported its SheetNames.
         var tabBar = document.createElement('div');
         tabBar.style.cssText = 'display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap';
         container.appendChild(tabBar);
 
-        // Content area
-        var contentArea = document.createElement('div');
-        contentArea.style.cssText = 'overflow:auto;flex:1';
-        container.appendChild(contentArea);
+        var label = document.createElement('div');
+        label.className = 'u-10f9db81';
+        container.appendChild(label);
 
-        var sheets = workbook.SheetNames;
+        var nonce = 'xlsx-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        var origin = location.origin;
+        // An iframe's document paints its own background, so hand the frame the
+        // colour the view is actually using.
+        var background = 'transparent';
+        try { background = getComputedStyle(container).backgroundColor || background; } catch (_) {}
 
-        // SheetJS renders a cell node for every cell inside the sheet's `!ref`,
-        // so one large sheet is millions of nodes and an out-of-memory crash.
-        // The ref is clamped to a bounded window (first 500 rows × 100 columns)
-        // before the HTML is built, and the truncation is stated, not silent.
-        var XLSX_MAX_ROWS = 500;
-        var XLSX_MAX_COLS = 100;
+        var frame = document.createElement('iframe');
+        frame.className = 'xlsx-sandbox';
+        frame.setAttribute('sandbox', 'allow-scripts');
+        frame.setAttribute('title', 'Spreadsheet preview');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.setAttribute('src', URL.createObjectURL(new Blob([xlsxSandboxDocument(nonce, origin, background)], { type: 'text/html' })));
+        container.appendChild(frame);
 
-        function renderSheet(sheetName) {
-            var sheet = workbook.Sheets[sheetName];
-            var capped = sheet;
-            var truncated = false;
-            try {
-                if (sheet && sheet['!ref']) {
-                    var range = XLSX.utils.decode_range(sheet['!ref']);
-                    var lastRow = Math.min(range.e.r, range.s.r + XLSX_MAX_ROWS - 1);
-                    var lastCol = Math.min(range.e.c, range.s.c + XLSX_MAX_COLS - 1);
-                    truncated = (range.e.r > lastRow) || (range.e.c > lastCol);
-                    if (truncated) {
-                        capped = Object.assign({}, sheet);
-                        capped['!ref'] = XLSX.utils.encode_range({ s: range.s, e: { r: lastRow, c: lastCol } });
-                    }
-                }
-            } catch (_) {}
-            var html = XLSX.utils.sheet_to_html(capped, { editable: false });
-            contentArea.innerHTML = '<div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Sheet: ' + escapeHtml(sheetName) +
-                (truncated ? ' — showing the first ' + XLSX_MAX_ROWS + ' rows × ' + XLSX_MAX_COLS + ' columns' : '') + '</div>';
-            var tableWrap = document.createElement('div');
-            tableWrap.style.cssText = 'overflow-x:auto';
-            tableWrap.innerHTML = html;
-            // Style the table
-            var table = tableWrap.querySelector('table');
-            if (table) {
-                table.style.cssText = 'border-collapse:collapse;width:100%;font-size:13px';
-                table.querySelectorAll('td, th').forEach(function (cell) {
-                    cell.style.cssText = 'border:1px solid var(--bg-border,#444);padding:4px 8px;white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis';
-                });
-                table.querySelectorAll('th').forEach(function (th) {
-                    th.style.cssText += ';background:var(--bg-secondary,#2a2a3e);font-weight:600;position:sticky;top:0';
-                });
-            }
-            contentArea.appendChild(tableWrap);
+        var bytesPromise = blob.arrayBuffer();
+        var firstRender = false;
+        var watchdog = null;
+
+        function setHeight(height) {
+            if (typeof height !== 'number' || height <= 0) return;
+            frame.style.height = Math.min(Math.max(height + 8, 120), 20000) + 'px';
         }
-
-        sheets.forEach(function (name, idx) {
-            var tab = document.createElement('button');
-            tab.textContent = name;
-            tab.style.cssText = 'padding:6px 14px;border-radius:6px;border:1px solid var(--bg-border,#444);background:' +
-                (idx === 0 ? 'var(--accent,#4fc3f7)' : 'var(--bg-secondary,#2a2a3e))') +
-                ';color:' + (idx === 0 ? '#fff' : 'var(--text-muted,#999)') +
-                ';cursor:pointer;font-size:12px;font-weight:500;transition:all .15s';
-            tab.onclick = function () {
-                tabBar.querySelectorAll('button').forEach(function (b) {
-                    b.style.background = 'var(--bg-secondary,#2a2a3e)';
-                    b.style.color = 'var(--text-muted,#999)';
+        function clearWatchdog() {
+            if (watchdog) clearTimeout(watchdog);
+            watchdog = null;
+        }
+        function failNote(text) {
+            var note = document.createElement('div');
+            note.className = 'doc-view-note';
+            note.textContent = text;
+            container.appendChild(note);
+        }
+        function selectTab(tab) {
+            tabBar.querySelectorAll('button').forEach(function (b) {
+                b.style.background = 'var(--bg-secondary,#2a2a3e)';
+                b.style.color = 'var(--text-muted,#999)';
+            });
+            tab.style.background = 'var(--accent,#4fc3f7)';
+            tab.style.color = '#fff';
+        }
+        function buildTabs(names) {
+            names.forEach(function (name, idx) {
+                var tab = document.createElement('button');
+                tab.textContent = name;
+                tab.style.cssText = 'padding:6px 14px;border-radius:6px;border:1px solid var(--bg-border,#444);background:' +
+                    (idx === 0 ? 'var(--accent,#4fc3f7)' : 'var(--bg-secondary,#2a2a3e)') +
+                    ';color:' + (idx === 0 ? '#fff' : 'var(--text-muted,#999)') +
+                    ';cursor:pointer;font-size:12px;font-weight:500;transition:all .15s';
+                tab.onclick = function () {
+                    selectTab(tab);
+                    try { frame.contentWindow.postMessage({ type: 'sheet', nonce: nonce, name: name }, '*'); } catch (_) {}
+                };
+                tabBar.appendChild(tab);
+            });
+        }
+        function onMessage(ev) {
+            if (ev.source !== frame.contentWindow) return;
+            var d = ev.data || {};
+            if (d.nonce !== nonce) return;
+            if (d.type === 'ready') {
+                bytesPromise.then(function (buf) {
+                    // Transfer the buffer; a failed transfer (older engine) must
+                    // not kill the preview, so fall back to a structured clone.
+                    try {
+                        frame.contentWindow.postMessage({ type: 'render-xlsx', nonce: nonce, bytes: buf }, '*', [buf]);
+                    } catch (_) {
+                        frame.contentWindow.postMessage({ type: 'render-xlsx', nonce: nonce, bytes: buf }, '*');
+                    }
+                }).catch(function () {
+                    firstRender = true;
+                    clearWatchdog();
+                    failNote('Could not read the spreadsheet.');
                 });
-                tab.style.background = 'var(--accent,#4fc3f7)';
-                tab.style.color = '#fff';
-                renderSheet(name);
-            };
-            tabBar.appendChild(tab);
-        });
-
-        if (sheets.length > 0) renderSheet(sheets[0]);
+            } else if (d.type === 'sheets') {
+                buildTabs(d.names || []);
+            } else if (d.type === 'rendered') {
+                // One report per sheet, first render and tab switches alike: the
+                // frame names the sheet, says whether it was windowed, and gives
+                // the new content height.
+                label.textContent = d.sheet
+                    ? 'Sheet: ' + d.sheet + (d.truncated ? ' — showing the first ' + d.maxRows + ' rows × ' + d.maxCols + ' columns' : '')
+                    : '';
+                frame.setAttribute('data-rendered', String(d.sheet || ''));
+                setHeight(d.height);
+                if (!firstRender) {
+                    firstRender = true;
+                    clearWatchdog();
+                    try { URL.revokeObjectURL(frame.getAttribute('src')); } catch (_) {}
+                }
+            } else if (d.type === 'error') {
+                if (!firstRender) {
+                    firstRender = true;
+                    clearWatchdog();
+                    failNote('Error rendering spreadsheet: ' + String(d.message || 'unknown error'));
+                    try { URL.revokeObjectURL(frame.getAttribute('src')); } catch (_) {}
+                }
+            }
+        }
+        window.addEventListener('message', onMessage);
+        // The modal's close hook releases the listener and the watchdog: a
+        // closed preview must not keep answering messages.
+        container._docCleanup = function () {
+            window.removeEventListener('message', onMessage);
+            clearWatchdog();
+        };
+        // If the sandbox never answers (policy change, blocked blob:, OOM), say
+        // so instead of leaving a blank box.
+        watchdog = setTimeout(function () {
+            if (firstRender) return;
+            firstRender = true;
+            failNote('Spreadsheet preview failed to start — check the browser console.');
+        }, 20000);
     }
 
     // ── CSV Preview ────────────────────────────────────────────────────
@@ -687,7 +879,7 @@ var DocPreview = (function () {
     async function renderCsv(blob, container) {
         await loadPapaParse();
         if (!window.Papa) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">PapaParse failed to load</div>';
+            container.innerHTML = '<div class="u-111ad630" >PapaParse failed to load</div>';
             return;
         }
 
@@ -703,7 +895,7 @@ var DocPreview = (function () {
         var headers = result.meta.fields || [];
 
         if (data.length === 0) {
-            container.innerHTML = '<div style="padding:20px;color:var(--text-muted)">Empty CSV file</div>';
+            container.innerHTML = '<div class="u-e82f2f74" >Empty CSV file</div>';
             return;
         }
 
@@ -941,13 +1133,13 @@ var DocPreview = (function () {
         var header = document.createElement('div');
         header.style.cssText = 'padding:12px 16px;background:var(--bg-secondary,#2a2a3e);border-radius:8px 8px 0 0;border-bottom:1px solid var(--bg-border,#444)';
         header.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center">' +
-            '<span style="font-size:14px;font-weight:600;color:var(--text-primary,#eee)">' + escapeHtml(filename || 'Archive') + '</span>' +
-            '<span style="font-size:12px;color:var(--text-muted,#999)">' + entries.length + ' files, ' + formatSize(totalSize) + '</span>' +
+            '<span class="u-8fc28a4c" >' + escapeHtml(filename || 'Archive') + '</span>' +
+            '<span class="u-b79f588d" >' + entries.length + ' files, ' + formatSize(totalSize) + '</span>' +
             '</div>';
         container.appendChild(header);
 
         if (entries.length === 0) {
-            container.innerHTML += '<div style="padding:24px;text-align:center;color:var(--text-muted)">Empty archive</div>';
+            container.innerHTML += '<div class="u-31ba5c2c" >Empty archive</div>';
             return;
         }
 
@@ -1051,7 +1243,7 @@ var DocPreview = (function () {
 
             var bar = document.createElement('div');
             bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 16px;border-bottom:1px solid var(--bg-border,#444);position:sticky;top:0;background:var(--bg-secondary,#2a2a3e);z-index:1';
-            bar.innerHTML = '<span style="font-size:12px;color:var(--text-muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' + escapeHtml(path) + '</span>';
+            bar.innerHTML = '<span class="u-1ac56ab7" >' + escapeHtml(path) + '</span>';
             var closeBtn = document.createElement('button');
         closeBtn.innerHTML = '<svg class="ui-icon" width="16" height="16"><use href="#icon-close"/></svg>';
             closeBtn.style.cssText = 'background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:2px 6px;flex-shrink:0';
@@ -1070,7 +1262,7 @@ var DocPreview = (function () {
                 img.style.cssText = 'max-width:100%;max-height:100%;display:block;margin:0 auto;padding:16px';
                 previewPane.appendChild(img);
             } else {
-                previewPane.innerHTML += '<div style="padding:24px;text-align:center;color:var(--text-muted)">Binary file — ' + (extra || '') + ' — download to view</div>';
+                previewPane.innerHTML += '<div class="u-31ba5c2c" >Binary file — ' + (extra || '') + ' — download to view</div>';
             }
             previewPane.scrollTop = 0;
         }
@@ -1098,7 +1290,7 @@ var DocPreview = (function () {
     async function renderPptx(blob, container) {
         await loadDocxPreview(); // loads JSZip
         if (!window.JSZip) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">JSZip failed to load</div>';
+            container.innerHTML = '<div class="u-111ad630" >JSZip failed to load</div>';
             return;
         }
 
@@ -1120,7 +1312,7 @@ var DocPreview = (function () {
         });
 
         if (slideFiles.length === 0) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">No slides found in presentation</div>';
+            container.innerHTML = '<div class="u-111ad630" >No slides found in presentation</div>';
             return;
         }
 
@@ -1483,14 +1675,14 @@ var DocPreview = (function () {
                     await renderZip(blob, container, filename);
                     break;
                 default:
-                    container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Preview not available for this file type</div>';
+                    container.innerHTML = '<div class="u-111ad630" >Preview not available for this file type</div>';
             }
         } catch (e) {
             console.error('Document preview error:', e);
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">' +
-                '<div style="margin-bottom:12px">' + icon('warning') + '</div>' +
+            container.innerHTML = '<div class="u-111ad630" >' +
+                '<div class="u-da12f285" >' + icon('warning') + '</div>' +
                 '<div>Failed to render document</div>' +
-                '<div style="font-size:12px;margin-top:8px;color:var(--text-faint)">' + escapeHtml(e.message) + '</div>' +
+                '<div class="u-208876a1" >' + escapeHtml(e.message) + '</div>' +
                 '</div>';
         }
         return true;
@@ -1643,7 +1835,7 @@ var DocPreview = (function () {
         // the two side panels (see the "Editor modals: phone layout" block).
         header.className = 'pdf-editor-header';
         header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:#1a1a2e;border-bottom:1px solid #333;flex-shrink:0';
-        header.innerHTML = '<span style="color:#eee;font-weight:600;font-size:14px">' + icon('edit') + ' PDF Editor — ' + escapeHtml(filename) + '</span>';
+        header.innerHTML = '<span class="u-9abbc23a" >' + icon('edit') + ' PDF Editor — ' + escapeHtml(filename) + '</span>';
         var headerBtns = document.createElement('div');
         headerBtns.style.cssText = 'display:flex;gap:8px;align-items:center';
 
@@ -1796,7 +1988,7 @@ var DocPreview = (function () {
         btn.title = label;
         btn.onmouseenter = function () { btn.style.background = 'rgba(255,255,255,0.1)'; };
         btn.onmouseleave = function () { btn.style.background = 'rgba(255,255,255,0.05)'; };
-        btn.innerHTML = '<span style="flex-shrink:0"><svg class="ui-icon" width="14" height="14"><use href="#' + icon + '"/></svg></span><span>' + label + '</span>';
+        btn.innerHTML = '<span class="u-6ee0661e" ><svg class="ui-icon" width="14" height="14"><use href="#' + icon + '"/></svg></span><span>' + label + '</span>';
         btn.onclick = onclick;
         return btn;
     }
@@ -1943,10 +2135,10 @@ var DocPreview = (function () {
     async function pdfEditorRenderPreview() {
         var panel = document.getElementById('pdf-preview-panel');
         if (!panel) return;
-        panel.innerHTML = '<div style="color:#999">Loading page...</div>';
+        panel.innerHTML = '<div class="u-d9fe14b1" >Loading page...</div>';
 
         var page = pdfCurrentPageEntry();
-        if (!page) { panel.innerHTML = '<div style="color:#999">No pages</div>'; return; }
+        if (!page) { panel.innerHTML = '<div class="u-d9fe14b1" >No pages</div>'; return; }
 
         try {
             var tempDoc = await PDFLib.PDFDocument.create();
@@ -1982,7 +2174,7 @@ var DocPreview = (function () {
             panel.innerHTML = '';
             panel.appendChild(canvas);
         } catch (e) {
-            panel.innerHTML = '<div style="color:#f66">Error rendering page: ' + escapeHtml(e.message) + '</div>';
+            panel.innerHTML = '<div class="u-743b288b" >Error rendering page: ' + escapeHtml(e.message) + '</div>';
         }
     }
 

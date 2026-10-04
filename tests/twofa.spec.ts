@@ -2,6 +2,10 @@ import { test, expect } from '@playwright/test';
 
 const BASE = 'https://localhost:3443';
 
+// apiLogin builds a body with the current protocol (signed when the account
+// has a login_public_key) — see tests/_auth-helpers.ts.
+import { apiLogin } from './_auth-helpers';
+
 // --- Pure-JS TOTP (RFC 6238, HMAC-SHA1, 6 digits, 30s) for test assertions ---
 const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -176,10 +180,7 @@ test.describe('Two-factor authentication (TOTP)', () => {
         });
 
         // Password step → pending token, no session.
-        const loginRes = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: hash, duration_seconds: 3600 },
-        });
+        const loginRes = await apiLogin(page, uname, 'password123', { duration_seconds: 3600 });
         expect(loginRes.status()).toBe(200);
         const loginData = await loginRes.json();
         expect(loginData.two_factor_required).toBe(true);
@@ -208,10 +209,7 @@ test.describe('Two-factor authentication (TOTP)', () => {
             data: { code: totpCode(data.secret_base32) },
         });
 
-        const loginRes = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: hash, duration_seconds: 3600 },
-        });
+        const loginRes = await apiLogin(page, uname, 'password123', { duration_seconds: 3600 });
         const loginData = await loginRes.json();
 
         const bad = await page.request.post(`${BASE}/api/login/2fa`, {
@@ -241,10 +239,7 @@ test.describe('Two-factor authentication (TOTP)', () => {
         const recoveryCode = data.recovery_codes[0];
 
         // Login with the recovery code.
-        const loginRes = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: hash, duration_seconds: 3600 },
-        });
+        const loginRes = await apiLogin(page, uname, 'password123', { duration_seconds: 3600 });
         const loginData = await loginRes.json();
         const first = await page.request.post(`${BASE}/api/login/2fa`, {
             headers: { 'Content-Type': 'application/json' },
@@ -253,10 +248,7 @@ test.describe('Two-factor authentication (TOTP)', () => {
         expect(first.status()).toBe(200);
 
         // Reuse the SAME code → rejected (one-time).
-        const loginRes2 = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: hash, duration_seconds: 3600 },
-        });
+        const loginRes2 = await apiLogin(page, uname, 'password123', { duration_seconds: 3600 });
         const loginData2 = await loginRes2.json();
         const second = await page.request.post(`${BASE}/api/login/2fa`, {
             headers: { 'Content-Type': 'application/json' },
@@ -305,10 +297,7 @@ test.describe('Two-factor authentication (TOTP)', () => {
         expect((users2 as any[]).find((u) => u.id === user.id).two_factor_enabled).toBe(false);
 
         // Plain login works again (no 2FA step).
-        const loginRes = await page.request.post(`${BASE}/api/login`, {
-            headers: { 'Content-Type': 'application/json' },
-            data: { username: uname, password: hash, duration_seconds: 3600 },
-        });
+        const loginRes = await apiLogin(page, uname, 'password123', { duration_seconds: 3600 });
         const loginData = await loginRes.json();
         expect(loginData.two_factor_required).toBeFalsy();
         expect(loginData.token).toBeTruthy();

@@ -200,13 +200,12 @@ test.describe('Heartbeat refresh options + reauth custom duration', () => {
         await registerUser(page, username);
 
         const result = await page.evaluate(async (uname) => {
-            const authKey = localStorage.getItem('e2e_auth_key');
-            const hashKeyBytes = E2ECrypto.base64ToArrayBuffer(authKey);
-            const pw = E2ECrypto.hmacHex(new Uint8Array(hashKeyBytes), 'password123');
+            // Current protocol: signed with the account's login key (finding 3).
+            const loginBody = await E2ECrypto.loginRequestBody(uname, 'password123');
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: uname, password: pw, duration_seconds: 999999999 }),
+                body: JSON.stringify(Object.assign(loginBody, { duration_seconds: 999999999 })),
             });
             if (!res.ok) return { ok: false, status: res.status };
             const data = await res.json();

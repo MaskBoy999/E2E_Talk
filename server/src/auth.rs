@@ -43,16 +43,17 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
 }
 
 // --- H3: server-side password verifier (kills pass-the-hash) ---
-// The client sends a deterministic credential (HMAC-SHA256(hash_key, password)
-// for new accounts, the raw password for legacy ones). Storing that value
-// verbatim made the DB row a replayable password-equivalent — anyone with a
-// dump could log in without knowing the password. The server now stores a
-// slow Argon2id hash of the credential (`$e2e$` prefix) instead, so a dump is
-// never directly replayable at /api/login. Format detection:
-//   `$e2e$<argon2id>`   – Argon2id of the client credential (current scheme)
-//   `$argon2id$...`     – legacy server hash of the RAW password (pre-hash era)
-//   anything else       – insecure bare client credential; upgraded in place on
-//                         the first successful verification.
+// The client sends a deterministic credential: HMAC-SHA256(hash_key, password),
+// a 256-bit value that is not the password itself. Storing that value verbatim
+// made the DB row a replayable password-equivalent — anyone with a dump could
+// log in without knowing the password. The server stores a slow Argon2id hash
+// of the credential (`$e2e$` prefix) instead, so a dump is never directly
+// replayable at /api/login.
+//
+// `$e2e$<argon2id>` is the ONLY accepted format. The app is pre-release, so
+// there is no compatibility path for rows holding `$argon2id$` of the raw
+// password (the pre-hash era) or a bare client credential: those rows cannot
+// authenticate anywhere.
 pub const E2E_VERIFIER_PREFIX: &str = "$e2e$";
 
 pub fn hash_user_verifier(credential: &str) -> Result<String, String> {
@@ -69,22 +70,11 @@ pub fn hash_user_verifier(credential: &str) -> Result<String, String> {
 }
 
 pub fn verify_user_verifier(credential: &str, stored: &str) -> Result<bool, String> {
-    if let Some(inner) = stored.strip_prefix(E2E_VERIFIER_PREFIX) {
-        verify_password(credential, inner)
-    } else if stored.starts_with("$argon2") {
-        // Legacy account: stored value is a server-side Argon2id hash of the
-        // raw password (the legacy client fallback sends the raw password).
-        verify_password(credential, stored)
-    } else {
-        // Insecure legacy-client-hash scheme: constant-time compare; the caller
-        // upgrades the stored value on success.
-        use subtle::ConstantTimeEq;
-        Ok(credential.as_bytes().ct_eq(stored.as_bytes()).into())
+    match stored.strip_prefix(E2E_VERIFIER_PREFIX) {
+        Some(inner) => verify_password(credential, inner),
+        // Anything else is a retired format and never authenticates.
+        None => Ok(false),
     }
-}
-
-pub fn verifier_needs_upgrade(stored: &str) -> bool {
-    !stored.starts_with(E2E_VERIFIER_PREFIX) && !stored.starts_with("$argon2")
 }
 
 /// Issue a token with a caller-chosen lifetime. Callers (login/register/reauth)

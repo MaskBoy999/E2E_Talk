@@ -391,6 +391,15 @@ test.describe('Document Preview', () => {
         expect(result.hasOverlay).toBe(true);
         expect(result.contentText?.length || 0).toBeGreaterThan(0);
 
+        // The table is rendered inside the sandboxed frame now (the app
+        // origin only receives the sheet name and the height), so read it
+        // through the frame.
+        const frame = page.frameLocator('iframe.xlsx-sandbox');
+        await expect(frame.locator('table')).toBeVisible();
+        await expect(frame.locator('td', { hasText: 'Alice' })).toHaveCount(1);
+        await expect(page.locator('#doc-preview-content button', { hasText: 'Sheet1' })).toHaveCount(1);
+
+
         await page.evaluate(() => (window as any).DocPreview.close());
     });
 

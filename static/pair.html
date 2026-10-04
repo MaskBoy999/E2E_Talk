@@ -5,26 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>E2E Chat - Pair Device</title>
     <link rel="icon" href="/favicon.ico" sizes="any">
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
     <div class="auth-container">
         <div class="auth-card">
             <h1>E2E Chat</h1>
             <p class="subtitle">Pair New Device</p>
-            <div id="pairing-status" style="margin: 16px 0; text-align: center;">
+            <div class="u-e0353df0" id="pairing-status" >
                 <p>Loading pairing ticket...</p>
             </div>
             <div id="pairing-password-form" style="display:none; text-align: center; margin-top: 16px;">
-                <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 8px;">Enter your password to restore encryption keys:</p>
-                <input type="password" id="pairing-password" placeholder="Password" style="padding: 8px 12px; border: 1px solid var(--border-color, #444); border-radius: 6px; background: var(--input-bg, #222); color: var(--text-primary, #fff); width: 80%; max-width: 280px; margin-bottom: 8px;">
+                <p class="u-50a9f4d8" >Enter your password to restore encryption keys:</p>
+                <input class="u-79e9ae17" type="password" id="pairing-password" placeholder="Password" >
                 <br>
-                <button onclick="restoreKeys()" style="padding: 10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;margin-top:8px">Restore Keys &amp; Login</button>
+                <button class="u-8f4657f5" onclick="restoreKeys()" >Restore Keys &amp; Login</button>
                 <p id="pairing-restore-error" style="color: #e74c3c; font-size: 12px; margin-top: 8px; display: none;"></p>
             </div>
             <div id="pairing-result" style="display:none; text-align: center;">
-                <p style="color: #2ecc71; font-size: 18px;">&#10003; Paired!</p>
-                <p style="color: var(--text-secondary); font-size: 13px;">You are now logged in. <a href="index.html">Go to Chat</a></p>
+                <p class="u-2b23e100" >&#10003; Paired!</p>
+                <p class="u-fb154ad0" >You are now logged in. <a href="index.html">Go to Chat</a></p>
             </div>
         </div>
     </div>
@@ -41,7 +41,7 @@
         var _ticketData = null;
 
         if (!ticketId) {
-            statusEl.innerHTML = '<p style="color:#e74c3c">No pairing ticket found in URL.</p>';
+            statusEl.innerHTML = '<p class="u-ba86eb68" >No pairing ticket found in URL.</p>';
             return;
         }
 
@@ -51,20 +51,20 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.error) {
-                    statusEl.innerHTML = '<p style="color:#e74c3c">' + data.error + '</p>';
+                    statusEl.innerHTML = '<p class="u-ba86eb68" >' + data.error + '</p>';
                     return;
                 }
                 if (data.claimed) {
-                    statusEl.innerHTML = '<p style="color:#e74c3c">This pairing link has already been used.</p>';
+                    statusEl.innerHTML = '<p class="u-ba86eb68" >This pairing link has already been used.</p>';
                     return;
                 }
                 _ticketData = data;
                 statusEl.innerHTML = '<p>Ready to pair. This ticket will expire in ' +
                     Math.round((new Date(data.expires_at) - Date.now()) / 60000) + ' minutes.</p>' +
-                    '<button onclick="claimTicket()" style="padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;margin-top:12px">Claim &amp; Login</button>';
+                    '<button class="u-7158c113" onclick="claimTicket()" >Claim &amp; Login</button>';
             })
             .catch(function(e) {
-                statusEl.innerHTML = '<p style="color:#e74c3c">Error: ' + e.message + '</p>';
+                statusEl.innerHTML = '<p class="u-ba86eb68" >Error: ' + e.message + '</p>';
             });
 
         window.claimTicket = function() {
@@ -73,7 +73,7 @@
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     if (data.error) {
-                        statusEl.innerHTML = '<p style="color:#e74c3c">' + data.error + '</p>';
+                        statusEl.innerHTML = '<p class="u-ba86eb68" >' + data.error + '</p>';
                         return;
                     }
                     if (data.token) {
@@ -91,7 +91,7 @@
                     }
                 })
                 .catch(function(e) {
-                    statusEl.innerHTML = '<p style="color:#e74c3c">Error: ' + e.message + '</p>';
+                    statusEl.innerHTML = '<p class="u-ba86eb68" >Error: ' + e.message + '</p>';
                 });
         };
 

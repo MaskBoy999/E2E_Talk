@@ -290,7 +290,7 @@ test.describe('F-series hardening (main server)', () => {
         const pageRes = await req({ host: 'localhost', port: 3443, path: '/', rejectUnauthorized: false });
         const cspPage = pageRes.headers['content-security-policy'] || '';
         expect(cspPage).toContain("object-src 'none'");
-        expect(cspPage).toContain("frame-src 'none'");
+        expect(cspPage).toContain('frame-src blob:');
         expect(cspPage).toContain("frame-ancestors 'none'");
         expect(pageRes.headers['x-content-type-options']).toBe('nosniff');
         expect(pageRes.headers['x-frame-options']).toBe('DENY');
@@ -301,7 +301,7 @@ test.describe('F-series hardening (main server)', () => {
         expect(apiRes.status).toBe(404);
         const cspApi = apiRes.headers['content-security-policy'] || '';
         expect(cspApi).toContain("object-src 'none'");
-        expect(cspApi).toContain("frame-src 'none'");
+        expect(cspApi).toContain('frame-src blob:');
     });
 
     test('F9: path traversal is blocked (static handler + API)', async () => {

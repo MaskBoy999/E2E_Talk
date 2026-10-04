@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { loginBody } from './_auth-helpers';
 
 const BASE = 'https://localhost:3443';
 
@@ -142,14 +143,17 @@ async function loginHash(page: any, username: string, password: string): Promise
                 return E2ECrypto.hmacHex(bytes, password);
             }
         }
-        return password; // legacy fallback
+        throw new Error('auth_params/unwrap failed for ' + username + ' — cannot compute the credential');
     }, { username, password });
 }
 
-async function apiLogin(page: any, username: string, hash: string) {
+// Log in via the API with the current protocol (signed when the account has a
+// login_public_key; a wrong password is a plain failed attempt).
+async function apiLogin(page: any, username: string, password: string) {
+    const data = await loginBody(page, username, password, { duration_seconds: 3600 });
     return page.request.post(`${BASE}/api/login`, {
         headers: { 'Content-Type': 'application/json' },
-        data: { username, password: hash, duration_seconds: 3600 },
+        data,
     });
 }
 
@@ -180,8 +184,7 @@ test('basic flow: wrong current rejected, old login intact, then new password wo
     }, undefined, { timeout: 15000 });
 
     // Old password must still log in after the failed attempt.
-    let oldHash = await loginHash(page, uname, oldPw);
-    let res = await apiLogin(page, uname, oldHash);
+    let res = await apiLogin(page, uname, oldPw);
     expect(res.status()).toBe(200);
 
     // 2. Mismatched confirmation → client-side error, nothing sent.
@@ -208,8 +211,7 @@ test('basic flow: wrong current rejected, old login intact, then new password wo
         return el ? el.textContent : '';
     });
     expect(statusAfterCancel.includes('Password changed')).toBe(false);
-    oldHash = await loginHash(page, uname, oldPw);
-    res = await apiLogin(page, uname, oldHash);
+    res = await apiLogin(page, uname, oldPw);
     expect(res.status()).toBe(200);
 
     // 3. Real change with the correct current password (through the confirmation).
@@ -222,16 +224,14 @@ test('basic flow: wrong current rejected, old login intact, then new password wo
     }, undefined, { timeout: 20000 });
 
     // 4. New password logs in (no 2FA required for a fresh account).
-    const newHash = await loginHash(page, uname, newPw);
-    res = await apiLogin(page, uname, newHash);
+    res = await apiLogin(page, uname, newPw);
     expect(res.status()).toBe(200);
     const newData = await res.json();
     expect(newData.token).toBeTruthy();
     expect(newData.two_factor_required).toBeFalsy();
 
     // 5. Old password is rejected.
-    oldHash = await loginHash(page, uname, oldPw);
-    res = await apiLogin(page, uname, oldHash);
+    res = await apiLogin(page, uname, oldPw);
     expect(res.status()).toBe(401);
 });
 
@@ -395,8 +395,7 @@ test('2FA keeps working after a password change', async ({ page }) => {
     await changePasswordViaUi(page, oldPw, newPw);
 
     // New password passes the password step, then the TOTP code completes login.
-    const hashNew = await loginHash(page, uname, newPw);
-    res = await apiLogin(page, uname, hashNew);
+    res = await apiLogin(page, uname, newPw);
     expect(res.status()).toBe(200);
     const step = await res.json();
     expect(step.two_factor_required).toBe(true);
@@ -411,7 +410,6 @@ test('2FA keeps working after a password change', async ({ page }) => {
     expect(final.token).toBeTruthy();
 
     // Old password is now rejected at the password step.
-    const hashOldAfter = await loginHash(page, uname, oldPw);
-    res = await apiLogin(page, uname, hashOldAfter);
+    res = await apiLogin(page, uname, oldPw);
     expect(res.status()).toBe(401);
 });

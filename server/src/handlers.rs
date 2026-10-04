@@ -249,13 +249,17 @@ pub(crate) fn check_mutation_rate_limit(
 
     // Limits come from the runtime-tunable admin config (DB → env → default),
     // so a host can adjust them live from the admin panel without a restart.
-    let (user_max, ip_max) = {
+    let (user_max, ip_max, window_secs) = {
         let tuning = state.runtime_tuning.read().unwrap();
-        (tuning.mutation_user_max, tuning.mutation_ip_max)
+        (
+            tuning.mutation_user_max,
+            tuning.mutation_ip_max,
+            tuning.mutation_window_secs,
+        )
     };
+    let window = Duration::from_secs(window_secs);
     let key = format!("mut_user:{}", user_id);
-    if user_max > 0
-        && !MUTATION_USER_RATE_LIMITER.check_and_increment(&key, user_max, Duration::from_secs(10))
+    if user_max > 0 && !MUTATION_USER_RATE_LIMITER.check_and_increment(&key, user_max, window)
     {
         record_mutation_429(Some(&user_id), &get_client_ip(headers));
         return Some((
@@ -267,7 +271,7 @@ pub(crate) fn check_mutation_rate_limit(
     let ip = get_client_ip(headers);
     let ip_key = format!("mut_ip:{}", ip);
     if ip_max > 0
-        && !MUTATION_IP_RATE_LIMITER.check_and_increment(&ip_key, ip_max, Duration::from_secs(10))
+        && !MUTATION_IP_RATE_LIMITER.check_and_increment(&ip_key, ip_max, window)
     {
         record_mutation_429(Some(&user_id), &ip);
         return Some((
@@ -279,23 +283,11 @@ pub(crate) fn check_mutation_rate_limit(
     None
 }
 
-/// H3: verify a client-computed credential (HMAC for new accounts, raw
-/// password for legacy) against the stored verifier, and self-heal legacy
-/// bare-credential rows by replacing them with a server-side Argon2id verifier
-/// on the first successful login. The stored value is never a replayable
-/// password-equivalent (see auth::verify_user_verifier).
-fn verify_user_password_and_upgrade(
-    state: &AppState,
-    user_id: &str,
-    stored: &str,
-    credential: &str,
-) -> Result<bool, String> {
-    let valid = auth::verify_user_verifier(credential, stored)?;
-    if valid && auth::verifier_needs_upgrade(stored) {
-        let upgraded = auth::hash_user_verifier(credential)?;
-        let _ = state.db.update_password_hash(user_id, &upgraded);
-    }
-    Ok(valid)
+/// H3: verify a client-computed credential (HMAC-SHA256(hash_key, password))
+/// against the account's stored `$e2e$Argon2id` verifier. Only that format is
+/// accepted — pre-hash and bare-credential rows cannot authenticate.
+fn verify_user_credential(stored: &str, credential: &str) -> Result<bool, String> {
+    auth::verify_user_verifier(credential, stored)
 }
 
 fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, Instant>>> {
@@ -340,7 +332,10 @@ pub(crate) fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<Stri
                     cookie_str.split(';')
                         .find_map(|part| {
                             let trimmed = part.trim();
-                            trimmed.strip_prefix("token=").map(|v| v.to_string())
+                            trimmed
+                                .strip_prefix("__Host-e2e_token=")
+                                .or_else(|| trimmed.strip_prefix("token="))
+                                .map(|v| v.to_string())
                         })
                 })
         })
@@ -385,8 +380,18 @@ pub(crate) fn extract_user(headers: &HeaderMap, state: &AppState) -> Result<Stri
 
 pub async fn logout(
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // Housekeeping mode: the login page calls this on every load to evict a
+    // stale HttpOnly cookie. It must NOT carry `Clear-Site-Data: "storage"`,
+    // because that wipes the origin's localStorage — including the prefs the
+    // page deliberately preserves across a forced re-login (session duration,
+    // media caches) and any storage the running page still needs. A real
+    // sign-out (no flag) evicts everything; see `clearStaleCookies()` in
+    // static/auth.js.
+    let cookie_only = params.get("cookie_only").map(|v| v == "1").unwrap_or(false);
+
     // Validate the token if present (optional)
     let _ = extract_user(&headers, &state);
 
@@ -406,12 +411,25 @@ pub async fn logout(
 
     // Clear all known cookies by overwriting with blank expired values
     let mut resp_headers = HeaderMap::new();
-    for cookie_name in &["token", "session", "connect.sid", "xsrf-token"] {
+    // Includes both the current `__Host-` cookie and the legacy `token` name so
+    // a pre-rename cookie can never survive a sign-out.
+    for cookie_name in &["__Host-e2e_token", "token", "session", "connect.sid", "xsrf-token"] {
         resp_headers.append(
             "set-cookie",
             HeaderValue::from_str(
-                &format!("{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0", cookie_name)
+                &format!("{}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0", cookie_name)
             ).unwrap(),
+        );
+    }
+    // Belt-and-braces for the client's own wipe: a sign-out evicts cookies,
+    // cached responses and origin storage even if the page's JS never got to
+    // run its cleanup (closed tab, crashed renderer). The client stores the
+    // session token and key material under this origin, so storage is exactly
+    // what a shared machine must not keep after logout.
+    if !cookie_only {
+        resp_headers.insert(
+            "clear-site-data",
+            HeaderValue::from_static("\"cache\", \"cookies\", \"storage\""),
         );
     }
 
@@ -423,14 +441,18 @@ pub async fn logout_get(
     State(_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let mut resp_headers = HeaderMap::new();
-    for cookie_name in &["token", "session", "connect.sid", "xsrf-token"] {
+    for cookie_name in &["__Host-e2e_token", "token", "session", "connect.sid", "xsrf-token"] {
         resp_headers.append(
             "set-cookie",
             HeaderValue::from_str(
-                &format!("{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0", cookie_name)
+                &format!("{}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0", cookie_name)
             ).unwrap(),
         );
     }
+    resp_headers.insert(
+        "clear-site-data",
+        HeaderValue::from_static("\"cache\", \"cookies\", \"storage\""),
+    );
     resp_headers.insert(
         "location",
         HeaderValue::from_str("/login.html").unwrap(),
@@ -539,7 +561,7 @@ pub async fn kick_auth_session(
                 .into_response();
         }
     };
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+    let valid = match verify_user_credential(&stored_hash, &req.current_password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -611,7 +633,7 @@ pub async fn kick_all_auth_sessions(
                 .into_response();
         }
     };
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+    let valid = match verify_user_credential(&stored_hash, &req.current_password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -779,6 +801,11 @@ pub struct RegisterRequest {
     pub encrypted_hash_key: Option<String>,
     pub hash_key_salt: Option<String>,
     pub hash_key_nonce: Option<String>,
+    // F3 — replay-resistant login: base64 Ed25519 public key the client derives
+    // from the same secret as the login credential. Required: an account
+    // without one could never sign in.
+    #[serde(default)]
+    pub login_public_key: Option<String>,
     // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
     #[serde(default)]
     pub duration_seconds: Option<u64>,
@@ -792,7 +819,13 @@ pub struct RegisterRequest {
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub username: String,
-    pub password: String,
+    // F3 — signed login: the single-use nonce from /api/auth-params plus the
+    // Ed25519 signature over "e2e-login-v1|username|nonce". There is no
+    // credential field: nothing replayable is accepted.
+    #[serde(default)]
+    pub login_nonce: Option<String>,
+    #[serde(default)]
+    pub login_signature: Option<String>,
     // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
     #[serde(default)]
     pub duration_seconds: Option<u64>,
@@ -859,7 +892,17 @@ pub async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     let rate_key = format!("reg:{}", req.username);
-    if !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(300)) {
+    let (reg_user_max, login_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.register_user_max, tuning.login_window_secs)
+    };
+    if reg_user_max > 0
+        && !LOGIN_RATE_LIMITER.check_and_increment(
+            &rate_key,
+            reg_user_max,
+            Duration::from_secs(login_window),
+        )
+    {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many registration attempts. Try again in 5 minutes."})),
@@ -872,9 +915,12 @@ pub async fn register(
     // disable it with REGISTER_IP_MAX (same pattern as LOGIN_IP_MAX).
     let reg_ip = get_client_ip(&headers);
     let reg_ip_key = format!("register_ip:{}", reg_ip);
-    let reg_ip_max: u32 = std::env::var("REGISTER_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+    let (reg_ip_max, reg_ip_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.register_ip_max, tuning.register_ip_window_secs)
+    };
     if reg_ip_max > 0
-        && !REGISTER_IP_RATE_LIMITER.check_and_increment(&reg_ip_key, reg_ip_max, Duration::from_secs(600))
+        && !REGISTER_IP_RATE_LIMITER.check_and_increment(&reg_ip_key, reg_ip_max, Duration::from_secs(reg_ip_window))
     {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -899,6 +945,20 @@ pub async fn register(
             .into_response();
     }
 
+    // F3 — the replay-resistant login key is required. There is no credential
+    // fallback, so an account without one could never sign in; a malformed key
+    // would break verification the same way. Both are rejected outright.
+    let login_public_key = match req.login_public_key.as_deref().map(str::trim) {
+        Some(pk) if !pk.is_empty() && crate::decode_login_public_key(pk).is_some() => pk.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "A login public key is required"})),
+            )
+                .into_response();
+        }
+    };
+
     // H3: the client sends a deterministic credential (HMAC of the password);
     // store a server-side Argon2id verifier of it, never the credential itself,
     // so a DB dump is not a replayable password-equivalent.
@@ -916,13 +976,14 @@ pub async fn register(
         use rand::Rng;
         let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
         let code_upper = fc.trim().to_uppercase();
+        // Friend-code hashing stays on the master key (never published).
         let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code_upper));
         (Some(hash), Some(salt))
     } else {
         (None, None)
     };
 
-    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), friend_code_hash.as_deref(), friend_code_hash_salt.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref(), req.encrypted_hash_key.as_deref(), req.hash_key_salt.as_deref(), req.hash_key_nonce.as_deref()) {
+    let user = match state.db.create_user(&req.username, &password_hash, identity_key_bytes.as_deref(), friend_code_hash.as_deref(), friend_code_hash_salt.as_deref(), req.encrypted_friend_code.as_deref(), req.friend_code_salt.as_deref(), req.friend_code_nonce.as_deref(), req.encrypted_hash_key.as_deref(), req.hash_key_salt.as_deref(), req.hash_key_nonce.as_deref(), Some(login_public_key.as_str())) {
         Ok(u) => u,
         Err(e) => {
             return (
@@ -1009,8 +1070,15 @@ pub async fn login(
     // disable, or a number to raise it (same pattern as FRIEND_REQUEST_IP_MAX).
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("login_ip:{}", ip);
-    let ip_max: u32 = std::env::var("LOGIN_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    if ip_max > 0 && !LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(300)) {
+    let (ip_max, user_max, login_window): (u32, u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (
+            tuning.login_ip_max,
+            tuning.login_user_max,
+            tuning.login_window_secs,
+        )
+    };
+    if ip_max > 0 && !LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(login_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
@@ -1020,8 +1088,7 @@ pub async fn login(
 
     // Per-username rate limiting (already existed). Env-overridable for tests.
     let rate_key = format!("login:{}", req.username);
-    let user_max: u32 = std::env::var("LOGIN_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    if user_max > 0 && !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(300)) {
+    if user_max > 0 && !LOGIN_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(login_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
@@ -1035,7 +1102,7 @@ pub async fn login(
     // passwords so legitimate users are unaffected. Checked before the
     // expensive Argon2 verification; bumped after a confirmed failure.
     let fail_rate_key = format!("login_fail:{}", req.username);
-    let user_fail_max: u32 = std::env::var("LOGIN_USER_FAIL_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let user_fail_max: u32 = state.runtime_tuning.read().unwrap().login_user_fail_max;
     if user_fail_max > 0 && LOGIN_USER_FAIL_RATE_LIMITER.is_blocked(&fail_rate_key, user_fail_max, Duration::from_secs(900)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -1051,8 +1118,11 @@ pub async fn login(
     // throttle never reveals whether an account has a kill switch.
     if req.kill_switch_proof.is_some() {
         let ks_ip_key = format!("login_ks_ip:{}", ip);
-        let ks_ip_max: u32 = std::env::var("KILL_SWITCH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
-        if ks_ip_max > 0 && !KILL_SWITCH_IP_RATE_LIMITER.check_and_increment(&ks_ip_key, ks_ip_max, Duration::from_secs(300)) {
+        let (ks_ip_max, ks_window): (u32, u64) = {
+            let tuning = state.runtime_tuning.read().unwrap();
+            (tuning.kill_switch_ip_max, tuning.kill_switch_window_secs)
+        };
+        if ks_ip_max > 0 && !KILL_SWITCH_IP_RATE_LIMITER.check_and_increment(&ks_ip_key, ks_ip_max, Duration::from_secs(ks_window)) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
@@ -1066,8 +1136,11 @@ pub async fn login(
         // has a kill switch — the throttle looks exactly like the general
         // login rate limit.
         let ks_user_key = format!("login_ks_user:{}", req.username);
-        let ks_user_max: u32 = std::env::var("KILL_SWITCH_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
-        if ks_user_max > 0 && !KILL_SWITCH_USER_RATE_LIMITER.check_and_increment(&ks_user_key, ks_user_max, Duration::from_secs(300)) {
+        let (ks_user_max, ks_window): (u32, u64) = {
+            let tuning = state.runtime_tuning.read().unwrap();
+            (tuning.kill_switch_user_max, tuning.kill_switch_window_secs)
+        };
+        if ks_user_max > 0 && !KILL_SWITCH_USER_RATE_LIMITER.check_and_increment(&ks_user_key, ks_user_max, Duration::from_secs(ks_window)) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({"error": "Too many login attempts. Try again in 5 minutes."})),
@@ -1076,28 +1149,35 @@ pub async fn login(
         }
     }
 
-    let password_hash = match state.db.get_password_hash(&req.username) {
-        Ok(h) => h,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Wrong username or password"})),
-            )
-                .into_response();
-        }
-    };
+    // An unknown username is a plain 401 before any verification. Besides
+    // skipping the work, this keeps bogus spellings out of the per-account
+    // failure counter, so they can't consume a real account's budget or
+    // pre-trip the S8 limiter ahead of the kill-switch throttle.
+    if state.db.get_password_hash(&req.username).is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Wrong username or password"})),
+        )
+            .into_response();
+    }
 
-    // H3: verify against the server-side verifier (Argon2id of the client
-    // credential — the stored value is never a replayable password-equivalent)
-    // and self-heal legacy bare rows on the first successful login.
-    let user_for_verify = state.db.get_user_by_username(&req.username).ok();
-    let valid = match &user_for_verify {
-        Some(u) => match verify_user_password_and_upgrade(&state, &u.id, &password_hash, &req.password) {
-            Ok(v) => v,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
-        },
-        None => false,
-    };
+    // F3: the only way in is a nonce-bound Ed25519 signature from the key the
+    // account registered. There is no credential fallback: a request without a
+    // signature, or an account with no stored key (which no current client can
+    // create), is simply a failed login. The kill-switch path below still runs
+    // on `!valid`, so the second password keeps deleting accounts too.
+    let stored_login_key = state.db.get_login_public_key(&req.username).ok().flatten();
+    let mut valid = false;
+    if let Some(stored_key) = stored_login_key.as_deref() {
+        if let (Some(nonce), Some(signature)) =
+            (req.login_nonce.as_deref(), req.login_signature.as_deref())
+        {
+            // Verify first, consume second: a garbage request must not burn a
+            // legitimate user's live nonce.
+            valid = crate::verify_login_signature(stored_key, &req.username, nonce, signature)
+                && state.consume_login_nonce(&req.username, nonce);
+        }
+    }
 
     // Kill Switch: entering the kill-switch password instead of the real one
     // deletes the account on the spot (shows as a generic server error so the
@@ -1163,12 +1243,16 @@ pub async fn login(
         // hits the threshold, send an encrypted alert to the account owner via
         // WS (or queue for offline delivery). This lets users know someone is
         // trying to brute-force their password.
-        let notify_max: u32 = std::env::var("LOGIN_FAIL_NOTIFY_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        let (notify_max, notify_window): (u32, u64) = {
+            let tuning = state.runtime_tuning.read().unwrap();
+            (tuning.login_fail_notify_max, tuning.login_fail_notify_window_secs)
+        };
         if notify_max > 0 {
             let notify_key = format!("login_notify:{}", req.username);
-            LOGIN_FAIL_NOTIFY_RATE_LIMITER.increment(&notify_key, Duration::from_secs(600));
+            let notify_window = Duration::from_secs(notify_window);
+            LOGIN_FAIL_NOTIFY_RATE_LIMITER.increment(&notify_key, notify_window);
             // Snapshot: check if we just hit the threshold (count == notify_max)
-            let snapshot = LOGIN_FAIL_NOTIFY_RATE_LIMITER.snapshot(Duration::from_secs(600));
+            let snapshot = LOGIN_FAIL_NOTIFY_RATE_LIMITER.snapshot(notify_window);
             if let Some(&(_, count, _)) = snapshot.iter().find(|(k, _, _)| k == &notify_key) {
                 if count == notify_max {
                     // Only notify for existing users (password hash lookup succeeded above)
@@ -1266,7 +1350,7 @@ pub async fn login(
     headers.insert(
         "set-cookie",
         HeaderValue::from_str(
-            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, session_secs)
+            &format!("__Host-e2e_token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, session_secs)
         ).unwrap(),
     );
 
@@ -1308,8 +1392,14 @@ pub async fn login_2fa(
     // for tests, same pattern as LOGIN_IP_MAX).
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("login2fa_ip:{}", ip);
-    let ip_max: u32 = std::env::var("LOGIN_2FA_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    if ip_max > 0 && !LOGIN_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(300)) {
+    // Read through RuntimeTuning (admin_config → env → default) like every
+    // other limit: reading the env var directly here meant the admin panel's
+    // value was ignored for this one endpoint.
+    let (ip_max, login_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.login_2fa_ip_max, tuning.login_window_secs)
+    };
+    if ip_max > 0 && !LOGIN_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(login_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many attempts. Try again in 5 minutes."})),
@@ -1343,8 +1433,11 @@ pub async fn login_2fa(
     // with the same 429 as the general 2FA rate limit so nothing is revealed.
     if is_kill_switch {
         let ks_user_key = format!("login_ks_user2fa:{}", claims.sub);
-        let ks_user_max: u32 = std::env::var("KILL_SWITCH_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
-        if ks_user_max > 0 && !KILL_SWITCH_USER_RATE_LIMITER.check_and_increment(&ks_user_key, ks_user_max, Duration::from_secs(300)) {
+        let (ks_user_max, ks_window): (u32, u64) = {
+            let tuning = state.runtime_tuning.read().unwrap();
+            (tuning.kill_switch_user_max, tuning.kill_switch_window_secs)
+        };
+        if ks_user_max > 0 && !KILL_SWITCH_USER_RATE_LIMITER.check_and_increment(&ks_user_key, ks_user_max, Duration::from_secs(ks_window)) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({"error": "Too many attempts. Try again in 5 minutes."})),
@@ -1463,7 +1556,7 @@ pub async fn login_2fa(
     headers_out.insert(
         "set-cookie",
         HeaderValue::from_str(
-            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, session_secs)
+            &format!("__Host-e2e_token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, session_secs)
         )
         .unwrap(),
     );
@@ -1527,7 +1620,7 @@ pub async fn enroll_2fa(
                 .into_response();
         }
     };
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.password) {
+    let valid = match verify_user_credential(&stored_hash, &req.password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -1741,8 +1834,11 @@ pub async fn get_auth_params(
     // AUTH_PARAMS_IP_MAX=0 to disable, or a number to raise it.
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("auth_params_ip:{}", ip);
-    let ip_max: u32 = std::env::var("AUTH_PARAMS_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    if ip_max > 0 && !AUTH_PARAMS_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(60)) {
+    let (ip_max, ap_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.auth_params_ip_max, tuning.auth_params_window_secs)
+    };
+    if ip_max > 0 && !AUTH_PARAMS_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(ap_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Try again in 1 minute."})),
@@ -1753,6 +1849,13 @@ pub async fn get_auth_params(
     match state.db.get_auth_params(&username) {
         Ok((encrypted_hash_key, hash_key_salt, hash_key_nonce, ks_ver, ks_wrap_salt, ks_wrap_nonce, ks_salt, ks_check)) => {
             let has_kill_switch = ks_check.is_some();
+            // F3 — signed-login handshake material. Every account carries a
+            // key; the nonce is single-use, 2-minute, and public (it is signed,
+            // not secret).
+            let login_public_key = state.db.get_login_public_key(&username).ok().flatten();
+            let login_nonce = login_public_key
+                .as_ref()
+                .map(|_| state.issue_login_nonce(&username));
             (StatusCode::OK, Json(serde_json::json!({
                 "encrypted_hash_key": encrypted_hash_key,
                 "hash_key_salt": hash_key_salt,
@@ -1762,6 +1865,8 @@ pub async fn get_auth_params(
                 "kill_switch_wrap_salt": ks_wrap_salt,
                 "kill_switch_wrap_nonce": ks_wrap_nonce,
                 "kill_switch_salt": ks_salt,
+                "login_public_key": login_public_key,
+                "login_nonce": login_nonce,
             }))).into_response()
         }
         Err(_) => {
@@ -1778,6 +1883,11 @@ pub struct ChangePasswordRequest {
     pub old_password: String,
     /// Client-computed hash of the NEW password: HMAC-SHA256(hash_key, raw).
     pub new_password: String,
+    /// F3 — new Ed25519 login public key derived from the NEW password (the
+    /// signing key is a function of (hash_key, password), so it rotates with
+    /// it). Required: there is no credential fallback, so a change that didn't
+    /// rotate the key would lock the account out.
+    pub login_public_key: String,
     // hash_key re-encrypted with the NEW password (required — login depends on it).
     pub encrypted_hash_key: String,
     pub hash_key_salt: String,
@@ -1842,9 +1952,9 @@ pub async fn change_password(
         }
     };
 
-    // H3: verify against the server-side verifier (Argon2id of the client
-    // credential) and self-heal legacy bare rows on success.
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &password_hash, &req.old_password) {
+    // H3: verify the client credential against the server-side `$e2e$`
+    // Argon2id verifier. Only that format is accepted.
+    let valid = match verify_user_credential(&password_hash, &req.old_password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -1880,7 +1990,7 @@ pub async fn change_password(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
 
-    if let Err(e) = state.db.change_password_credentials(
+    let blob_rev = match state.db.change_password_credentials(
         &user_id,
         &current_sid,
         &new_verifier,
@@ -1897,18 +2007,38 @@ pub async fn change_password(
         req.blob_salt.as_deref(),
         req.blob_nonce.as_deref(),
     ) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    // F3 — rotate the signed-login public key together with the password (the
+    // signing key is derived from hash_key + password, so it changes). The key
+    // is required: there is no credential fallback, so an account whose key
+    // didn't rotate could not sign in again.
+    let new_login_key = req.login_public_key.trim();
+    if crate::decode_login_public_key(new_login_key).is_none() {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid login public key"})),
         )
             .into_response();
     }
+    let _ = state.db.set_login_public_key(&user_id, new_login_key);
 
     // Every other session was revoked in the same transaction — tell those
     // devices now so they sign out immediately instead of at their next call.
     live_kick_other_devices(&state, &user_id, &current_sid, "password_changed").await;
 
-    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+    // `rev` is the key blob's post-change revision — the client uses it as the
+    // base for its next mirror save so the change and the device that made it
+    // stay on the same revision line instead of provoking a 409.
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "rev": blob_rev}))).into_response()
 }
 
 // --- Re-authenticate ---
@@ -2108,8 +2238,15 @@ pub async fn reauth(
     // or a number raises it (same pattern as LOGIN_IP_MAX/LOGIN_USER_MAX).
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("reauth_ip:{}", ip);
-    let ip_max: u32 = std::env::var("REAUTH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    if ip_max > 0 && !REAUTH_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(300)) {
+    let (ip_max, user_max, reauth_window): (u32, u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (
+            tuning.reauth_ip_max,
+            tuning.reauth_user_max,
+            tuning.reauth_window_secs,
+        )
+    };
+    if ip_max > 0 && !REAUTH_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(reauth_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many reauth attempts. Try again in 5 minutes."})),
@@ -2119,8 +2256,7 @@ pub async fn reauth(
 
     // Per-user rate limiting: 10 attempts per 5 minutes (env-overridable).
     let rate_key = format!("reauth:{}", user_id);
-    let user_max: u32 = std::env::var("REAUTH_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    if user_max > 0 && !REAUTH_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(300)) {
+    if user_max > 0 && !REAUTH_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(reauth_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many reauth attempts. Try again in 5 minutes."})),
@@ -2150,9 +2286,9 @@ pub async fn reauth(
         }
     };
 
-    // H3: verify against the server-side verifier (Argon2id of the client
-    // credential) and self-heal legacy bare rows on success.
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &password_hash, &req.password) {
+    // H3: verify the client credential against the server-side `$e2e$`
+    // Argon2id verifier. Only that format is accepted.
+    let valid = match verify_user_credential(&password_hash, &req.password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -2191,7 +2327,7 @@ pub async fn reauth(
     headers.insert(
         "set-cookie",
         HeaderValue::from_str(
-            &format!("token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, duration_secs)
+            &format!("__Host-e2e_token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}", token, duration_secs)
         ).unwrap(),
     );
 
@@ -2647,9 +2783,12 @@ pub async fn create_server(
     // (0 disables) so suites that reuse one long-lived account and create
     // dozens of servers in a run don't 429 part-way through — same pattern as
     // LOGIN_IP_MAX / REGISTER_IP_MAX / MUTATION_USER_MAX.
-    let cs_max: u32 = std::env::var("CREATE_SERVER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let (cs_max, cs_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.create_server_max, tuning.create_server_window_secs)
+    };
     let rate_key = format!("create_server:{}", user_id);
-    if cs_max > 0 && !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, cs_max, Duration::from_secs(3600)) {
+    if cs_max > 0 && !CREATE_SERVER_RATE_LIMITER.check_and_increment(&rate_key, cs_max, Duration::from_secs(cs_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many servers created. Try again in 1 hour."})),
@@ -2661,6 +2800,7 @@ pub async fn create_server(
     use rand::Rng;
     let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
     let code_upper = req.invite_code.trim().to_uppercase();
+    // Invite-code hashing stays on the master key (never published).
     let invite_code_hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code_upper));
 
     let encrypted_name_bytes = req.encrypted_name.as_ref().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
@@ -2720,7 +2860,7 @@ pub async fn list_servers(
                 "id": s.id,
                 "encrypted_name": s.encrypted_name.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
                 "name_nonce": s.name_nonce.as_ref().map(|v| base64::engine::general_purpose::STANDARD.encode(v)),
-                "owner_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &s.owner_id),
+                "owner_id": state.client_hmac_hex(&s.owner_id),
                 "is_owner": is_owner,
                 "joins_disabled": s.joins_disabled,
                 "server_picture_file_id": s.server_picture_file_id,
@@ -2918,6 +3058,7 @@ pub async fn regenerate_invite(
     use rand::Rng;
     let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
     let code_upper = req.invite_code.trim().to_uppercase();
+    // Invite-code hashing stays on the master key (never published).
     let invite_code_hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code_upper));
 
     match state.db.regenerate_invite(&server_id, &user_id, &invite_code_hash, &salt) {
@@ -2956,9 +3097,15 @@ pub async fn join_server(
         Err(e) => return e.into_response(),
     };
 
-    // Rate limit: 10 attempts per 10 minutes
+    // Rate limit: per-account join budget (admin-tunable).
+    let (join_max, join_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.join_server_user_max, tuning.join_server_window_secs)
+    };
     let rate_key = format!("join_server:{}", user_id);
-    if !JOIN_SERVER_RATE_LIMITER.check_and_increment(&rate_key, 10, Duration::from_secs(600)) {
+    if join_max > 0
+        && !JOIN_SERVER_RATE_LIMITER.check_and_increment(&rate_key, join_max, Duration::from_secs(join_window))
+    {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many server join attempts. Try again in 10 minutes."})),
@@ -2996,7 +3143,7 @@ pub async fn join_server(
     let join_msg = serde_json::json!({
         "type": "member_joined",
         "server_id": server.id,
-        "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+        "user_id": state.client_hmac_hex(&user_id),
         "raw_user_id": user_id,
     });
     if let Ok(members) = state.db.get_server_members(&server.id) {
@@ -3068,7 +3215,7 @@ pub async fn kick_member(
             let kick_msg = serde_json::json!({
                 "type": "member_kicked",
                 "server_id": server_id,
-                "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &req.user_id),
+                "user_id": state.client_hmac_hex(&req.user_id),
                 "raw_user_id": req.user_id,
             });
             if let Ok(members) = state.db.get_server_members(&server_id) {
@@ -3126,7 +3273,7 @@ pub async fn leave_server(
                 let leave_msg = serde_json::json!({
                 "type": "member_left",
                 "server_id": server_id,
-                "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+                "user_id": state.client_hmac_hex(&user_id),
                 "raw_user_id": user_id,
                 });
                 if let Ok(members) = state.db.get_server_members(&server_id) {
@@ -3200,7 +3347,7 @@ pub async fn ban_member(
             let ban_msg = serde_json::json!({
                 "type": "member_banned",
                 "server_id": server_id,
-                "user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &req.user_id),
+                "user_id": state.client_hmac_hex(&req.user_id),
                 "raw_user_id": req.user_id,
             });
             if let Ok(members) = state.db.get_server_members(&server_id) {
@@ -3909,7 +4056,7 @@ pub async fn list_messages(
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
-                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_id": state.client_hmac_hex(&m.sender_id),
                 "sender_user_id": m.sender_id,
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
@@ -3993,7 +4140,7 @@ pub async fn list_thread_messages(
     let message_infos: Vec<serde_json::Value> = messages.iter().map(|m| {
         serde_json::json!({
             "id": m.id,
-            "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+            "sender_id": state.client_hmac_hex(&m.sender_id),
             "sender_user_id": m.sender_id,
             "sender_id_hash": m.sender_id_hash,
             "encrypted_sender_username": m.encrypted_sender_username,
@@ -4252,7 +4399,7 @@ pub async fn list_channel_pins(
             serde_json::json!({
 
                 "id": m.id,
-                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_id": state.client_hmac_hex(&m.sender_id),
                 "sender_user_id": m.sender_id,
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
@@ -4409,7 +4556,7 @@ pub async fn list_messages_around(
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
-                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_id": state.client_hmac_hex(&m.sender_id),
                 "sender_user_id": m.sender_id,
                 "sender_id_hash": m.sender_id_hash,
                 "encrypted_sender_username": m.encrypted_sender_username,
@@ -4954,14 +5101,10 @@ pub async fn admin_login(
     // the login/friend-request limiters; ADMIN_LOGIN_IP_MAX=0 disables it.
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("admin_login_ip:{}", ip);
-    let admin_ip_max: u32 = std::env::var("ADMIN_LOGIN_IP_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10);
-    let admin_ip_window: u64 = std::env::var("ADMIN_LOGIN_IP_WINDOW_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
+    let (admin_ip_max, admin_ip_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.admin_login_ip_max, tuning.admin_login_window_secs)
+    };
     if admin_ip_max > 0 && !ADMIN_LOGIN_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, admin_ip_max, Duration::from_secs(admin_ip_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -5789,17 +5932,9 @@ pub async fn admin_list_admin_config(
     (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
-/// Effective G2 runtime limits + where each value came from ("db"|"env"|"default").
-pub async fn admin_get_runtime_config(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    if let Err(e) = extract_admin_token(&headers) {
-        return e.into_response();
-    }
-    let tuning = state.runtime_tuning.read().unwrap();
-    // F5 — include the live IP-redaction toggle (env or admin_config).
-    let redact = std::env::var("ADMIN_AUDIT_REDACT_IPS")
+/// The live IP-redaction toggle (env or admin_config), for the admin UI.
+fn admin_audit_redact_ips(state: &AppState) -> bool {
+    std::env::var("ADMIN_AUDIT_REDACT_IPS")
         .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -5809,24 +5944,83 @@ pub async fn admin_get_runtime_config(
             .ok()
             .flatten()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "mutation_user_max": tuning.mutation_user_max,
-            "mutation_ip_max": tuning.mutation_ip_max,
-            "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
-            "max_file_size_mb": tuning.max_file_size_mb,
-            "admin_audit_redact_ips": redact,
-            "sources": {
-                "mutation_user_max": tuning.sources[0],
-                "mutation_ip_max": tuning.sources[1],
-                "file_storage_quota_bytes": tuning.sources[2],
-                "max_file_size_mb": tuning.sources[3],
-            },
-        })),
-    )
-        .into_response()
+            .unwrap_or(false)
+}
+
+/// Every runtime-tunable value + where it came from ("db"|"env"|"default")
+/// + the effective value of the audit IP-redaction toggle. Shared by the GET
+/// and PUT responses so the admin panel always sees the same shape.
+fn runtime_tuning_json(tuning: &crate::RuntimeTuning, redact: bool) -> serde_json::Value {
+    serde_json::json!({
+        "mutation_user_max": tuning.mutation_user_max,
+        "mutation_ip_max": tuning.mutation_ip_max,
+        "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
+        "max_file_size_mb": tuning.max_file_size_mb,
+        "ws_max_message_bytes": tuning.ws_max_message_bytes,
+        "ws_max_frame_bytes": tuning.ws_max_frame_bytes,
+        "ws_socket_budget_bytes": tuning.ws_socket_budget_bytes,
+        "ws_socket_budget_window_secs": tuning.ws_socket_budget_window_secs,
+        "ws_auth_max": tuning.ws_auth_max,
+        "body_limit_default_bytes": tuning.body_limit_default_bytes,
+        "body_limit_import_bytes": tuning.body_limit_import_bytes,
+        "body_limit_vault_bytes": tuning.body_limit_vault_bytes,
+        "request_timeout_secs": tuning.request_timeout_secs,
+        "login_ip_max": tuning.login_ip_max,
+        "login_user_max": tuning.login_user_max,
+        "login_user_fail_max": tuning.login_user_fail_max,
+        "register_ip_max": tuning.register_ip_max,
+        "kill_switch_ip_max": tuning.kill_switch_ip_max,
+        "kill_switch_user_max": tuning.kill_switch_user_max,
+        "login_2fa_ip_max": tuning.login_2fa_ip_max,
+        "login_fail_notify_max": tuning.login_fail_notify_max,
+        "auth_params_ip_max": tuning.auth_params_ip_max,
+        "reauth_ip_max": tuning.reauth_ip_max,
+        "reauth_user_max": tuning.reauth_user_max,
+        "create_server_max": tuning.create_server_max,
+        "admin_login_ip_max": tuning.admin_login_ip_max,
+        "hmac_key_ip_max": tuning.hmac_key_ip_max,
+        "client_config_ip_max": tuning.client_config_ip_max,
+        "search_ip_max": tuning.search_ip_max,
+        "friend_request_ip_max": tuning.friend_request_ip_max,
+        "friend_request_user_max": tuning.friend_request_user_max,
+        "register_user_max": tuning.register_user_max,
+        "join_server_user_max": tuning.join_server_user_max,
+        "voice_media_max": tuning.voice_media_max,
+        "icon_slot_max_bytes": tuning.icon_slot_max_bytes,
+        "upload_chunk_max_bytes": tuning.upload_chunk_max_bytes,
+        "mutation_window_secs": tuning.mutation_window_secs,
+        "login_window_secs": tuning.login_window_secs,
+        "kill_switch_window_secs": tuning.kill_switch_window_secs,
+        "reauth_window_secs": tuning.reauth_window_secs,
+        "auth_params_window_secs": tuning.auth_params_window_secs,
+        "register_ip_window_secs": tuning.register_ip_window_secs,
+        "join_server_window_secs": tuning.join_server_window_secs,
+        "friend_request_window_secs": tuning.friend_request_window_secs,
+        "hmac_key_window_secs": tuning.hmac_key_window_secs,
+        "client_config_window_secs": tuning.client_config_window_secs,
+        "search_window_secs": tuning.search_window_secs,
+        "ws_auth_window_secs": tuning.ws_auth_window_secs,
+        "voice_media_window_secs": tuning.voice_media_window_secs,
+        "create_server_window_secs": tuning.create_server_window_secs,
+        "admin_login_window_secs": tuning.admin_login_window_secs,
+        "login_fail_notify_window_secs": tuning.login_fail_notify_window_secs,
+        "admin_audit_redact_ips": redact,
+        "sources": tuning.sources,
+    })
+}
+
+/// Effective runtime limits (finding 7: every formerly hardcoded rate/size
+/// limit) + where each value came from ("db"|"env"|"default").
+pub async fn admin_get_runtime_config(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(e) = extract_admin_token(&headers) {
+        return e.into_response();
+    }
+    let redact = admin_audit_redact_ips(&state);
+    let tuning = state.runtime_tuning.read().unwrap();
+    (StatusCode::OK, Json(runtime_tuning_json(&tuning, redact))).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -5840,6 +6034,110 @@ pub struct AdminSetRuntimeConfigRequest {
     /// Max single-file upload size in MB (0 = unlimited, default 1024).
     #[serde(default)]
     pub max_file_size_mb: Option<i64>,
+    // Finding 7 — WebSocket protection (bytes / counts).
+    #[serde(default)]
+    pub ws_max_message_bytes: Option<u64>,
+    #[serde(default)]
+    pub ws_max_frame_bytes: Option<u64>,
+    #[serde(default)]
+    pub ws_socket_budget_bytes: Option<u64>,
+    #[serde(default)]
+    pub ws_socket_budget_window_secs: Option<u64>,
+    #[serde(default)]
+    pub ws_auth_max: Option<u64>,
+    // Finding 7 — request body caps (bytes).
+    #[serde(default)]
+    pub body_limit_default_bytes: Option<u64>,
+    #[serde(default)]
+    pub body_limit_import_bytes: Option<u64>,
+    #[serde(default)]
+    pub body_limit_vault_bytes: Option<u64>,
+    // Finding 7 — timeouts (seconds).
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+    // Finding 7 — auth & API rate limits (attempts per window, 0 = disabled).
+    #[serde(default)]
+    pub login_ip_max: Option<u64>,
+    #[serde(default)]
+    pub login_user_max: Option<u64>,
+    #[serde(default)]
+    pub login_user_fail_max: Option<u64>,
+    #[serde(default)]
+    pub register_ip_max: Option<u64>,
+    #[serde(default)]
+    pub kill_switch_ip_max: Option<u64>,
+    #[serde(default)]
+    pub kill_switch_user_max: Option<u64>,
+    #[serde(default)]
+    pub login_2fa_ip_max: Option<u64>,
+    #[serde(default)]
+    pub login_fail_notify_max: Option<u64>,
+    #[serde(default)]
+    pub auth_params_ip_max: Option<u64>,
+    #[serde(default)]
+    pub reauth_ip_max: Option<u64>,
+    #[serde(default)]
+    pub reauth_user_max: Option<u64>,
+    #[serde(default)]
+    pub create_server_max: Option<u64>,
+    #[serde(default)]
+    pub admin_login_ip_max: Option<u64>,
+    #[serde(default)]
+    pub hmac_key_ip_max: Option<u64>,
+    #[serde(default)]
+    pub client_config_ip_max: Option<u64>,
+    #[serde(default)]
+    pub search_ip_max: Option<u64>,
+    #[serde(default)]
+    pub friend_request_ip_max: Option<u64>,
+    #[serde(default)]
+    pub friend_request_user_max: Option<u64>,
+    #[serde(default)]
+    pub register_user_max: Option<u64>,
+    #[serde(default)]
+    pub join_server_user_max: Option<u64>,
+    #[serde(default)]
+    pub voice_media_max: Option<u64>,
+    /// Largest accepted ciphertext for one icon slot, in bytes.
+    #[serde(default)]
+    pub icon_slot_max_bytes: Option<u64>,
+    /// Largest accepted size for one file-upload chunk, in bytes.
+    #[serde(default)]
+    pub upload_chunk_max_bytes: Option<u64>,
+    // Finding 7 — rate-limit windows in seconds (a limit is not tunable while
+    // its window is not). 0 is rejected: a zero-second window denies everything.
+    #[serde(default)]
+    pub mutation_window_secs: Option<u64>,
+    #[serde(default)]
+    pub login_window_secs: Option<u64>,
+    #[serde(default)]
+    pub kill_switch_window_secs: Option<u64>,
+    #[serde(default)]
+    pub reauth_window_secs: Option<u64>,
+    #[serde(default)]
+    pub auth_params_window_secs: Option<u64>,
+    #[serde(default)]
+    pub register_ip_window_secs: Option<u64>,
+    #[serde(default)]
+    pub join_server_window_secs: Option<u64>,
+    #[serde(default)]
+    pub friend_request_window_secs: Option<u64>,
+    #[serde(default)]
+    pub hmac_key_window_secs: Option<u64>,
+    #[serde(default)]
+    pub client_config_window_secs: Option<u64>,
+    #[serde(default)]
+    pub search_window_secs: Option<u64>,
+    #[serde(default)]
+    pub ws_auth_window_secs: Option<u64>,
+    #[serde(default)]
+    pub voice_media_window_secs: Option<u64>,
+    #[serde(default)]
+    pub create_server_window_secs: Option<u64>,
+    #[serde(default)]
+    pub admin_login_window_secs: Option<u64>,
+    #[serde(default)]
+    pub login_fail_notify_window_secs: Option<u64>,
     /// F5 — when true, admin audit entries store a redacted placeholder
     /// instead of the raw client IP (privacy toggle, live-applied).
     #[serde(default)]
@@ -5862,6 +6160,54 @@ pub async fn admin_set_runtime_config(
         && req.mutation_ip_max.is_none()
         && req.file_storage_quota_bytes.is_none()
         && req.max_file_size_mb.is_none()
+        && req.ws_max_message_bytes.is_none()
+        && req.ws_max_frame_bytes.is_none()
+        && req.ws_socket_budget_bytes.is_none()
+        && req.ws_socket_budget_window_secs.is_none()
+        && req.ws_auth_max.is_none()
+        && req.body_limit_default_bytes.is_none()
+        && req.body_limit_import_bytes.is_none()
+        && req.body_limit_vault_bytes.is_none()
+        && req.request_timeout_secs.is_none()
+        && req.login_ip_max.is_none()
+        && req.login_user_max.is_none()
+        && req.login_user_fail_max.is_none()
+        && req.register_ip_max.is_none()
+        && req.kill_switch_ip_max.is_none()
+        && req.kill_switch_user_max.is_none()
+        && req.login_2fa_ip_max.is_none()
+        && req.login_fail_notify_max.is_none()
+        && req.auth_params_ip_max.is_none()
+        && req.reauth_ip_max.is_none()
+        && req.reauth_user_max.is_none()
+        && req.create_server_max.is_none()
+        && req.admin_login_ip_max.is_none()
+        && req.hmac_key_ip_max.is_none()
+        && req.client_config_ip_max.is_none()
+        && req.search_ip_max.is_none()
+        && req.friend_request_ip_max.is_none()
+        && req.friend_request_user_max.is_none()
+        && req.register_user_max.is_none()
+        && req.join_server_user_max.is_none()
+        && req.voice_media_max.is_none()
+        && req.icon_slot_max_bytes.is_none()
+        && req.upload_chunk_max_bytes.is_none()
+        && req.mutation_window_secs.is_none()
+        && req.login_window_secs.is_none()
+        && req.kill_switch_window_secs.is_none()
+        && req.reauth_window_secs.is_none()
+        && req.auth_params_window_secs.is_none()
+        && req.register_ip_window_secs.is_none()
+        && req.join_server_window_secs.is_none()
+        && req.friend_request_window_secs.is_none()
+        && req.hmac_key_window_secs.is_none()
+        && req.client_config_window_secs.is_none()
+        && req.search_window_secs.is_none()
+        && req.ws_auth_window_secs.is_none()
+        && req.voice_media_window_secs.is_none()
+        && req.create_server_window_secs.is_none()
+        && req.admin_login_window_secs.is_none()
+        && req.login_fail_notify_window_secs.is_none()
         && req.admin_audit_redact_ips.is_none()
     {
         return (
@@ -5871,90 +6217,154 @@ pub async fn admin_set_runtime_config(
             .into_response();
     }
 
-    if let Some(v) = req.mutation_user_max {
-        if u32::try_from(v).is_err() {
+    let mut summary = Vec::new();
+    macro_rules! bad {
+        ($msg:expr) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "mutation_user_max must fit in u32 (0 = unlimited)"})),
+                Json(serde_json::json!({"error": $msg})),
             )
-                .into_response();
-        }
+                .into_response()
+        };
     }
-    if let Some(v) = req.mutation_ip_max {
-        if u32::try_from(v).is_err() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "mutation_ip_max must fit in u32 (0 = unlimited)"})),
-            )
-                .into_response();
-        }
+    // Count limits are u32 (0 = disabled); sizes/timeouts are u64 (0 = unlimited).
+    macro_rules! set_u32 {
+        ($field:ident) => {
+            if let Some(v) = req.$field {
+                if u32::try_from(v).is_err() {
+                    bad!(concat!(
+                        stringify!($field),
+                        " must fit in u32 (0 = unlimited)"
+                    ));
+                }
+                {
+                    let mut tuning = state.runtime_tuning.write().unwrap();
+                    tuning.$field = v as u32;
+                    tuning.sources.insert(stringify!($field), "db");
+                }
+                let _ = state.db.set_config_value(stringify!($field), &v.to_string());
+                summary.push(format!("{}={}", stringify!($field), v));
+            }
+        };
     }
-    if let Some(v) = req.file_storage_quota_bytes {
-        if v < 0 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "file_storage_quota_bytes must be >= 0 (0 = unlimited)"})),
-            )
-                .into_response();
-        }
+    macro_rules! set_u64 {
+        ($field:ident) => {
+            if let Some(v) = req.$field {
+                {
+                    let mut tuning = state.runtime_tuning.write().unwrap();
+                    tuning.$field = v;
+                    tuning.sources.insert(stringify!($field), "db");
+                }
+                let _ = state.db.set_config_value(stringify!($field), &v.to_string());
+                summary.push(format!("{}={}", stringify!($field), v));
+            }
+        };
     }
-    if let Some(v) = req.max_file_size_mb {
-        if v < 0 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "max_file_size_mb must be >= 0 (0 = unlimited)"})),
-            )
-                .into_response();
-        }
+    // Windows must be >= 1s: a zero-length window would make its limiter deny
+    // every request (the bucket can never expire).
+    macro_rules! set_win {
+        ($field:ident) => {
+            if let Some(v) = req.$field {
+                if v == 0 {
+                    bad!(concat!(
+                        stringify!($field),
+                        " must be at least 1 second"
+                    ));
+                }
+                {
+                    let mut tuning = state.runtime_tuning.write().unwrap();
+                    tuning.$field = v;
+                    tuning.sources.insert(stringify!($field), "db");
+                }
+                let _ = state.db.set_config_value(stringify!($field), &v.to_string());
+                summary.push(format!("{}={}", stringify!($field), v));
+            }
+        };
+    }
+    macro_rules! set_i64 {
+        ($field:ident) => {
+            if let Some(v) = req.$field {
+                if v < 0 {
+                    bad!(concat!(
+                        stringify!($field),
+                        " must be >= 0 (0 = unlimited)"
+                    ));
+                }
+                {
+                    let mut tuning = state.runtime_tuning.write().unwrap();
+                    tuning.$field = v;
+                    tuning.sources.insert(stringify!($field), "db");
+                }
+                let _ = state.db.set_config_value(stringify!($field), &v.to_string());
+                summary.push(format!("{}={}", stringify!($field), v));
+            }
+        };
     }
 
-    let mut summary = Vec::new();
-    {
-        let mut tuning = state.runtime_tuning.write().unwrap();
-        if let Some(v) = req.mutation_user_max {
-            tuning.mutation_user_max = v as u32;
-            tuning.sources[0] = "db";
-            let _ = state.db.set_config_value("mutation_user_max", &v.to_string());
-            summary.push(format!("mutation_user_max={}", v));
-        }
-        if let Some(v) = req.mutation_ip_max {
-            tuning.mutation_ip_max = v as u32;
-            tuning.sources[1] = "db";
-            let _ = state.db.set_config_value("mutation_ip_max", &v.to_string());
-            summary.push(format!("mutation_ip_max={}", v));
-        }
-        if let Some(v) = req.file_storage_quota_bytes {
-            tuning.file_storage_quota_bytes = v;
-            tuning.sources[2] = "db";
-            let _ = state.db.set_config_value("file_storage_quota_bytes", &v.to_string());
-            summary.push(format!("file_storage_quota_bytes={}", v));
-        }
-        if let Some(v) = req.max_file_size_mb {
-            tuning.max_file_size_mb = v;
-            tuning.sources[3] = "db";
-            let _ = state.db.set_config_value("max_file_size_mb", &v.to_string());
-            summary.push(format!("max_file_size_mb={}", v));
-        }
-        // F5 — IP redaction toggle (live-applied; read on every audit write).
-        if let Some(v) = req.admin_audit_redact_ips {
-            let _ = state.db.set_config_value("admin_audit_redact_ips", if v { "1" } else { "0" });
-            summary.push(format!("admin_audit_redact_ips={}", v));
-        }
+    set_u32!(mutation_user_max);
+    set_u32!(mutation_ip_max);
+    set_i64!(file_storage_quota_bytes);
+    set_i64!(max_file_size_mb);
+    set_u64!(ws_max_message_bytes);
+    set_u64!(ws_max_frame_bytes);
+    set_u64!(ws_socket_budget_bytes);
+    set_u64!(ws_socket_budget_window_secs);
+    set_u32!(ws_auth_max);
+    set_u64!(body_limit_default_bytes);
+    set_u64!(body_limit_import_bytes);
+    set_u64!(body_limit_vault_bytes);
+    set_u64!(request_timeout_secs);
+    set_u32!(login_ip_max);
+    set_u32!(login_user_max);
+    set_u32!(login_user_fail_max);
+    set_u32!(register_ip_max);
+    set_u32!(kill_switch_ip_max);
+    set_u32!(kill_switch_user_max);
+    set_u32!(login_2fa_ip_max);
+    set_u32!(login_fail_notify_max);
+    set_u32!(auth_params_ip_max);
+    set_u32!(reauth_ip_max);
+    set_u32!(reauth_user_max);
+    set_u32!(create_server_max);
+    set_u32!(admin_login_ip_max);
+    set_u32!(hmac_key_ip_max);
+    set_u32!(client_config_ip_max);
+    set_u32!(search_ip_max);
+    set_u32!(friend_request_ip_max);
+    set_u32!(friend_request_user_max);
+    set_u32!(register_user_max);
+    set_u32!(join_server_user_max);
+    set_u32!(voice_media_max);
+    set_u64!(icon_slot_max_bytes);
+    set_u64!(upload_chunk_max_bytes);
+    set_win!(mutation_window_secs);
+    set_win!(login_window_secs);
+    set_win!(kill_switch_window_secs);
+    set_win!(reauth_window_secs);
+    set_win!(auth_params_window_secs);
+    set_win!(register_ip_window_secs);
+    set_win!(join_server_window_secs);
+    set_win!(friend_request_window_secs);
+    set_win!(hmac_key_window_secs);
+    set_win!(client_config_window_secs);
+    set_win!(search_window_secs);
+    set_win!(ws_auth_window_secs);
+    set_win!(voice_media_window_secs);
+    set_win!(create_server_window_secs);
+    set_win!(admin_login_window_secs);
+    set_win!(login_fail_notify_window_secs);
+    // F5 — IP redaction toggle (live-applied; read on every audit write).
+    if let Some(v) = req.admin_audit_redact_ips {
+        let _ = state.db.set_config_value("admin_audit_redact_ips", if v { "1" } else { "0" });
+        summary.push(format!("admin_audit_redact_ips={}", v));
     }
     log_admin_action(&state, "admin_set_runtime_config", Some(&summary.join(", ")), &headers);
 
+    let redact = admin_audit_redact_ips(&state);
     let tuning = state.runtime_tuning.read().unwrap();
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "ok": true,
-            "mutation_user_max": tuning.mutation_user_max,
-            "mutation_ip_max": tuning.mutation_ip_max,
-            "file_storage_quota_bytes": tuning.file_storage_quota_bytes,
-            "max_file_size_mb": tuning.max_file_size_mb,
-        })),
-    )
-        .into_response()
+    let mut resp = runtime_tuning_json(&tuning, redact);
+    resp["ok"] = serde_json::json!(true);
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 /// Live mutation-limit usage for the admin panel: top per-user + per-IP buckets
@@ -5968,10 +6378,13 @@ pub async fn admin_get_rate_limit_usage(
         return e.into_response();
     }
 
-    let window = Duration::from_secs(10);
-    let (user_limit, ip_limit) = {
+    let (user_limit, ip_limit, window) = {
         let tuning = state.runtime_tuning.read().unwrap();
-        (tuning.mutation_user_max, tuning.mutation_ip_max)
+        (
+            tuning.mutation_user_max,
+            tuning.mutation_ip_max,
+            Duration::from_secs(tuning.mutation_window_secs),
+        )
     };
 
     let mut users: Vec<(String, u32, u64)> = MUTATION_USER_RATE_LIMITER
@@ -6033,7 +6446,7 @@ pub async fn admin_get_rate_limit_usage(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "window_seconds": 10,
+            "window_seconds": window.as_secs(),
             "users": user_rows,
             "ips": ip_rows,
             "recent_429s": hits,
@@ -7009,9 +7422,10 @@ pub async fn upload_file_chunk(
     }
 
     // H1: a single chunk must stay small (the client splits plaintext into
-    // 64 KB chunks, so an encrypted chunk is ≤ 65624 bytes; 1 MiB is a generous
-    // bound that still stops one oversized write).
-    if body.len() > 1024 * 1024 {
+    // 64 KB chunks, so an encrypted chunk is ≤ 65624 bytes; the default bound
+    // is 1 MiB — admin-tunable, since a future client may use bigger chunks).
+    let chunk_max = state.runtime_tuning.read().unwrap().upload_chunk_max_bytes as usize;
+    if chunk_max > 0 && body.len() > chunk_max {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": "Chunk too large"})),
@@ -8009,7 +8423,7 @@ pub async fn delete_me(
     };
     // Deleting is permanent — require the password so a stolen session can't
     // nuke the account (same rule as 2FA, password change, and kill switch).
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+    let valid = match verify_user_credential(&stored_hash, &req.current_password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -8083,7 +8497,7 @@ pub async fn set_kill_switch(
         }
     };
     // Re-verify the password so a stolen session can't arm/change the kill switch.
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+    let valid = match verify_user_credential(&stored_hash, &req.current_password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -8163,7 +8577,7 @@ pub async fn clear_kill_switch(
                 .into_response();
         }
     };
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, &req.current_password) {
+    let valid = match verify_user_credential(&stored_hash, &req.current_password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -8195,16 +8609,24 @@ pub async fn get_hmac_key(
     // HMAC_KEY_IP_MAX=0 to disable, or a number to raise it.
     let ip = get_client_ip(&headers);
     let rate_key = format!("hmac_key:{}", ip);
-    let ip_max: u32 = std::env::var("HMAC_KEY_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
-    if ip_max > 0 && !HMAC_KEY_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
+    let (ip_max, hk_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.hmac_key_ip_max, tuning.hmac_key_window_secs)
+    };
+    if ip_max > 0 && !HMAC_KEY_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(hk_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Try again later."})),
         )
             .into_response();
     }
+    // The MASTER key never leaves the server — friend/invite code hashes are
+    // computed with it, and publishing it let anyone compute code hashes
+    // offline. Clients receive a purpose-limited key derived from it, which is
+    // all the pseudonyms (sender/reaction/user ids, blocked-friend-requests)
+    // they actually need. The field name is unchanged for compatibility.
     (StatusCode::OK, Json(serde_json::json!({
-        "hmac_key": state.config.hmac_key,
+        "hmac_key": state.config.client_key,
     }))).into_response()
 }
 
@@ -8217,8 +8639,11 @@ pub async fn client_config(
 ) -> impl IntoResponse {
     let ip = get_client_ip(&headers);
     let rate_key = format!("client_config_ip:{}", ip);
-    let ip_max: u32 = std::env::var("CLIENT_CONFIG_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
-    if ip_max > 0 && !CLIENT_CONFIG_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
+    let (ip_max, cc_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.client_config_ip_max, tuning.client_config_window_secs)
+    };
+    if ip_max > 0 && !CLIENT_CONFIG_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(cc_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Try again later."})),
@@ -8227,9 +8652,13 @@ pub async fn client_config(
     }
     let tuning = state.runtime_tuning.read().unwrap();
     let max_mb = tuning.max_file_size_mb;
+    let icon_slot_max_bytes = tuning.icon_slot_max_bytes;
     (StatusCode::OK, Json(serde_json::json!({
         "max_file_size_mb": max_mb,
         "max_file_size_bytes": max_mb * 1024 * 1024,
+        // The page caps its icon packs at the same number the server accepts,
+        // so a raised limit in the admin panel does not need a client release.
+        "icon_slot_max_bytes": icon_slot_max_bytes,
     }))).into_response()
 }
 
@@ -8248,7 +8677,7 @@ fn channel_search_json(
         "channel_id": m.channel_id,
         "server_id": server_id,
         "dm_channel_id": null,
-        "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+        "sender_id": state.client_hmac_hex(&m.sender_id),
         "sender_user_id": m.sender_id,
         "sender_id_hash": m.sender_id_hash,
         "encrypted_sender_username": m.encrypted_sender_username,
@@ -8276,7 +8705,7 @@ fn reactions_json(state: &Arc<AppState>, rows: Option<&Vec<crate::db::ReactionRo
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "reactor_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.reactor_id),
+                    "reactor_id": state.client_hmac_hex(&r.reactor_id),
                     "reactor_user_id": r.reactor_id,
                     "emoji_token": r.emoji_token,
                     "encrypted_emoji": r.encrypted_emoji,
@@ -8299,7 +8728,7 @@ fn poll_votes_json(state: &Arc<AppState>, rows: Option<&Vec<crate::db::PollVoteR
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "voter_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.voter_id),
+                    "voter_id": state.client_hmac_hex(&r.voter_id),
                     "voter_user_id": r.voter_id,
                     "option_token": r.option_token,
                     "created_at": r.created_at,
@@ -8322,7 +8751,7 @@ fn acks_json(state: &Arc<AppState>, rows: Option<&Vec<crate::db::AckRow>>, reque
             .filter(|r| r.acker_id == requester_id || sender_id == requester_id)
             .map(|r| {
                 serde_json::json!({
-                    "acker_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.acker_id),
+                    "acker_id": state.client_hmac_hex(&r.acker_id),
                     "acker_user_id": r.acker_id,
                     "status": r.status,
                     "created_at": r.created_at,
@@ -8350,8 +8779,11 @@ pub async fn search_messages_handler(
     };
     let ip = get_client_ip(&headers);
     let rate_key = format!("search_ip:{}", ip);
-    let ip_max: u32 = std::env::var("SEARCH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
-    if ip_max > 0 && !SEARCH_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
+    let (ip_max, search_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.search_ip_max, tuning.search_window_secs)
+    };
+    if ip_max > 0 && !SEARCH_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(search_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Try again later."})),
@@ -8417,7 +8849,7 @@ pub async fn search_messages_handler(
                     "dm_channel_id": m.dm_channel_id,
                     "channel_id": null,
                     "server_id": null,
-                    "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                    "sender_id": state.client_hmac_hex(&m.sender_id),
                     "sender_user_id": m.sender_id,
                     "sender_id_hash": m.sender_id_hash,
                     "encrypted_sender_username": m.encrypted_sender_username,
@@ -8453,7 +8885,7 @@ pub async fn search_messages_handler(
             "dm_channel_id": m.dm_channel_id,
             "channel_id": null,
             "server_id": null,
-            "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+            "sender_id": state.client_hmac_hex(&m.sender_id),
             "sender_user_id": m.sender_id,
             "sender_id_hash": m.sender_id_hash,
             "encrypted_sender_username": m.encrypted_sender_username,
@@ -8504,8 +8936,11 @@ pub async fn index_search_tokens(
     };
     let ip = get_client_ip(&headers);
     let rate_key = format!("search_index_ip:{}", ip);
-    let ip_max: u32 = std::env::var("SEARCH_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
-    if ip_max > 0 && !SEARCH_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(60)) {
+    let (ip_max, search_window): (u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (tuning.search_ip_max, tuning.search_window_secs)
+    };
+    if ip_max > 0 && !SEARCH_IP_RATE_LIMITER.check_and_increment(&rate_key, ip_max, Duration::from_secs(search_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many requests. Try again later."})),
@@ -8585,6 +9020,7 @@ pub async fn store_encrypted_friend_code(
     use rand::Rng;
     let hash_salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
     let code_upper = req.friend_code.trim().to_uppercase();
+    // Friend-code hashing stays on the master key (never published).
     let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", hash_salt, code_upper));
 
     match state.db.update_encrypted_friend_code(&user_id, &hash, &hash_salt, &req.encrypted_friend_code, &req.salt, &req.nonce) {
@@ -8614,6 +9050,7 @@ pub async fn server_regenerate_friend_code(
         .collect();
 
     let salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+    // Friend-code hashing stays on the master key (never published).
     let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", salt, code));
     match state.db.update_friend_code_hash(&user_id, &hash, &salt) {
         Ok(()) => {
@@ -8645,7 +9082,7 @@ pub async fn regen_friend_code_with_password(
         Err(_) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "User not found"}))).into_response(),
     };
 
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_password_hash, &req.password) {
+    let valid = match verify_user_credential(&stored_password_hash, &req.password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };
@@ -8661,6 +9098,7 @@ pub async fn regen_friend_code_with_password(
 
     use rand::Rng;
     let hash_salt: String = rand::thread_rng().gen::<[u8; 16]>().iter().map(|b| format!("{:02x}", b)).collect();
+    // Friend-code hashing stays on the master key (never published).
     let hash = crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}{}", hash_salt, code));
 
     match state.db.update_encrypted_friend_code(&user_id, &hash, &hash_salt, &req.encrypted_friend_code, &req.salt, &req.nonce) {
@@ -8741,8 +9179,11 @@ pub async fn get_friend_requests_disabled(
     // Fetch the hash and derive the boolean from it
     match state.db.get_friend_requests_disabled_hash(&user_id) {
         Ok(Some(h)) if !h.is_empty() => {
-            let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", user_id));
-            let disabled = h == disabled_variant;
+            // The published client key is what current clients hash with; rows
+            // written before the key split used the master key, so accept both.
+            let disabled_variant = state.client_hmac_hex(&format!("{}:fr_disabled:1", user_id));
+            let legacy_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", user_id));
+            let disabled = h == disabled_variant || h == legacy_variant;
             (StatusCode::OK, Json(serde_json::json!({"friend_requests_disabled": disabled}))).into_response()
         }
         _ => {
@@ -8765,9 +9206,12 @@ pub async fn set_friend_requests_disabled(
         Err(e) => return e.into_response(),
     };
 
-    // Derive the boolean from the hash by computing both HMAC variants
-    let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", user_id));
-    let is_disabled = req.disabled_hash == disabled_variant;
+    // Derive the boolean from the hash by computing both HMAC variants (the
+    // published client key for current clients, the master key for values
+    // written before the split).
+    let disabled_variant = state.client_hmac_hex(&format!("{}:fr_disabled:1", user_id));
+    let legacy_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", user_id));
+    let is_disabled = req.disabled_hash == disabled_variant || req.disabled_hash == legacy_variant;
 
     match state.db.set_friend_requests_disabled(&user_id, &req.disabled_hash, is_disabled) {
         Ok(()) => (
@@ -8802,10 +9246,17 @@ pub async fn send_friend_request(
     // Env-overridable so automated test suites (which hit localhost from one
     // IP for dozens of users) can raise/disable the budget: set
     // FRIEND_REQUEST_IP_MAX=0 to disable, or a number to raise it.
-    let ip_max: u32 = std::env::var("FRIEND_REQUEST_IP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    let (ip_max, user_max, fr_window): (u32, u32, u64) = {
+        let tuning = state.runtime_tuning.read().unwrap();
+        (
+            tuning.friend_request_ip_max,
+            tuning.friend_request_user_max,
+            tuning.friend_request_window_secs,
+        )
+    };
     let ip = get_client_ip(&headers);
     let ip_rate_key = format!("friend_request_ip:{}", ip);
-    if ip_max > 0 && !FRIEND_REQUEST_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(600)) {
+    if ip_max > 0 && !FRIEND_REQUEST_IP_RATE_LIMITER.check_and_increment(&ip_rate_key, ip_max, Duration::from_secs(fr_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many friend request attempts. Try again in 10 minutes."})),
@@ -8814,9 +9265,8 @@ pub async fn send_friend_request(
     }
 
     // Per-user rate limiting (already existed). Env-overridable for tests.
-    let user_max: u32 = std::env::var("FRIEND_REQUEST_USER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     let rate_key = format!("friend_request:{}", user_id);
-    if user_max > 0 && !FRIEND_REQUEST_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(600)) {
+    if user_max > 0 && !FRIEND_REQUEST_RATE_LIMITER.check_and_increment(&rate_key, user_max, Duration::from_secs(fr_window)) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many friend request attempts. Try again in 10 minutes."})),
@@ -8837,8 +9287,9 @@ pub async fn send_friend_request(
     };
     let recipient_disabled = match state.db.get_friend_requests_disabled_hash(&target_user.id) {
         Ok(Some(h)) if !h.is_empty() => {
-            let disabled_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", target_user.id));
-            h == disabled_variant
+            let disabled_variant = state.client_hmac_hex(&format!("{}:fr_disabled:1", target_user.id));
+            let legacy_variant = hmac_sha256_hex(state.config.hmac_key.as_bytes(), &format!("{}:fr_disabled:1", target_user.id));
+            h == disabled_variant || h == legacy_variant
         }
         _ => false,
     };
@@ -8848,7 +9299,7 @@ pub async fn send_friend_request(
             // Notify the recipient in real time (best-effort). No username included — client resolves from user_id.
             let notify = serde_json::json!({
                 "type": "friend_request_received",
-                "from_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+                "from_user_id": state.client_hmac_hex(&user_id),
             });
             let _ = state
                 .ws_manager
@@ -8856,13 +9307,13 @@ pub async fn send_friend_request(
                 .await;
             // Save for offline recipient
             if !state.ws_manager.is_user_connected(&target.id).await {
-                let _ = state.db.save_pending_notification(&target.id, "friend_request_received", &notify.to_string(), state.config.hmac_key.as_bytes());
+                let _ = state.db.save_pending_notification(&target.id, "friend_request_received", &notify.to_string(), state.config.client_key.as_bytes());
             }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "ok": true,
-                    "to": { "id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &target.id), "username": target.username },
+                    "to": { "id": state.client_hmac_hex(&target.id), "username": target.username },
                 })),
             )
                 .into_response()
@@ -8898,8 +9349,8 @@ pub async fn accept_friend_request(
             // Notify both users that they are now friends.
             let notify = serde_json::json!({
                 "type": "friend_request_accepted",
-                "by_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
-                "from_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &from_id),
+                "by_user_id": state.client_hmac_hex(&user_id),
+                "from_user_id": state.client_hmac_hex(&from_id),
             });
             let _ = state
                 .ws_manager
@@ -8907,7 +9358,7 @@ pub async fn accept_friend_request(
                 .await;
             // Save for offline users
             if !state.ws_manager.is_user_connected(&from_id).await {
-                let _ = state.db.save_pending_notification(&from_id, "friend_request_accepted", &notify.to_string(), state.config.hmac_key.as_bytes());
+                let _ = state.db.save_pending_notification(&from_id, "friend_request_accepted", &notify.to_string(), state.config.client_key.as_bytes());
             }
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
@@ -8949,7 +9400,7 @@ pub async fn list_incoming_friend_requests(
                 .map(|r| {
                     serde_json::json!({
                         "id": r.id,
-                        "from_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.from_user_id),
+                        "from_user_id": state.client_hmac_hex(&r.from_user_id),
                         "from_username": r.from_username,
                         "status": r.status,
                         "created_at": r.created_at,
@@ -8981,7 +9432,7 @@ pub async fn list_outgoing_friend_requests(
                 .map(|r| {
                     serde_json::json!({
                         "id": r.id,
-                        "to_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &r.to_user_id),
+                        "to_user_id": state.client_hmac_hex(&r.to_user_id),
                         "status": r.status,
                         "created_at": r.created_at,
                     })
@@ -9009,7 +9460,7 @@ pub async fn list_friends(
         Ok(friends) => {
             let result: Vec<serde_json::Value> = friends
                 .iter()
-                .map(|f| serde_json::json!({ "id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &f.user_id), "username": f.username }))
+                .map(|f| serde_json::json!({ "id": state.client_hmac_hex(&f.user_id), "username": f.username }))
                 .collect();
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()
         }
@@ -9053,7 +9504,7 @@ pub async fn remove_friend(
             // Include both the caller and the other user for multi-tab consistency
             let notify = serde_json::json!({
                 "type": "friend_removed",
-                "by_user_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &user_id),
+                "by_user_id": state.client_hmac_hex(&user_id),
                 "raw_by_user_id": user_id,
             });
             let _ = state
@@ -9237,7 +9688,7 @@ pub async fn list_dm_messages(
                     serde_json::json!({
                         "id": m.id,
                         "dm_channel_id": m.dm_channel_id,
-                        "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                        "sender_id": state.client_hmac_hex(&m.sender_id),
                         "sender_user_id": m.sender_id,
                         "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                         "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
@@ -9296,7 +9747,7 @@ pub async fn list_dm_pins(
             serde_json::json!({
                 "id": m.id,
                 "dm_channel_id": m.dm_channel_id,
-                "sender_id": crate::db::hmac_sha256_hex(state.config.hmac_key.as_bytes(), &m.sender_id),
+                "sender_id": state.client_hmac_hex(&m.sender_id),
                 "sender_user_id": m.sender_id,
                 "encrypted_content": base64::engine::general_purpose::STANDARD.encode(&m.encrypted_content),
                 "nonce": base64::engine::general_purpose::STANDARD.encode(&m.nonce),
@@ -9493,7 +9944,11 @@ pub async fn save_css_slot(
 /// picture (~2 MB of original image) and the client measures the *same* number
 /// in the *same* units (the ciphertext length), so the two cannot disagree
 /// again.
-const MAX_ICON_SLOT_B64: usize = 4 * 1024 * 1024;
+/// The DEFAULT cap only: the effective value is RuntimeTuning::icon_slot_max_bytes
+/// (admin panel → Runtime Limits, env ICON_SLOT_MAX_BYTES). Used as the default
+/// here and the value is served to clients through /api/client-config, so the
+/// page and the server always measure the same number.
+pub const MAX_ICON_SLOT_B64: usize = 4 * 1024 * 1024;
 
 /// GET /api/user-icons/slots — both slots + the active choice for the caller.
 pub async fn get_icon_slots(
@@ -9531,7 +9986,9 @@ pub async fn save_icon_slot(
     }
     let encrypted_icons = body["encrypted_icons"].as_str().unwrap_or("");
     let nonce = body["nonce"].as_str().unwrap_or("");
-    if encrypted_icons.len() > MAX_ICON_SLOT_B64 {
+    let max_icon_bytes =
+        state.runtime_tuning.read().unwrap().icon_slot_max_bytes as usize;
+    if encrypted_icons.len() > max_icon_bytes {
         // Say what the limit is: the page shows this verbatim, and "too large"
         // alone leaves the user guessing which picture to shrink.
         return (
@@ -9540,7 +9997,7 @@ pub async fn save_icon_slot(
                 "error": format!(
                     "icon pack too large ({} KiB; the limit is {} KiB)",
                     encrypted_icons.len() / 1024,
-                    MAX_ICON_SLOT_B64 / 1024
+                    max_icon_bytes / 1024
                 )
             })),
         )
@@ -9989,7 +10446,7 @@ pub async fn set_self_destruct(
         Ok(h) => h,
         Err(_) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "User not found"}))).into_response(),
     };
-    let valid = match verify_user_password_and_upgrade(&state, &user_id, &stored_hash, current_password) {
+    let valid = match verify_user_credential(&stored_hash, current_password) {
         Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     };

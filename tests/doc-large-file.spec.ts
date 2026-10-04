@@ -91,17 +91,23 @@ test.describe('Large documents stay bounded', () => {
             return {
                 loaded: true,
                 hasOverlay: !!overlay,
-                // SheetJS builds a node per cell inside the sheet's !ref; without
-                // a cap the old code handed it all 700 rows to expand.
-                tableRows: content ? content.querySelectorAll('table tr').length : 0,
+                // The table itself now lives in the sandboxed frame; the page
+                // only gets the truncation note (and the test reads the frame below).
                 text: (content?.textContent || '').slice(0, 300),
             };
         });
 
         expect(result.loaded).toBe(true);
         expect(result.hasOverlay).toBe(true);
-        expect(result.tableRows).toBeGreaterThanOrEqual(500);
-        expect(result.tableRows).toBeLessThanOrEqual(502);
+
+        // The windowed table is inside the sandboxed frame; count its rows
+        // there (the app page cannot — which is the point).
+        const frame = page.frameLocator('iframe.xlsx-sandbox');
+        await expect(frame.locator('table')).toBeVisible();
+        const tableRows = await frame.locator('table tr').count();
+        expect(tableRows).toBeGreaterThanOrEqual(500);
+        expect(tableRows).toBeLessThanOrEqual(502);
+
         expect(result.text).toContain('showing the first 500 rows');
 
         await page.evaluate(() => (window as any).DocPreview.close());

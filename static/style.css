@@ -12271,6 +12271,17 @@ body.e2e-pip-active .e2e-pip-wrap * {
     width: 100%;
     box-sizing: border-box;
 }
+
+/* The sandboxed document frames (docx-sandbox, xlsx-sandbox): the renderer
+   sizes their height from the frame's own postMessage report; the width
+   is the column. */
+.docx-sandbox,
+.xlsx-sandbox {
+    display: block;
+    width: 100%;
+    border: 0;
+}
+
 /* A file this app genuinely cannot render (a Word 97-2003 .doc): the card
    names the format and the way out. Sized for a phone first, centred on a
    desktop. */
@@ -12338,3 +12349,634 @@ body.e2e-pip-active .e2e-pip-wrap * {
         font-size: 12.5px;
     }
 }
+
+/* ─── Markdown rendering (untrusted message / file-preview content) ─────
+   renderMarkdown() used to emit these rules as inline styles on every node,
+   which made them impossible to restyle from a custom-CSS upload. They are
+   classes now, so anything here can be overridden from Settings → CSS. */
+.md-quote {
+    border-left: 3px solid #569cd6;
+    padding: 8px 12px;
+    color: #aaa;
+    margin: 8px 0;
+    background: rgba(86, 156, 214, 0.06);
+    border-radius: 0 4px 4px 0;
+}
+.md-task {
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.md-li-num {
+    color: #888;
+    margin-right: 6px;
+    min-width: 20px;
+    display: inline-block;
+}
+.md-li-bullet {
+    color: #569cd6;
+    margin-right: 6px;
+}
+.md-li {
+    /* --md-indent is a unitless depth level (0..12), emitted inline because it
+       is computed per line; the declaration itself lives here so custom CSS
+       can override it. */
+    padding-left: calc(4px + var(--md-indent, 0) * 20px);
+    margin: 3px 0;
+    line-height: 1.6;
+}
+.md-table-wrap {
+    overflow-x: auto;
+    margin: 8px 0;
+}
+.md-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+}
+.md-table th {
+    padding: 6px 12px;
+    border-bottom: 2px solid #3d3d3d;
+    font-weight: 600;
+    background: #252526;
+    color: #d4d4d4;
+}
+.md-table td {
+    padding: 6px 12px;
+    border-bottom: 1px solid #2d2d2d;
+    background: #252526;
+    color: #d4d4d4;
+}
+.md-table tr:nth-child(even) td {
+    background: #1e1e1e;
+}
+.md-align-center {
+    text-align: center;
+}
+.md-align-right {
+    text-align: right;
+}
+.md-strong {
+    color: #e0e0e0;
+}
+.md-em {
+    color: #d0d0d0;
+}
+.md-del {
+    color: #888;
+}
+.md-mark {
+    background: #5a4a18;
+    color: #e0e0e0;
+    padding: 1px 4px;
+    border-radius: 2px;
+}
+.md-inline-code {
+    background: #2d2d2d;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: monospace;
+    color: #e06c75;
+    font-size: 12px;
+}
+.md-link {
+    color: #569cd6;
+    text-decoration: none;
+    border-bottom: 1px solid #569cd666;
+}
+.md-image {
+    max-width: 100%;
+    border-radius: 4px;
+    margin: 4px 0;
+}
+.md-sub {
+    font-size: 0.8em;
+}
+.md-sup {
+    font-size: 0.8em;
+}
+.md-code-wrap {
+    position: relative;
+    margin: 8px 0;
+}
+.md-pre {
+    background: #1e1e1e;
+    border: 1px solid #3d3d3d;
+    border-radius: 6px;
+    padding: 12px;
+    margin: 0;
+    overflow-x: auto;
+    font-family: monospace;
+    font-size: 13px;
+    color: #d4d4d4;
+    line-height: 1.5;
+}
+.md-h {
+    color: #e0e0e0;
+}
+.md-h1 { margin: 16px 0 8px; font-size: 22px; font-weight: 700; }
+.md-h2 { margin: 14px 0 6px; font-size: 19px; font-weight: 600; }
+.md-h3 { margin: 12px 0 6px; font-size: 16px; font-weight: 600; }
+.md-h4 { margin: 10px 0 4px; font-size: 15px; font-weight: 500; }
+.md-h5 { margin: 8px 0 4px;  font-size: 14px; font-weight: 500; }
+.md-h6 { margin: 6px 0 4px;  font-size: 13px; font-weight: 500; }
+.md-hr {
+    border: none;
+    border-top: 1px solid #3d3d3d;
+    margin: 12px 0;
+}
+.md-p {
+    margin: 4px 0;
+    line-height: 1.6;
+}
+
+/* ─── Extracted inline styles ──────────────────────────────────────────
+   Every rule here replaced a static inline `style="…"` so a custom-CSS
+   upload can override it. Do not delete the block wholesale: the class is
+   still referenced by the element it was extracted from. */
+.u-132d318f { max-width:170px }
+.u-01b24d95 { resize:none;overflow-y:auto;min-height:36px;max-height:120px;padding:8px 12px; }
+.u-91a87015 { text-align:center }
+.u-ab236403 { margin-bottom:8px;color:var(--accent) }
+.u-50be9154 { margin-bottom:24px;color:var(--text-muted);font-size:13px }
+.u-5647cb98 { justify-content:center;margin-top:16px }
+.u-e9d4059c { width:100%;padding:10px 14px;margin-bottom:16px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px; }
+.u-5793304a { border-color:var(--danger);color:var(--danger) }
+.u-79a1c5a5 { margin-bottom:16px; }
+.u-573f7ce0 { color:var(--text-muted);font-size:13px;margin-right:12px; }
+.u-613a61a1 { color:var(--text-muted);font-size:13px; }
+.u-ea1e2a1d { max-width:620px;max-height:85vh;overflow-y:auto }
+.u-7a23ddbd { margin-bottom:12px;color:var(--accent);font-size:15px; }
+.u-ddd36873 { margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--bg-border) }
+.u-5f3f7844 { font-size:12px;padding:5px 12px; }
+.u-2cf3baea { margin-top:4px;font-size:11px;color:var(--text-muted) }
+.u-e5280047 { z-index:2; }
+.u-9cd6ee18 { font-size:11px;color:var(--text-muted);margin:6px 0; }
+.u-e71ae94b { font-size:12px; }
+.u-da05748b { height:6px;border-radius:3px;background:var(--bg-secondary);overflow:hidden; }
+.u-3036d02f { width:0%;height:100%;background:var(--accent);transition:width 0.2s; }
+.u-62714d3f { font-size:11px;color:var(--text-muted);margin-top:4px; }
+.u-360b2702 { font-size:14px;color:var(--text-primary) }
+.u-0c452e01 { margin-top:6px;font-size:12px;color:var(--text-muted) }
+.u-c8311500 { margin-bottom:8px;color:var(--text-primary);font-size:13px; }
+.u-abf06627 { margin-top:16px;padding-top:12px;border-top:1px solid var(--bg-border) }
+.u-5bbed932 { margin:0;color:var(--text-primary);font-size:13px }
+.u-8494ee64 { font-size:11px;color:var(--text-muted);margin-bottom:8px }
+.u-fdf33f23 { margin-bottom:8px }
+.u-f5554e45 { margin:8px 0 }
+.u-9d3f8575 { font-size:13px;color:var(--text-primary) }
+.u-96607bd3 { font-size:12px;color:var(--text-primary);font-weight:600 }
+.u-11a50812 { font-size:11px }
+.u-4ea9d16b { margin-bottom:12px;color:var(--accent) }
+.u-be81e415 { text-transform:uppercase;letter-spacing:2px; }
+.u-87ae40b4 { max-width:300px;text-align:center }
+.u-a805525b { color:var(--accent) }
+.u-47763ac0 { font-size:48px;line-height:1;margin:12px 0 4px }
+.u-c2d190c7 { width:48px;height:48px;object-fit:contain }
+.u-87c136df { margin-bottom:16px }
+.u-0fd8744d { max-width:420px }
+.u-30baa243 { max-height:300px;overflow-y:auto }
+.u-b1279a83 { width:100%;height:100%;object-fit:cover; }
+.u-3b6a3a65 { cursor:pointer }
+.u-b1ecc496 { margin-top:8px; }
+.u-cec36483 { color:var(--accent);border-color:var(--accent); }
+.u-9b59a183 { padding-bottom:12px;border-bottom:1px solid var(--bg-border) }
+.u-8a77e5a3 { margin-top:8px }
+.u-d6f2af6e { margin-top:14px }
+.u-fe7b4979 { margin-top:6px }
+.u-ea646701 { padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px }
+.u-834911af { min-height:16px;margin:6px 0 0 }
+.u-9e04028d { margin:0;flex:1;min-width:200px }
+.u-55585d51 { max-width:260px }
+.u-eed0f8fb { font-weight:600 }
+.u-5872de20 { color:var(--text-muted) }
+.u-4ba40a15 { margin-left:12px;padding:3px 12px;font-size:12px;background:#d32f2f;color:#fff;border:none;border-radius:4px;cursor:pointer; }
+.u-dd2196f8 { margin-left:6px;padding:3px 12px;font-size:12px;background:transparent;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer; }
+.u-cb5a88fc { margin-top:4px;font-size:13px; }
+.u-63312162 { font-weight:600;margin-bottom:4px; }
+.u-b17b0beb { font-size:11px;color:var(--text-muted);margin-top:3px; }
+.u-d59a4f23 { font-size:12px;color:var(--text-secondary); }
+.u-cad980f4 { width:100%; }
+.u-9b4e79d3 { font-size:11px;color:var(--text-muted); }
+.u-2fd7789b { margin-top:6px; }
+.u-d2c171b1 { margin-top:10px }
+.u-58b17f4a { font-size:13px;color:var(--text-muted) }
+.u-5583a67e { margin-top:16px;border-top:1px solid var(--bg-border);padding-top:16px }
+.u-f30e7a7c { color:var(--text-muted);font-weight:400;font-size:12px }
+.u-96ad6099 { margin-top:4px }
+.u-457f2b7f { margin-top:8px;font-size:12px;color:var(--text-muted) }
+.u-865c33f0 { font-size:12px;color:var(--text-muted) }
+.u-d8a81eac { margin-top:10px; }
+.u-8a359a76 { margin-top:16px; }
+.u-4588f135 { margin-top:10px;font-size:12px;color:var(--text-muted) }
+.u-301af42c { flex:1;margin-bottom:0; }
+.u-810fdb7a { white-space:nowrap;font-size:13px;padding:8px 16px;margin:0; }
+.u-e4ad4a16 { margin-bottom:8px; }
+.u-7623f055 { flex:1; }
+.u-e78c7fe9 { font-size:13px;padding:8px 16px; }
+.u-8a0e5147 { margin-top:8px;font-size:13px; }
+.u-0b87e9e0 { font-weight:600; }
+.u-b129f2fc { color:var(--text-muted,#888);font-size:13px; }
+.u-f836a58a { max-width:160px; }
+.u-ef407bde { font-size:12px;padding:6px 14px; }
+.u-a7affba7 { font-size:12px;padding:6px 14px;background:var(--text-muted,#888);color:#fff; }
+.u-d4e3d555 { margin-top:10px;background:var(--danger,#ed4245);color:#fff; }
+.u-83f4c875 { margin-top:8px;font-weight:600; }
+.u-e6558dda { margin-top:6px;font-size:13px; }
+.u-033fc1e4 { color:var(--danger,#ed4245);margin-bottom:8px; }
+.u-9e3fe2f0 { background:var(--danger,#ed4245);color:#fff; }
+.u-6170d94c { margin-left:8px; }
+.u-90a6f8ec { color:var(--text-primary);margin:0 0 12px }
+.u-a3ede179 { color:var(--text-muted);font-size:12px;margin:0 0 12px }
+.u-3a670404 { margin-top:8px;padding:7px 9px;border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color) }
+.u-6b3699a1 { font-size:12px;color:var(--text-secondary);margin-top:6px }
+.u-a828909e { max-width:200px }
+.u-2d30a691 { font-size:12px;color:var(--text-secondary) }
+.u-651945a0 { min-width:120px }
+.u-ead6fb9c { font-size:13px;color:var(--text-secondary) }
+.u-1c6bb4b3 { font-size:12px;color:var(--text-secondary);min-width:60px }
+.u-1c671c8f { flex:1;height:16px;background:var(--bg-primary);border-radius:8px;overflow:hidden;position:relative }
+.u-f8749616 { width:0%;height:100%;background:linear-gradient(90deg,#2ecc71,#f1c40f,#e74c3c);border-radius:8px;transition:width 60ms ease-out }
+.u-7491483f { font-size:11px;color:var(--text-muted) }
+.u-1612a38c { margin-top:4px;color:var(--warning,#f0b232); }
+.u-a3a55686 { margin-top:4px; }
+.u-ca7add7d { margin-top:16px;font-size:12px;color:var(--text-secondary);font-weight:600 }
+.u-71197a95 { color:var(--text-muted,#888);font-weight:400 }
+.u-56f43562 { margin-top:12px }
+.u-566ccd38 { border-color:var(--danger,#ed4245) }
+.u-8cf01a7f { margin-top:8px;font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.55;color:var(--text-primary);max-height:300px;overflow:auto;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-word }
+.u-765d57b5 { max-width:560px }
+.u-da12f285 { margin-bottom:12px }
+.u-bf992ad0 { font-size:12px;color:var(--text-muted);margin-bottom:4px }
+.u-40acbb68 { height:4px;background:var(--bg-secondary,#1a1a2e);border-radius:2px;overflow:hidden }
+.u-7fbcae15 { height:100%;background:var(--accent,#4fc3f7);width:0%;transition:width .3s }
+.u-7d01ca10 { width:100%;padding:6px 10px;margin-bottom:8px;border:1px solid var(--border,#333);border-radius:6px;background:var(--bg-secondary,#1a1a2e);color:var(--text,#e0e0e0);font-size:13px;box-sizing:border-box; }
+.u-4294bfa9 { max-width:500px }
+.u-a7f6873a { max-height:300px;overflow-y:auto;margin-bottom:12px }
+.u-620baece { max-width:480px;position:relative;overflow:visible }
+.u-ff77844c { transform:scaleX(-1) }
+.u-aed3b51d { gap:8px;flex-wrap:wrap;justify-content:space-between }
+.u-6c4e7058 { border-color:var(--accent);color:var(--accent) }
+.u-6cb285c6 { font-size:12px }
+.u-9897f0f0 { margin:0;color:#d4d4d4 }
+.u-924b313a { background:none;border:none;color:#aaa;font-size:20px;cursor:pointer }
+.u-ce728f3d { color:#888;text-align:center;padding:40px 20px;font-size:14px; }
+.u-57130090 { border-top:1px solid var(--bg-border);padding-top:12px;margin-top:12px }
+.u-46842656 { max-width:420px;max-height:60vh;overflow-y:auto }
+.u-470791b6 { width:100%;padding:8px 12px;margin-bottom:10px;border-radius:6px;border:1px solid var(--bg-border);background:var(--bg-primary);color:var(--text-primary);font-size:13px;outline:none;box-sizing:border-box; }
+.u-408f3cb6 { margin:6px 12px }
+.u-6208d826 { max-height:400px;overflow-y:auto }
+.u-74ba5df8 { text-align:center;padding:30px 20px; }
+.u-551bfef5 { cursor:pointer;border:2px dashed #3a3a5a;border-radius:12px;padding:40px 20px;transition:all .2s; }
+.u-ad1a718b { font-size:48px;margin-bottom:12px; }
+.u-268bb036 { color:#888;font-size:14px; }
+.u-5bedabb4 { color:#666;font-size:12px;margin-top:6px; }
+.u-3f01e7c1 { max-width:100%;max-height:50vh; }
+.u-a9564239 { color:#888;font-size:12px;margin-top:6px; }
+.u-92a5c6f2 { width:100%;padding:10px 14px;margin:12px 0;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:14px;box-sizing:border-box; }
+.u-eb6d4d55 { max-width:430px }
+.u-211cf5b2 { margin-bottom:16px;color:var(--text-muted);font-size:13px }
+.u-ef0b7a11 { margin-bottom:0 }
+.u-4725bb71 { gap:8px;flex-wrap:wrap }
+.u-55210628 { max-width:440px }
+.u-4d62056b { width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;box-sizing:border-box; }
+.u-ebb3297b { width:15px;height:15px;accent-color:var(--accent,#5865f2) }
+.u-fed4b277 { background:#ff9800;border-color:#ff9800 }
+.u-4ad99861 { font-size:12px;padding:6px 12px; }
+.u-4c462afd { font-size:12px;color:var(--text-muted); }
+.u-ba300451 { max-width:440px;text-align:center; }
+.u-291b7bbb { margin-top:0; }
+.u-d982937d { margin-bottom:4px; }
+.u-9ae3da0d { font-size:30px;line-height:1.5;letter-spacing:6px;margin:12px 0 4px; }
+.u-d396ce21 { font-size:20px;font-family:monospace;letter-spacing:4px;margin-bottom:10px; }
+.u-45e779d5 { font-size:11px;word-break:break-all; }
+.u-b65222cf { background:transparent;border:1px solid var(--border-color);color:var(--text-primary); }
+.u-3f299f35 { margin-bottom:16px;color:var(--accent); }
+.u-c5a6b4a7 { font-size:11px;color:#888;margin-top:4px; }
+.u-d78c7700 { resize:vertical; }
+.u-9a56ce23 { width:32px;height:32px;border-radius:6px;background:#16213e; }
+.u-4278edcf { width:32px;height:32px;border-radius:6px;background:#4fc3f7; }
+.u-f5b8f840 { width:32px;height:32px;border-radius:6px;background:#ffffff; }
+.u-5a5bc850 { font-size:11px;min-width:32px;text-align:right;color:var(--text-secondary) }
+.u-9c8f05b6 { padding:4px 6px;border-radius:6px;font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color) }
+.u-6a3a862a { width:13px;height:13px;accent-color:var(--danger,#f44) }
+.u-0c1aea14 { width:14px;height:14px;accent-color:var(--accent,#5865f2) }
+.u-04391f08 { max-width:520px }
+.u-35cc8073 { color:var(--text-muted);font-size:13px;margin-bottom:10px; }
+.u-af3fee87 { margin-bottom:10px; }
+.u-e8dec544 { text-align:center;margin-bottom:10px; }
+.u-3dd41e45 { font-family:monospace;word-break:break-all;font-size:12px;color:var(--text-muted);margin-bottom:10px; }
+.u-dd782726 { color:var(--text-muted);font-size:13px;margin-bottom:6px; }
+.u-5b173057 { width:100%;box-sizing:border-box;margin-bottom:10px; }
+.u-88b9d5c6 { margin-top:14px; }
+.u-bff1e648 { margin-bottom:8px;color:var(--danger) }
+.u-8ca0e139 { background:#ed4245;border-color:#ed4245; }
+.u-9d47d8e8 { margin-bottom:8px;flex-shrink:0; }
+.u-3754b0fc { margin:0;color:var(--text-primary);font-size:15px;font-weight:700 }
+.u-ab5fb27a { font-size:12px;padding:4px 10px }
+.u-ca143b13 { font-size:12px;padding:4px 10px;background:var(--accent);border-color:var(--accent) }
+.u-089cc371 { background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:2px 6px }
+.u-761d3add { margin-bottom:10px }
+.u-7b479dff { color:var(--text-muted);font-size:12px;min-width:36px }
+.u-97445a8d { flex:1 }
+.u-efae0e90 { flex:1;overflow-y:auto;max-height:55vh }
+.u-a77eb23d { color:var(--text-muted);font-size:11px;margin:8px 0 0 }
+.u-21011b65 { margin-bottom:4px;color:var(--text-primary);font-size:16px;font-weight:700 }
+.u-8bd9c67e { color:var(--text-muted);font-size:12px;margin-bottom:14px;line-height:1.5 }
+.u-65a2e0eb { width:100%;box-sizing:border-box;resize:vertical;min-height:64px;margin-bottom:12px }
+.u-0b472152 { flex:1;margin-bottom:0 }
+.u-9e00ace2 { max-height:150px;overflow-y:auto;margin-bottom:12px }
+.u-87656543 { background:var(--accent);border-color:var(--accent) }
+.u-8b490eb6 { color:#888 }
+.u-ec17010e { position:relative;margin-top:10px }
+.u-a8059227 { width:100%;padding-right:38px }
+.u-9202fe4c { width:100%;margin-top:10px }
+.u-41e80424 { color:var(--text-muted);padding:12px }
+.u-3dc3cf7f { font-weight:normal;color:var(--text-muted) }
+.u-715547d7 { margin-left:8px;padding:4px 12px;border-radius:6px;border:1px solid #faa61a;background:transparent;color:#faa61a;cursor:pointer;font-size:12px; }
+.u-619874db { font-size:36px;color:#1a1a2e;font-weight:700; }
+.u-97eb3485 { position:relative;width:100%;max-width:500px;margin:auto;text-align:center; }
+.u-01073ed5 { position:absolute;top:10px;right:14px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;z-index:10;line-height:1; }
+.u-e7e9cf5d { width:100%;max-height:60vh;border-radius:12px;object-fit:contain;background:#000; }
+.u-da4463b9 { color:#aaa;font-size:12px; }
+.u-ab633f52 { background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s; }
+.u-01674bb9 { background:transparent;border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#aaa;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s; }
+.u-13e3cfbc { color:#888;font-size:11px; }
+.u-0ee30450 { background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;transition:all 0.15s;font-weight:600; }
+.u-b97ec8b4 { flex:1;max-width:140px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer; }
+.u-09ecd9e1 { color:#aaa;font-size:11px;min-width:28px;text-align:center; }
+.u-348991e0 { width:46px;height:46px;border-radius:50%;background:#fff;border:2px solid #333; }
+.u-ebae5d0c { color:#FFD700;font-size:14px; }
+.u-87f04ca6 { width:120px;height:4px;-webkit-appearance:none;appearance:none;background:#555;border-radius:2px;outline:none;cursor:pointer; }
+.u-f6f10f84 { color:#FFD700;font-size:12px;min-width:32px;text-align:center; }
+.u-13a8174d { width:100%;max-height:70vh;border-radius:12px;object-fit:contain;background:#000; }
+.u-a511b8ad { width:100%;max-height:55vh;border-radius:12px;object-fit:contain;background:#000; }
+.u-3e3c3fbd { color:#fff;font-size:16px;font-weight:600;min-width:60px;font-variant-numeric:tabular-nums; }
+.u-b4d0bdf6 { width:28px;height:28px;border-radius:50%;background:#fff; }
+.u-0dea4edb { color:#aaa;font-size:12px;margin-top:6px; }
+.u-0679e94b { width:0;height:0;border-left:20px solid #fff;border-top:14px solid transparent;border-bottom:14px solid transparent;margin-left:4px; }
+.u-7055bac0 { width:26px;height:26px;border-radius:4px;background:#f44336; }
+.u-aff4273c { color:#666;cursor:default }
+.u-720fd595 { color:#f44336;cursor:default }
+.u-9ba877cd { color:#4fc3f7;text-decoration:underline }
+.u-3cbcede7 { color:#f44336 }
+.u-1d3db62b { margin-left:8px;background:none;border:none;color:#aaa;cursor:pointer }
+.u-a81f5077 { background:#569cd6;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer }
+.u-1433b212 { background:#666;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer }
+.u-886a61a0 { color:#ff9800; }
+.u-01a658d0 { font-size:11px;color:#888;margin-top:4px;text-align:center; }
+.u-0c1eff4e { color:#666;padding:12px;font-size:13px }
+.u-e3f045f8 { color:#888;font-style:italic }
+.u-2f88915b { color:#666;padding:10px }
+.u-3186868e { color:#f44336;padding:10px }
+.u-a93c3eb9 { color:#666;padding:16px;text-align:center }
+.u-92235734 { color:#e06c75 }
+.u-f72d3dfa { color:#e0e0e0;font-size:15px;font-weight:600 }
+.u-0fd6d726 { color:#888;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100% }
+.u-4dc2ab2b { flex:1;overflow:hidden;padding:0;min-height:0 }
+.u-83fbfbba { width:100%;height:100%;min-height:160px;background:#0d1117;color:#c9d1d9;border:none;padding:16px;font-family:Consolas,Monaco,monospace;font-size:14px;resize:none;outline:none;tab-size:4 }
+.u-4eba1e04 { padding:6px 14px;border:1px solid #555;background:#2a2a3e;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:13px }
+.u-3b5a9e24 { color:#888;font-size:12px;margin-left:8px }
+.u-ea740c70 { padding:8px 18px;border:none;background:#f44336;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px }
+.u-911b78f9 { padding:8px 18px;border:none;background:#4caf50;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px }
+.u-0e71be35 { color:#888;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60% }
+.u-234d094d { flex:1;min-height:0;overflow:auto;background:#0d1117 }
+.u-557c1505 { color:#888;font-size:12px }
+.u-81351bd1 { font-size:24px }
+.u-aad8e636 { color:var(--text-muted);font-size:13px }
+.u-59eddc67 { flex:1;min-width:0 }
+.u-28256b04 { font-size:13px;color:var(--text-primary,#eee);overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
+.u-f61207b2 { font-size:11px;color:var(--text-muted,#999) }
+.u-50f2bef5 { font-size:18px;opacity:0.6 }
+.u-7cbd797d { font-size:64px;margin-bottom:16px }
+.u-b4088674 { font-size:16px;margin-bottom:20px;word-break:break-all;opacity:0.9 }
+.u-a6f880c2 { color:#fff;text-align:center;padding:40px }
+.u-cbf99aca { grid-column:1/-1;text-align:center;color:#888;padding:20px;font-size:13px; }
+.u-9c7335bf { text-align:center;color:#888;padding:20px;font-size:13px; }
+.u-696ae0ee { color:#888;font-size:13px;margin-bottom:12px; }
+.u-79fb88bd { background:var(--accent);color:var(--bg-primary);border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer; }
+.u-2b9c48bc { background:#2a6a3a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer; }
+.u-5f6fbce5 { background:#6a3a8a;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer; }
+.u-a4bd636e { color:#666;font-size:11px;margin-top:10px; }
+.u-30016dd2 { color:#666;font-size:11px;margin-top:4px; }
+.u-1f0f0af8 { background:rgba(255,255,255,0.1);color:#aaa;border:1px solid #444;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;transition:all 0.15s; }
+.u-645f25b7 { color:#888;padding:12px; }
+.u-cd87cd9e { color:#666;padding:12px;font-size:13px; }
+.u-dfc3cbc1 { font-size:12px;color:var(--text-muted);margin-left:6px; }
+.u-9e4aa9b0 { color:#666;padding:12px; }
+.u-38fd0e12 { font-size:22px;font-weight:700; }
+.u-d301eafb { color:#888;font-size:13px;padding:8px 0; }
+.u-b1c7aec9 { padding:8px 12px;flex:1;min-width:0 }
+.u-6168431f { font-size:11px;color:var(--text-muted,#888);text-transform:uppercase;margin-bottom:2px }
+.u-0b6a313a { font-size:13px;font-weight:600;color:var(--text-primary,#e0e0e0);margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
+.u-adb28073 { font-size:11px;color:var(--accent,#4fc3f7);margin-top:4px }
+
+/* F3 — registration password strength meter + breach warning (login.html).
+   The server only ever sees the derived verifier, so strength policy can only
+   live client-side. */
+.pw-meter { display:flex; align-items:center; gap:8px; margin:-6px 0 10px; }
+.pw-meter-track { flex:1; height:6px; border-radius:3px; background:rgba(255,255,255,0.12); overflow:hidden; }
+.pw-meter-bar { height:100%; width:0%; background:#f04747; border-radius:3px; transition:width .15s ease, background .15s ease; }
+.pw-meter-label { font-size:12px; color:var(--text-muted,#888); min-width:64px; text-align:right; }
+
+/* Connection tab (plain-browser web app): the active server address line. */
+.connection-address { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:13px; color:var(--text-primary,#e0e0e0); margin:6px 0 12px; }
+
+/* ─── Extracted inline styles ──────────────────────────────────────────
+   Every rule here replaced a static inline `style="…"` so a custom-CSS
+   upload can override it. Do not delete the block wholesale: the class is
+   still referenced by the element it was extracted from. */
+.u-c85c76d2 { letter-spacing:2px;font-family:monospace }
+.u-d8f079a4 { font-size:12px;padding:8px 14px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer }
+.u-badf9fd9 { font-size:12px;padding:8px 14px;background:#5865F2;color:#fff;border:none;border-radius:4px;cursor:pointer }
+.u-eccc91b3 { font-size:12px;padding:8px 14px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer }
+.u-c5763cfa { font-size:12px;padding:8px 14px;background:#e65100;color:#fff;border:none;border-radius:4px;cursor:pointer }
+.u-d1294bfe { font-size:13px;padding:8px 16px;background:#7b1fa2;border-color:#9c27b0 }
+.u-00970ff4 { font-size:12px;padding:8px 14px;background:#555;color:#aaa;border:1px solid #777;border-radius:4px;cursor:pointer }
+.u-ba62946b { font-size:14px; }
+.u-0fd8744d { max-width:420px }
+.u-4ea9d16b { margin-bottom:12px;color:var(--accent) }
+.u-211cf5b2 { margin-bottom:16px;color:var(--text-muted);font-size:13px }
+.u-da12f285 { margin-bottom:12px }
+.u-7623f055 { flex:1; }
+.u-87c136df { margin-bottom:16px }
+.u-ebb3297b { width:15px;height:15px;accent-color:var(--accent,#5865f2) }
+.u-9879f0c5 { background:#1565c0;border-color:#1565c0; }
+.u-765d57b5 { max-width:560px }
+.u-106d0cb6 { margin-bottom:4px;color:var(--accent) }
+.u-6008941a { width:100%;box-sizing:border-box; }
+.u-627512f7 { font-size:11px;color:var(--text-muted);margin-top:4px }
+.u-414aebc9 { margin-top:18px;padding-top:14px;border-top:1px solid var(--border,#2a2a3a); }
+.u-bb4084e9 { margin:0;color:var(--accent);font-size:14px; }
+.u-9b4e79d3 { font-size:11px;color:var(--text-muted); }
+.u-70df1374 { font-size:11px;padding:4px 10px;background:#1a1a2e;color:#aaa;border:1px solid #333;border-radius:4px;cursor:pointer; }
+.u-c6f6c282 { font-size:12px;color:var(--text-muted);margin-bottom:4px; }
+.u-5d05b83f { font-size:12px;color:var(--text-muted);min-height:22px; }
+.u-1aeb502f { font-size:12px;color:var(--text-muted);min-height:22px;max-height:120px;overflow-y:auto; }
+.u-3fe4c82e { color:var(--text-muted);margin-top:14px;font-size:13px;min-height:18px }
+.u-cdc8d5dd { background:#5865F2;border-color:#5865F2; }
+.u-dc530f9a { background:#2e7d32;border-color:#2e7d32; }
+.u-d2a26356 { max-width:480px }
+.u-ceb0f3c5 { margin-bottom:12px;color:var(--danger,#f44336) }
+.u-1ffed557 { margin-bottom:14px;color:var(--text-muted);font-size:13px }
+.u-3c6f5e4b { color:var(--text-primary) }
+.u-e2b01b0d { max-width:640px }
+.u-96e55dc5 { margin-bottom:12px;color:var(--text-muted);font-size:13px }
+.u-aa8117e0 { max-height:45vh;border:1px solid #1a1a2e;border-radius:6px; }
+.u-a9037838 { margin-top:14px;color:var(--text-muted);font-size:12px }
+.u-09a5de31 { max-width:820px }
+.u-c4694f65 { max-height:50vh;border:1px solid #1a1a2e;border-radius:6px; }
+.u-d84af8fb { max-width:460px }
+.u-e0fa6031 { color:var(--danger,#f44336) }
+.u-746cd973 { color:var(--danger,#f44336);font-family:monospace }
+.u-68c4858c { width:100%;box-sizing:border-box;margin-bottom:12px }
+.u-d0c80f65 { background:var(--danger,#f44336);border-color:var(--danger,#f44336);opacity:.5 }
+.u-c1943e3e { background:var(--bg-secondary,#1a1a2e);border:1px solid var(--border-color,#333);border-radius:12px;padding:24px;max-width:440px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.5) }
+.u-7ca71798 { margin:0 0 16px;color:var(--text-primary,#e0e0e0);font-size:16px }
+.u-fccc28e4 { color:var(--text-muted,#888);font-size:13px;margin:0 0 12px }
+.u-8096e1e0 { text-align:center;margin-bottom:12px }
+.u-255cc640 { color:var(--text-muted,#888);font-size:12px;margin-bottom:6px }
+.u-be90b065 { margin-top:8px;padding:4px 10px;border:1px solid #333;border-radius:4px;background:transparent;color:#888;cursor:pointer;font-size:11px }
+.u-ee18efc5 { flex:1;padding:10px 12px;border:1px solid #333;border-radius:6px;background:#12122b;color:#e0e0e0;font-size:13px;font-family:monospace;letter-spacing:2px }
+.u-15690157 { padding:8px 16px;border:1px solid #333;border-radius:6px;background:transparent;color:#888;cursor:pointer;font-size:13px }
+.u-04c3b6d1 { padding:8px 16px;border:none;border-radius:6px;background:linear-gradient(135deg,#4caf50,#388e3c);color:#fff;font-weight:600;font-size:13px;cursor:pointer }
+.u-835cd4c7 { color:#fff;font-size:14px;font-family:var(--font,inherit);max-width:420px;text-align:center }
+.u-481b67c4 { color:#43b581;font-weight:600; }
+.u-6a8c41db { color:#666; }
+.u-b794d9f8 { margin-top:16px;padding-top:12px;border-top:1px solid var(--border,#2a2a3a); }
+.u-d6be19aa { font-size:12px;font-weight:600;color:var(--accent);margin-bottom:10px; }
+.u-8c82a048 { color:var(--text-muted);opacity:.6 }
+.u-804e7a6f { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px; }
+.u-b3052253 { color:#8a8fa3;white-space:nowrap; }
+.u-ac34f065 { color:#777 }
+.u-66b6af1c { color:#ed4245 }
+.u-d9fe14b1 { color:#999 }
+.u-5872de20 { color:var(--text-muted) }
+.u-102178bd { background:none;border:none;color:var(--accent,#5865F2);cursor:pointer;margin-top:10px;font-size:13px; }
+.u-e0353df0 { margin: 16px 0; text-align: center; }
+.u-50a9f4d8 { color: var(--text-secondary); font-size: 13px; margin-bottom: 8px; }
+.u-79e9ae17 { padding: 8px 12px; border: 1px solid var(--border-color, #444); border-radius: 6px; background: var(--input-bg, #222); color: var(--text-primary, #fff); width: 80%; max-width: 280px; margin-bottom: 8px; }
+.u-8f4657f5 { padding: 10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;margin-top:8px }
+.u-2b23e100 { color: #2ecc71; font-size: 18px; }
+.u-fb154ad0 { color: var(--text-secondary); font-size: 13px; }
+.u-ba86eb68 { color:#e74c3c }
+.u-7158c113 { padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;margin-top:12px }
+.u-446bcd0c { color:var(--text-primary,#eee);font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 }
+.u-91a87015 { text-align:center }
+.u-b20d1a70 { margin-top:12px;font-size:13px }
+.u-111ad630 { padding:40px;text-align:center;color:var(--text-muted) }
+.u-10f9db81 { font-size:13px;color:var(--text-muted);margin-bottom:8px }
+.u-e82f2f74 { padding:20px;color:var(--text-muted) }
+.u-8fc28a4c { font-size:14px;font-weight:600;color:var(--text-primary,#eee) }
+.u-b79f588d { font-size:12px;color:var(--text-muted,#999) }
+.u-31ba5c2c { padding:24px;text-align:center;color:var(--text-muted) }
+.u-1ac56ab7 { font-size:12px;color:var(--text-muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 }
+.u-208876a1 { font-size:12px;margin-top:8px;color:var(--text-faint) }
+.u-9abbc23a { color:#eee;font-weight:600;font-size:14px }
+.u-6ee0661e { flex-shrink:0 }
+.u-743b288b { color:#f66 }
+.u-c6ba9b9a { text-align:center;padding:20px;color:var(--text-muted);font-size:13px }
+.u-da88ae84 { color:var(--danger,#ed4245);font-size:13px }
+.u-f3a25817 { color:#888;font-size:10px }
+.u-29a11d37 { height:24px }
+.u-73aad2d4 { font-size:10px;color:#888;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
+.u-fb1466ce { font-size:9px;color:#4fc3f7 }
+.u-6fd0e868 { font-size:9px;color:#555 }
+.u-87bb6d45 { color:var(--text-muted);font-size:12px;padding:6px 0 }
+.u-9881221c { background:var(--accent);color:#fff }
+.u-36d30510 { background:var(--accent) }
+.u-eed0f8fb { font-weight:600 }
+.u-86ebd977 { background:var(--accent);color:#fff;border-color:var(--accent) }
+.u-e775556b { visibility:hidden }
+.u-d90da29c { background:#99aab5 }
+.u-d19057a7 { color:var(--text-muted);padding:8px }
+.u-16efc4cc { color:var(--text-muted);font-size:11px;font-weight:600;text-transform:uppercase;margin-bottom:4px;letter-spacing:0.5px }
+.u-74b9eb88 { animation:sbPulse 1.2s ease-in-out infinite }
+.u-5db4a70b { color:#666 }
+.u-aff4273c { color:#666;cursor:default }
+.u-203546eb { color:#e0e0e0;margin:16px 0 8px }
+.u-95638582 { color:#888;font-size:12px;margin-bottom:12px }
+.u-3936d22c { text-align:center;padding:24px;color:var(--text-muted) }
+.u-fc09feb0 { margin-top:8px;font-size:13px }
+.u-87d82625 { color:var(--text-primary);margin:0 0 8px;font-size:14px }
+.u-a3ede179 { color:var(--text-muted);font-size:12px;margin:0 0 12px }
+.u-c8d3b8b1 { padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#4fc3f7,#29b6f6);color:#fff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(79,195,247,0.3) }
+.u-c30d98a7 { padding:10px 20px;border-radius:8px;border:2px solid #4fc3f7;background:transparent;color:#4fc3f7;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s }
+.u-90863b19 { padding:10px 20px;border-radius:8px;border:2px solid #666;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s }
+.u-6d5fff1f { padding:10px 20px;border-radius:8px;border:2px solid #888;background:rgba(255,255,255,0.05);color:#ccc;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s }
+.u-94cf6807 { padding:10px 20px;border-radius:8px;border:2px solid #f44336;background:rgba(244,67,54,0.1);color:#f44336;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s }
+.u-5778f204 { padding:10px 20px;border-radius:8px;border:2px solid #e0e0e0;background:rgba(224,224,224,0.1);color:#e0e0e0;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s }
+.u-5607bbc6 { padding:10px 20px;border-radius:8px;border:2px solid #7c4dff;background:rgba(124,77,255,0.1);color:#b388ff;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s }
+.u-96ad6099 { margin-top:4px }
+.u-6ae894ad { color:#f0b232 }
+.u-154255d2 { padding-left:12px }
+.u-dbaf6fc2 { color:#57f287 }
+.u-abfdf04f { color:#f23f42 }
+.u-7aad4784 { padding-left:12px;margin-top:3px;color:#f0b232 }
+.u-2eded3b0 { padding-left:12px;color:#f0b232 }
+.u-28814632 { padding-left:12px;color:var(--text-muted) }
+.u-4e420aff { margin-bottom:6px }
+.u-c9ec6e7b { color:var(--text-muted);margin-top:6px }
+.u-0df13a66 { font-size:14px;font-weight:700;margin-bottom:6px }
+.u-4633c681 { color:#949ba4;margin-bottom:12px }
+.u-28ee9863 { min-height:16px;margin-bottom:10px;font-size:12px;color:#949ba4 }
+
+/* ── Admin panel (moved out of admin.html so custom CSS can override it) ── */
+.admin-card { max-width: 1200px; }
+.admin-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.admin-header h1 { margin: 0; }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; border-bottom: 2px solid #333; padding-bottom: 0; }
+.tab-btn { background: #1a1a2e; border: none; color: #999; padding: 10px 18px; cursor: pointer; border-radius: 6px 6px 0 0; font-size: 14px; transition: all 0.2s; border: 2px solid transparent; border-bottom: none; }
+.tab-btn:hover { color: #fff; background: #252540; }
+.tab-btn.active { color: #fff; background: #16213e; border-color: #555; border-bottom-color: #16213e; margin-bottom: -2px; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th { background: #16213e; color: #ccc; padding: 10px 12px; text-align: left; font-weight: 600; position: sticky; top: 0; }
+.data-table td { padding: 8px 12px; border-bottom: 1px solid #1a1a2e; vertical-align: top; }
+.data-table tr:hover td { background: #1a1a2e; }
+.data-table .id-cell { font-family: monospace; font-size: 11px; color: #888; max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+.data-table .blob-cell { font-family: monospace; font-size: 10px; color: #666; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.data-table .blob-cell:hover { color: #aaa; white-space: normal; word-break: break-all; }
+.data-table .ts-cell { font-size: 11px; color: #999; white-space: nowrap; }
+.table-scroll { max-height: 70vh; overflow-y: auto; border: 1px solid #1a1a2e; border-radius: 6px; }
+.table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.table-header h3 { margin: 0; color: #ccc; font-size: 16px; }
+.record-count { color: #888; font-size: 13px; }
+.btn-delete-sm { background: #c62828; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.btn-delete-sm:hover { background: #e53935; }
+.cascade-info { background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; font-size: 13px; }
+.cascade-info strong { color: #e53935; }
+.cascade-info .stat { color: #ff9800; margin-right: 16px; }
+.empty-state { text-align: center; color: #666; padding: 40px; }
+.search-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+.search-bar input { flex: 1; padding: 8px 12px; border: 1px solid #333; border-radius: 4px; background: #0f0f23; color: #e0e0e0; font-size: 13px; }
+.search-bar input::placeholder { color: #666; }
+.search-bar .record-count { display: flex; align-items: center; color: #888; font-size: 13px; white-space: nowrap; }
+.pagination-container { display: flex; justify-content: center; padding: 10px 0; }
+.pagination-bar { display: flex; align-items: center; gap: 4px; }
+.pag-btn { background: #1a1a2e; border: 1px solid #333; color: #aaa; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; transition: all 0.15s; }
+.pag-btn:hover:not(:disabled) { background: #252540; color: #fff; border-color: #555; }
+.pag-btn:disabled { opacity: 0.35; cursor: default; }
+.pag-info { color: #888; font-size: 12px; padding: 0 8px; white-space: nowrap; }
+.pag-info:hover { color: #aaa; }
+.csv-export-btn { background: #1b5e20; color: #a5d6a7; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap; transition: all 0.15s; }
+.csv-export-btn:hover { background: #2e7d32; color: #fff; }
+.pag-size-label { color: #888; font-size: 12px; margin-right: 2px; }
+.pag-size-select { background: #1a1a2e; color: #aaa; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; font-size: 12px; cursor: pointer; outline: none; }
+.pag-size-select:hover { border-color: #555; color: #fff; }
+.pag-size-select:focus { border-color: #4fc3f7; }
+.rt-source { display:inline-block; font-size:11px; color:#8a8fa3; background:#1a1a2e; border:1px solid #333; border-radius:4px; padding:1px 6px; margin-left:4px; }
+
+/* Busy overlay spinner (export/import/validate take a while on a big DB). */
+.admin-spinner {
+    width: 46px; height: 46px;
+    border: 4px solid rgba(255,255,255,.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: admin-spin 0.9s linear infinite;
+}
+@keyframes admin-spin { to { transform: rotate(360deg); } }
+
+/* Spinner used while a custom-CSS slot is being fetched (moved out of
+   thread_categories_shortcuts.js so it lives with the rest of the app CSS). */
+@keyframes css-spin { to { transform: rotate(360deg); } }

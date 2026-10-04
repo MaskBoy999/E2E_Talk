@@ -75,6 +75,17 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
         MUTATION_USER_MAX: '100000',
         MUTATION_IP_MAX: '100000',
         FILE_STORAGE_QUOTA_BYTES: '100000000000',
+        // This suite logs into the admin panel once per test (each helper call
+        // can be two POSTs) from one IP, which blows through the default
+        // per-IP admin-login budget halfway down the file. 0 disables it, the
+        // same way playwright.config.ts does for the main server.
+        ADMIN_LOGIN_IP_MAX: '0',
+        // Several tests register a fresh account from the same IP.
+        REGISTER_IP_MAX: '100000',
+        // The quota/size tests call /api/client-config and /api/me repeatedly.
+        CLIENT_CONFIG_IP_MAX: '100000',
+        REAUTH_IP_MAX: '0',
+        REAUTH_USER_MAX: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -265,6 +276,64 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
     });
   });
 
+  test('finding 7: windows, the per-username/join/voice caps and the icon + chunk size caps are live-tunable', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+
+    const put = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: {
+        login_window_secs: 120,
+        register_user_max: 33,
+        join_server_user_max: 44,
+        voice_media_max: 5555,
+        icon_slot_max_bytes: 8 * 1024 * 1024,
+        upload_chunk_max_bytes: 2 * 1024 * 1024,
+      },
+    });
+    expect(put.status()).toBe(200);
+
+    const cfg = await (
+      await page.request.get(`${ALT}/api/admin/runtime-config`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+    ).json();
+    expect(cfg.login_window_secs).toBe(120);
+    expect(cfg.register_user_max).toBe(33);
+    expect(cfg.join_server_user_max).toBe(44);
+    expect(cfg.voice_media_max).toBe(5555);
+    expect(cfg.icon_slot_max_bytes).toBe(8 * 1024 * 1024);
+    expect(cfg.upload_chunk_max_bytes).toBe(2 * 1024 * 1024);
+    // Provenance is tracked for the new fields too.
+    expect(cfg.sources.login_window_secs).toBe('db');
+    expect(cfg.sources.icon_slot_max_bytes).toBe('db');
+
+    // The icon cap reaches the page through the public endpoint, which is what
+    // makes a raised limit effective without a client release.
+    const pub = await (await page.request.get(`${ALT}/api/client-config`)).json();
+    expect(pub.icon_slot_max_bytes).toBe(8 * 1024 * 1024);
+
+    // A zero-second window would make its limiter deny every request, so it is
+    // rejected instead of silently applied.
+    const bad = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { login_window_secs: 0 },
+    });
+    expect(bad.status()).toBe(400);
+
+    // Restore the defaults.
+    await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: {
+        login_window_secs: 300,
+        register_user_max: 10,
+        join_server_user_max: 10,
+        voice_media_max: 3000,
+        icon_slot_max_bytes: 4 * 1024 * 1024,
+        upload_chunk_max_bytes: 1024 * 1024,
+      },
+    });
+  });
+
   test('saved values flip source to db, persist in admin_config, and hash is hidden', async ({ page }) => {
     const adminToken = await adminLogin(page, 'rtadmin');
     await page.request.put(`${ALT}/api/admin/runtime-config`, {
@@ -366,5 +435,128 @@ test.describe('Admin runtime config (G2) — isolated server + temp DB', () => {
       data: {},
     });
     expect(empty.status()).toBe(400);
+  });
+
+  test('finding 7: request-body cap is live-configurable (413, then served again)', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+
+    // Tighten the default request-body limit to 2 KiB live.
+    const put = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { body_limit_default_bytes: 2048 },
+    });
+    expect(put.status()).toBe(200);
+
+    const get = await page.request.get(`${ALT}/api/admin/runtime-config`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const cfg = await get.json();
+    expect(cfg.body_limit_default_bytes).toBe(2048);
+    expect(cfg.sources.body_limit_default_bytes).toBe('db');
+
+    // A body over the live limit is rejected up front with 413.
+    const big = await page.request.post(`${ALT}/api/login`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { username: 'nobody', password: 'x'.repeat(4096) },
+    });
+    expect(big.status()).toBe(413);
+
+    // A small body still reaches the handler (401, not 413).
+    const small = await page.request.post(`${ALT}/api/login`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { username: 'nobody', password: 'x' },
+    });
+    expect(small.status()).toBe(401);
+
+    // Loosen it live — the very next request is served again (no restart).
+    const putBack = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { body_limit_default_bytes: 64 * 1024 * 1024 },
+    });
+    expect(putBack.status()).toBe(200);
+    const after = await page.request.post(`${ALT}/api/login`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { username: 'nobody', password: 'x'.repeat(4096) },
+    });
+    expect(after.status()).toBe(401);
+  });
+
+  test('finding 7: WebSocket message/frame caps are live-configurable', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+    const token = await registerUser(page, 'rtws_' + Date.now());
+
+    const put = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { ws_max_message_bytes: 4096, ws_max_frame_bytes: 4096, ws_socket_budget_bytes: 8192, ws_socket_budget_window_secs: 5 },
+    });
+    expect(put.status()).toBe(200);
+    const cfg = await (await page.request.get(`${ALT}/api/admin/runtime-config`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })).json();
+    expect(cfg.ws_max_message_bytes).toBe(4096);
+    expect(cfg.ws_socket_budget_bytes).toBe(8192);
+    expect(cfg.ws_socket_budget_window_secs).toBe(5);
+    expect(cfg.sources.ws_max_message_bytes).toBe('db');
+
+    // A message over the configured cap closes the socket instead of being
+    // buffered (the merge of this limit happens at WS handshake time).
+    const result = await page.evaluate(async ({ token }) => {
+      return await new Promise<{ closed: boolean }>((resolve) => {
+        const ws = new WebSocket(`wss://${location.host}/ws`);
+        const out = { closed: false };
+        ws.onopen = () => {
+          try {
+            ws.send(JSON.stringify({ type: 'auth', token, padding: 'x'.repeat(16 * 1024) }));
+          } catch (_) { /* send may fail client-side */ }
+        };
+        ws.onclose = () => { out.closed = true; resolve(out); };
+        ws.onerror = () => {};
+        setTimeout(() => resolve(out), 10000);
+      });
+    }, { token });
+    expect(result.closed, 'the socket must be closed, not left half-open').toBe(true);
+
+    // Restore the defaults so later suites on this server are unaffected.
+    const putBack = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: {
+        ws_max_message_bytes: 1024 * 1024,
+        ws_max_frame_bytes: 1024 * 1024,
+        ws_socket_budget_bytes: 32 * 1024 * 1024,
+        ws_socket_budget_window_secs: 10,
+      },
+    });
+    expect(putBack.status()).toBe(200);
+  });
+
+  test('finding 7: auth rate limits are live-configurable', async ({ page }) => {
+    const adminToken = await adminLogin(page, 'rtadmin');
+    const uname = 'rtlogin_' + Date.now();
+    await registerUser(page, uname);
+
+    // Tighten the per-username failure budget to 1 live.
+    const put = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { login_user_fail_max: 1 },
+    });
+    expect(put.status()).toBe(200);
+
+    const fail1 = await page.request.post(`${ALT}/api/login`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { username: uname, password: 'wrong-password-1' },
+    });
+    expect(fail1.status()).toBe(401);
+    const fail2 = await page.request.post(`${ALT}/api/login`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { username: uname, password: 'wrong-password-2' },
+    });
+    expect(fail2.status(), 'the configured budget of 1 failure must block the next attempt').toBe(429);
+
+    // Restore the default.
+    const putBack = await page.request.put(`${ALT}/api/admin/runtime-config`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      data: { login_user_fail_max: 3 },
+    });
+    expect(putBack.status()).toBe(200);
   });
 });
