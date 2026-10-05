@@ -5199,6 +5199,14 @@ impl Database {
             "DELETE FROM conversation_profile_data WHERE conversation_type = 'server' AND conversation_id = ?1",
             params![server_id],
         ).map_err(m)?;
+        // Older clients stored the server-level profile snapshot with
+        // conversation_type='channel' and the SERVER id as the conversation id,
+        // so filter by id as well — a row keyed to a dead server must never
+        // survive, whatever its type claims.
+        conn.execute(
+            "DELETE FROM conversation_profile_data WHERE conversation_id = ?1",
+            params![server_id],
+        ).map_err(m)?;
         conn.execute(
             "DELETE FROM conversation_profile_data WHERE conversation_type = 'channel'
                AND conversation_id IN (SELECT id FROM channels WHERE server_id = ?1)",

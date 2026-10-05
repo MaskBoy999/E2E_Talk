@@ -426,6 +426,33 @@ jobs:
             exit 1
           fi
 
+          # GitHub replaces spaces (and a few other characters — ( ) ~ :) in
+          # an uploaded asset's name with dots. That is built-in upload
+          # behavior, not a gh CLI quirk (cli/cli#10585, community
+          # discussion #60449). The Tauri bundles carry the product name,
+          # "E2E Chat", so every published asset is `E2E.Chat_...` while the
+          # file on disk is `E2E Chat_...` — and "Generate checksums" below
+          # lists the ON-DISK name, so the v0.2.45 release shipped SHA256SUMS
+          # entries whose names exist nowhere on the release: `sha256sum -c`
+          # failed on a pristine download even though every hash matched.
+          #
+          # Rename the bundles HERE — before the upload and before the
+          # checksum list is written — so disk name, asset name and checksum
+          # name agree by construction, without re-implementing GitHub's
+          # sanitizer. The bytes are untouched, so the Arch PKGBUILD (which
+          # downloads the dotted name) and the provenance attestation still
+          # describe the same files.
+          for f in src-tauri/target/release/bundle/*/*; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.exe | *.msi | *.AppImage | *.deb | *.rpm) ;;
+              *) continue ;;
+            esac
+            base="${f##*/}"
+            safe=$(printf '%s' "$base" | tr ' ()~:' '.....')
+            [ "$safe" = "$base" ] || mv "$f" "${f%/*}/$safe"
+          done
+
           # Exactly the bundles this leg produced. On Windows the AppImage/deb
           # globs simply match nothing (nullglob drops them); the legs never
           # produce the same file name, so concurrent uploads cannot collide.

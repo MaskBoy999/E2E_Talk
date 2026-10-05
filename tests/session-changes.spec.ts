@@ -15,7 +15,9 @@ test.describe('Session changes: code lengths, server picture, sticker crop, memo
         await page.fill('#register-confirm-password', 'password123');
         await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 15000 });
-        await page.waitForLoadState('networkidle');
+        // App-ready signal; networkidle cannot settle on the app pages (see
+        // SECURITY_REVIEW_FIXES.md §8).
+        await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 20000 });
         return await page.evaluate(() => ({
             token: localStorage.getItem('token'),
             user: JSON.parse(localStorage.getItem('user') || '{}'),

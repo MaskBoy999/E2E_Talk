@@ -570,3 +570,62 @@ E2E_BOX_DEBUG_PORT=9333 node tools/box/probe-wipe-overlay.mjs
 npx playwright test tests/vendor-integrity.spec.ts           #  2 passed
 node tools/vendor-checksums.mjs                              # regenerate after a vendor upgrade
 ```
+
+---
+
+## 8. Follow-up audit — 2026-10-05 (memory bounds, WebSocket backpressure, PQ registration)
+
+A second pass asked two questions: *what can a client make the server hold
+without bound?* and *what PQ hole was still open after the 0.2.44 envelope
+rollout?* Everything below is in the working tree with a test.
+
+| Area | Finding | Fix | Test |
+|---|---|---|---|
+| Rate limiters (21 statics, `handlers.rs`) | Entries were never evicted — one map entry per distinct key for the life of the process — and most keys are client-controlled (usernames, IP hashes). `ws.rs` evicted only *expired* keys above 1000 entries, which a flood of fresh keys defeats. | Shared `evict_stale_keys`: drop expired, then keep the newest 4096 with a 2× trim threshold (amortized; `select_nth_unstable`, not a sort). | `cargo test` → `a_flood_of_fresh_keys_is_capped`, `expired_keys_are_dropped_…`, `a_flood_of_fresh_ws_keys_is_capped` |
+| WebSocket per-connection send queue | `mpsc::unbounded_channel`: a client that stops reading while subscribed to busy rooms made the server buffer messages without bound. | Bounded queue (`WS_SEND_QUEUE_CAPACITY = 1024`) + `try_send`; overflow is dropped, never buffered. | `cargo test` → `a_stalled_client_drops_messages_instead_of_buffering_them` |
+| Admin tokens | Expired admin / pre-2FA tokens were only removed when that exact token was validated again — one dead entry per admin login for the process lifetime. | `prune_expired_admin_tokens` runs on every insert. | `cargo test` → `expired_tokens_are_pruned_and_live_ones_kept` |
+| `/api/soundboard/temp-play` (RAM) | Decoded audio sat in process memory for 15 minutes with only the 64 MiB default body limit as a bound — one authenticated client could park gigabytes. | 8 MiB per entry (413), 64 MiB total with oldest-first eviction, TTL unchanged. | `cargo test` → `the_map_is_capped_by_total_bytes_oldest_first`, `expired_entries_are_dropped_…`; `tests/soundboard-spec.spec.ts` → *T6* |
+| Soundboard clip upload (disk) | No size check either; every upload is a SQLite row. | Same 8 MiB ceiling, 413 before any write. | `tests/soundboard-spec.spec.ts` → *T6* |
+| Registration (PQ) | `identity_public_key` could be sent without the ML-KEM half — an account every sender would address with the v1 X25519-only envelope. | Classical-only identity keys are refused; the X25519 half must be 32 bytes and the PQ half 1184. | `tests/pq-envelopes.spec.ts` → *a classical-only identity key is refused at registration* |
+| Whole-server delete (`delete_server_rows_c`) | `conversation_profile_data` rows were only matched by `conversation_type` + id, so a row whose type said `channel` but whose conversation id was the server id survived the delete — a stale encrypted per-server profile snapshot keyed to a dead server (found by `leave-cleanup.spec.ts`). | Purge by `conversation_id` as well, whatever the row's type claims. | `tests/leave-cleanup.spec.ts` → *owner leaving deletes the whole server including tables with no FK to it* |
+
+**Test-suite fallout found while verifying the above:**
+`waitForLoadState('networkidle')` can never settle on the app's pages.
+Chromium keeps the pages' own fire-and-forget requests listed as in-flight for
+the life of the document — `POST /api/logout?cookie_only=1` on `admin.html`,
+`GET /api/ringtone` and `GET /api/notification-sound` on `index.html` — even
+though the server answers each in ~3 ms (a curl call and a later in-page fetch
+of the same URL both complete; only the page's own request stays “pending”).
+`networkidle` was therefore a 45 s timeout on 12 spec files, several of which
+had silently aged into “known flaky”. They now wait for a real signal
+(`#settings-btn` visible after the app loads; `domcontentloaded` for reloads).
+
+Reviewed and deliberately unchanged: the raw IP inside the encrypted
+failed-login notification payload (E2E-encrypted, addressed to the account
+owner only, never stored in plaintext), `PENDING_2FA_ENROLL` (bounded per
+account and pruned on insert), voice-room cleanup (empty rooms are removed), no
+new SQL-injection sinks (identifiers come from `sqlite_master` or are
+quote-doubled), and no secrets in logs.
+
+### 8.1 Release assets: published names vs checksum names
+
+GitHub's asset-upload endpoint rewrites spaces (and `( ) ~ :`) to dots, so the
+v0.2.45 release published `E2E.Chat_…` files while `SHA256SUMS-*.txt` listed the
+on-disk `E2E Chat_…` names: every hash matched, no name did, and `sha256sum -c`
+failed on a pristine download. `release.yml` now normalizes the bundle names
+*before* the upload and before the checksum list is generated, so disk name,
+asset name and checksum name agree by construction (bytes untouched, so the
+Arch PKGBUILD's dotted download name and the provenance attestation still
+match). `tools/release-workflow-sim.sh` executes both steps against a fake `gh`
+that sanitizes names exactly like GitHub does, asserts that every checksum line
+names a real asset, and runs a real `sha256sum -c` over the downloaded set.
+
+```bash
+cd server && cargo test                       # 39 passed
+npx playwright test tests/pq-envelopes.spec.ts tests/soundboard-spec.spec.ts \
+  tests/heartbeat-reauth.spec.ts tests/rate-limiting.spec.ts \
+  tests/security-hardening-f.spec.ts          # 32 passed
+bash tools/release-workflow-sim.sh            # every check passed
+npx playwright test tests/release-publishing.spec.ts \
+  tests/arch-packaging.spec.ts tests/supply-chain.spec.ts   # 24 passed
+```

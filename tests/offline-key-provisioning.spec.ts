@@ -98,6 +98,7 @@ async function reconnectUser(page: any) {
 test.describe('Offline Key Provisioning Scenarios', () => {
 
     test('owner offline during kick: pending event replayed, key rotated on reconnect', async ({ page, context }) => {
+        test.setTimeout(150000);
         const ts = Date.now();
         const ownerName = 'offkick_' + ts;
         const kickedName = 'offkicked_' + ts;
@@ -189,6 +190,7 @@ test.describe('Offline Key Provisioning Scenarios', () => {
     });
 
     test('all members offline during join: new member gets key when member reconnects', async ({ page, context }) => {
+        test.setTimeout(150000);
         const ts = Date.now();
         const ownerName = 'offjoin_' + ts;
         const newMemberName = 'newmember_' + ts;

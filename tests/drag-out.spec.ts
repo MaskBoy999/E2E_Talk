@@ -116,21 +116,48 @@ test.describe('3.5 drag files out', () => {
     await register(page, unique('dragout_revoke'));
     await installCard(page, 'file-revoke');
 
+    // The page's CSP forbids eval (`script-src 'self' 'wasm-unsafe-eval'`), so
+    // read the warmed URL by observing URL.createObjectURL instead of poking
+    // the app's internal `_dragOutCache` with eval.
     const after = await page.evaluate(async () => {
+      const created: string[] = [];
+      const origCreate = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = (b: Blob) => { const u = origCreate(b); created.push(u); return u; };
       const card = document.querySelector('.file-card[data-file-id="file-revoke"]') as HTMLElement;
       card.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 250));
-      const url = eval('_dragOutCache')['file-revoke'].url;
+      const deadline = Date.now() + 5000;
+      while (created.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      URL.createObjectURL = origCreate;
+      const url = created[created.length - 1] || '';
       const revoked: string[] = [];
       const orig = URL.revokeObjectURL.bind(URL);
       URL.revokeObjectURL = (u: string) => { revoked.push(u); orig(u); };
       // Leaving the channel revokes every blob URL — including this one.
       (window as any).revokeBlobUrls();
       URL.revokeObjectURL = orig;
-      return { url, revoked, cached: Object.keys(eval('_dragOutCache')).length };
+      return { url, revoked };
     });
+    expect(after.url, 'the press warmed a blob URL').toMatch(/^blob:/);
     expect(after.revoked).toContain(after.url);
-    expect(after.cached).toBe(0);
+
+    // The cache was dropped too: pressing again must warm a NEW blob URL.
+    const second = await page.evaluate(async () => {
+      const created: string[] = [];
+      const origCreate = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = (b: Blob) => { const u = origCreate(b); created.push(u); return u; };
+      const card = document.querySelector('.file-card[data-file-id="file-revoke"]') as HTMLElement;
+      card.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      const deadline = Date.now() + 5000;
+      while (created.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      URL.createObjectURL = origCreate;
+      return created[0] || '';
+    });
+    expect(second, 'a fresh press re-warms the file').toMatch(/^blob:/);
+    expect(second).not.toBe(after.url);
   });
 
   test('the drag-out path reuses the Save-as decryption (no new trust)', () => {

@@ -215,6 +215,57 @@ test.describe('post-quantum hybrid envelopes', () => {
         expect(anon.status()).toBe(401);
     });
 
+    // Server-side companion to the client's always-hybrid registration: a
+    // classical-only identity key must be refused. Otherwise an API client
+    // could create an account that every sender addresses with the v1
+    // X25519-only envelope — the exact harvest-now-decrypt-later hole the
+    // hybrid layer closes — and nothing would ever upgrade it.
+    test('a classical-only identity key is refused at registration', async ({ request }) => {
+        const hybridLoginKey = () =>
+            JSON.stringify({
+                v: 2,
+                ed25519: Buffer.alloc(32, 7).toString('base64'),
+                ml_dsa_65: Buffer.alloc(1952, 11).toString('base64'),
+            });
+        const base = () => ({
+            password: 'x'.repeat(64),
+            login_public_key: hybridLoginKey(),
+        });
+
+        const classicalOnly = await request.post(BASE + '/api/register', {
+            data: {
+                ...base(),
+                username: 'pqclassical_' + Date.now(),
+                identity_public_key: Buffer.alloc(32, 3).toString('base64'),
+            },
+        });
+        expect(classicalOnly.status(), 'X25519 alone must not be accepted').toBe(400);
+        expect((await classicalOnly.json()).error).toContain('identity_pq_public_key');
+
+        // A malformed X25519 half is rejected too…
+        const shortKey = await request.post(BASE + '/api/register', {
+            data: {
+                ...base(),
+                username: 'pqshort_' + Date.now(),
+                identity_public_key: Buffer.alloc(16, 3).toString('base64'),
+                identity_pq_public_key: Buffer.alloc(1184, 5).toString('base64'),
+            },
+        });
+        expect(shortKey.status()).toBe(400);
+        expect((await shortKey.json()).error).toContain('32-byte');
+
+        // …while the hybrid pair the shipped client sends is accepted.
+        const hybrid = await request.post(BASE + '/api/register', {
+            data: {
+                ...base(),
+                username: 'pqhybrid_' + Date.now(),
+                identity_public_key: Buffer.alloc(32, 3).toString('base64'),
+                identity_pq_public_key: Buffer.alloc(1184, 5).toString('base64'),
+            },
+        });
+        expect(hybrid.status(), 'hybrid X25519 + ML-KEM-768 registers').toBe(201);
+    });
+
     test('two accounts exchange a hybrid envelope through their published keys', async ({ browser }) => {
         const ctxA = await browser.newContext({ ignoreHTTPSErrors: true });
         const ctxB = await browser.newContext({ ignoreHTTPSErrors: true });

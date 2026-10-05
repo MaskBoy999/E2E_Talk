@@ -1,7 +1,7 @@
 import { test, expect, chromium } from '@playwright/test';
 
 const BASE = 'https://localhost:3443';
-const PASS = '00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000';
+const PASS = 'Sb!Multi_2026_gamma'; // must satisfy the auth.js strength floor (score > 1)
 
 let counter = 0;
 function unique(prefix: string) { return prefix + '_' + (++counter) + '_' + Date.now().toString(36); }

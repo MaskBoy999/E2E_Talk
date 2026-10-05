@@ -439,7 +439,7 @@ test.describe('Identity Private Key Encryption', () => {
         expect(state.roundTrip, 'interceptor must decrypt it transparently').toBe(true);
 
         // Verify after page reload
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(2000);
 
         const stateAfterReload = await page.evaluate(() => {

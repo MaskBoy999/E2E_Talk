@@ -98,7 +98,7 @@ test.describe('Key Blob Recovery: local data wipe resilience', () => {
         expect(hasKey).toBeTruthy();
 
         // Reload to get the servers loaded
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(3000);
 
         // Verify server name shows

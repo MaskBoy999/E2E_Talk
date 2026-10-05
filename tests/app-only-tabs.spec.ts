@@ -1,15 +1,19 @@
 import { test, expect, type Page } from '@playwright/test';
 
 /**
- * The Icons tab (and the Connection tab it sits next to) are app-only: chat.js
- * reveals them only when the page runs inside a box, detected by the Tauri
- * bridge `window.__TAURI__.core.invoke`. A plain browser must never show them —
- * that is the whole point of the gate.
+ * The Icons tab is app-only: chat.js reveals it only when the page runs inside
+ * a box, detected by the Tauri bridge `window.__TAURI__.core.invoke`. A plain
+ * browser must never show it — that is the whole point of the gate.
  *
- * This runs in a browser with the bridge injected, which is the same condition
- * the desktop box provides (tests/desktop-box-tabs.spec.ts asserts the real box
- * has the bridge), so the reveal logic itself is pinned without depending on a
- * running app window or on an account being logged in inside it.
+ * The Connection tab next to it is deliberately NOT app-only: a browser can be
+ * left running the cached app with its server gone (host moved, port changed),
+ * and that tab is the only way back to the connection screen there. It is
+ * shown everywhere and this spec pins both halves of that rule.
+ *
+ * The box half runs in a browser with the bridge injected, which is the same
+ * condition the desktop box provides (tests/desktop-box-tabs.spec.ts asserts
+ * the real box has the bridge), so the reveal logic itself is pinned without
+ * depending on a running app window or on an account being logged in inside it.
  */
 
 const BASE = 'https://localhost:3443';
@@ -53,11 +57,14 @@ function tabState(page: Page) {
 }
 
 test.describe('app-only settings tabs', () => {
-    test('a plain browser never shows the Icons or Connection tabs', async ({ page }) => {
+    test('a plain browser hides the Icons tab and keeps the Connection escape hatch', async ({ page }) => {
         await registerAndEnter(page);
         const state = await tabState(page);
         expect(state.icons, 'the Icons tab is app-only').toBe('hidden');
-        expect(state.connection, 'the Connection tab is app-only').toBe('hidden');
+        // Deliberate: the web app is served by the server it points at, so when
+        // that server is gone the page can still be running from cache and the
+        // Connection tab is how a browser reaches the new address.
+        expect(state.connection, 'the Connection tab is the browser escape hatch').toBe('shown');
         expect(state.css, 'the CSS tab is for everyone').toBe(true);
     });
 

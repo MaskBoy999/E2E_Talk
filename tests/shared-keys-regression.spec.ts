@@ -15,7 +15,9 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
         await page.fill('#register-confirm-password', 'password123');
         await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 15000 });
-        await page.waitForLoadState('networkidle');
+        // App-ready signal; networkidle cannot settle on the app pages (see
+        // SECURITY_REVIEW_FIXES.md §8).
+        await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 20000 });
         return await page.evaluate(() => ({
             token: localStorage.getItem('token'),
             user: JSON.parse(localStorage.getItem('user') || '{}'),
@@ -349,7 +351,9 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
         // Create an encrypted server key entry by simulating what selectServer does.
         // We navigate userA to the server so selectServer() uploads the key.
         await page.goto(`${BASE}/index.html`);
-        await page.waitForLoadState('networkidle');
+        // App-ready signal; networkidle cannot settle on the app pages (see
+        // SECURITY_REVIEW_FIXES.md §8).
+        await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 20000 });
         await page.evaluate((sid) => {
             if (typeof selectServer === 'function') selectServer(sid);
         }, server.id);
@@ -357,7 +361,7 @@ test.describe('Shared keys + sender_username regression — full stack', () => {
 
         // Now navigate userB to index.html so loadServers() runs and uploads shared key
         await page2.goto(`${BASE}/index.html`);
-        await page2.waitForLoadState('networkidle');
+        await page2.waitForSelector('#settings-btn', { state: 'visible', timeout: 20000 });
         // Wait for loadServers() to complete its fire-and-forget upload
         await new Promise(r => setTimeout(r, 3000));
 

@@ -167,8 +167,12 @@ test('callee ring badge pulses FAST (green) only while ringing, then drops insta
     const { userData, dm } = await createDm(page, bodyA, bodyB);
     await waitForWs(page);
     await waitForWs(pageB);
-    await page.evaluate(() => (window as any).VoiceManager.setRingTimeoutMs(1500));
-    await pageB.evaluate(() => (window as any).VoiceManager.setRingTimeoutMs(1500));
+    // 6 s, not 1.5 s: under a loaded server the ring could expire between
+    // waitForSelector finding the green dot and the evaluate reading its
+    // animation, leaving getComputedStyle(null) — a flake, not a UI bug. The
+    // ring still flips well inside the 15 s waitForSelector calls below.
+    await page.evaluate(() => (window as any).VoiceManager.setRingTimeoutMs(6000));
+    await pageB.evaluate(() => (window as any).VoiceManager.setRingTimeoutMs(6000));
 
     await openDm(pageB);
 

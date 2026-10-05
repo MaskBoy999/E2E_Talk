@@ -282,9 +282,17 @@ test('banner survives on a fresh device after the owner auto-heals a corrupted c
     await pageA2.waitForURL('**/index.html', { timeout: 15000 });
     await pageA2.waitForTimeout(4000);
 
-    const state = await pageA2.evaluate(async (uid) => {
-        await (window as any).openProfileModal(uid);
-        await new Promise((r) => setTimeout(r, 3000));
+    await pageA2.evaluate((uid) => (window as any).openProfileModal(uid), bodyB.user.id);
+    // The banner is fetched, decrypted and blob-URL'd asynchronously. Wait for
+    // the real DOM signal instead of a fixed 3 s sleep, which flakes while the
+    // suite is loading the server (2026-10-05 full-suite run: backgroundImage
+    // was still "none" at the assertion). If it never loads, the waits below
+    // still let the assertions fail.
+    await pageA2.waitForFunction(() => {
+        const img = document.getElementById('profile-banner-img');
+        return !!img && getComputedStyle(img).backgroundImage.includes('blob:');
+    }, null, { timeout: 20000 }).catch(() => {});
+    const state = await pageA2.evaluate((uid) => {
         const img = document.getElementById('profile-banner-img');
         const bg = img ? getComputedStyle(img).backgroundImage : 'NO-EL';
         return {
@@ -387,9 +395,17 @@ test('server rejects a non-authoritative upload that would drop the banner, and 
     await pageA2.waitForURL('**/index.html', { timeout: 15000 });
     await pageA2.waitForTimeout(4000);
 
-    const state = await pageA2.evaluate(async (uid) => {
-        await (window as any).openProfileModal(uid);
-        await new Promise((r) => setTimeout(r, 3000));
+    await pageA2.evaluate((uid) => (window as any).openProfileModal(uid), bodyB.user.id);
+    // The banner is fetched, decrypted and blob-URL'd asynchronously. Wait for
+    // the real DOM signal instead of a fixed 3 s sleep, which flakes while the
+    // suite is loading the server (2026-10-05 full-suite run: backgroundImage
+    // was still "none" at the assertion). If it never loads, the waits below
+    // still let the assertions fail.
+    await pageA2.waitForFunction(() => {
+        const img = document.getElementById('profile-banner-img');
+        return !!img && getComputedStyle(img).backgroundImage.includes('blob:');
+    }, null, { timeout: 20000 }).catch(() => {});
+    const state = await pageA2.evaluate((uid) => {
         const img = document.getElementById('profile-banner-img');
         const bg = img ? getComputedStyle(img).backgroundImage : 'NO-EL';
         return {

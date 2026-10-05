@@ -179,6 +179,9 @@ await page.click('#register-form button[type="submit"]');
     });
 
     test('register, create server, send and receive encrypted message', async ({ page, context }) => {
+        // Two accounts, a server + key, invite join and a message round-trip —
+        // comfortably past the suite-wide 45s budget on a loaded box.
+        test.setTimeout(120000);
         const ts = Date.now();
         const user1 = 'alice_' + ts;
         const user2 = 'bob_' + ts;
@@ -330,6 +333,7 @@ await page2reg.click('#register-form button[type="submit"]');
     });
 
     test('full UI flow: create server via UI, join via invite, bidirectional messaging', async ({ page, context }) => {
+        test.setTimeout(150000);
         const ts = Date.now();
         const user1 = 'ui_alice_' + ts;
         const user2 = 'ui_bob_' + ts;
@@ -644,6 +648,7 @@ await page.click('#register-form button[type="submit"]');
     });
 
     test('admin panel: create user, verify in all tabs, delete with cascade', async ({ page }) => {
+        test.setTimeout(120000);
         const ts = Date.now();
         const username = 'admintest_' + ts;
 

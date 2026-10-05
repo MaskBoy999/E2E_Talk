@@ -16,6 +16,36 @@ use crate::auth;
 use crate::AppState;
 
 // --- Rate Limiting ---
+/// Hard ceiling on the LIVE keys one limiter keeps. Every key is
+/// attacker-chosen (a username, a hashed IP, a user id), and the map used to
+/// grow forever: a flood of distinct keys turns a security control into an OOM.
+pub(crate) const RATE_LIMITER_KEY_CAP: usize = 4096;
+/// Trim once the map is a full slack over the cap, so a flood pays for one
+/// O(n) trim per slack inserts instead of on every request; the map peaks at
+/// `TRIM_AT + one request` and settles back to `CAP`.
+pub(crate) const RATE_LIMITER_TRIM_AT: usize = RATE_LIMITER_KEY_CAP * 2;
+
+/// Keep a limiter's map bounded. First drop keys whose window has passed; then
+/// — only when a flood of FRESH keys is itself over the cap — the oldest
+/// buckets. Dropping oldest-first is safe: those buckets expire first anyway,
+/// and a limiter is a best-effort throttle, not a ledger.
+pub(crate) fn evict_stale_keys(map: &mut HashMap<String, (u32, Instant)>, window: Duration, now: Instant) {
+    if map.len() <= RATE_LIMITER_TRIM_AT {
+        return;
+    }
+    map.retain(|_, &mut (_, first)| now.duration_since(first) <= window);
+    if map.len() <= RATE_LIMITER_TRIM_AT {
+        return;
+    }
+    // Keep the newest CAP buckets. `select_nth_unstable` is O(n) — a full sort
+    // here would turn the flood this guards against into a CPU sink.
+    let mut starts: Vec<Instant> = map.values().map(|&(_, first)| first).collect();
+    let keep_from = starts.len() - RATE_LIMITER_KEY_CAP;
+    let (_, cutoff, _) = starts.select_nth_unstable(keep_from);
+    let cutoff = *cutoff;
+    map.retain(|_, &mut (_, first)| first >= cutoff);
+}
+
 struct RateLimiter {
     attempts: Mutex<HashMap<String, (u32, Instant)>>,
 }
@@ -24,6 +54,7 @@ impl RateLimiter {
     fn check_and_increment(&self, key: &str, max_attempts: u32, window: Duration) -> bool {
         let mut map = self.attempts.lock().unwrap();
         let now = Instant::now();
+        evict_stale_keys(&mut map, window, now);
         if let Some(&(count, first_attempt)) = map.get(key) {
             if now.duration_since(first_attempt) > window {
                 map.insert(key.to_string(), (1, now));
@@ -45,6 +76,7 @@ impl RateLimiter {
     fn is_blocked(&self, key: &str, max_attempts: u32, window: Duration) -> bool {
         let mut map = self.attempts.lock().unwrap();
         let now = Instant::now();
+        evict_stale_keys(&mut map, window, now);
         if let Some(&(count, first_attempt)) = map.get(key) {
             if now.duration_since(first_attempt) > window {
                 map.remove(key);
@@ -60,6 +92,7 @@ impl RateLimiter {
     fn increment(&self, key: &str, window: Duration) {
         let mut map = self.attempts.lock().unwrap();
         let now = Instant::now();
+        evict_stale_keys(&mut map, window, now);
         if let Some(&(count, first_attempt)) = map.get(key) {
             if now.duration_since(first_attempt) > window {
                 map.insert(key.to_string(), (1, now));
@@ -83,6 +116,62 @@ impl RateLimiter {
             out.push((k.clone(), count, window.as_secs().saturating_sub(elapsed)));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod rate_limiter_eviction_tests {
+    use super::*;
+
+    fn new_limiter() -> RateLimiter {
+        RateLimiter { attempts: Mutex::new(HashMap::new()) }
+    }
+
+    /// A flood of distinct keys used to grow a limiter without bound after
+    /// every legitimate bucket had expired. The map must stay under the trim
+    /// threshold no matter how many distinct keys arrive, and the OLDEST
+    /// buckets — the ones about to expire anyway — are the ones sacrificed.
+    #[test]
+    fn a_flood_of_fresh_keys_is_capped() {
+        let rl = new_limiter();
+        let window = Duration::from_secs(60);
+        let flood = RATE_LIMITER_TRIM_AT + 500;
+        for i in 0..flood {
+            rl.increment(&format!("key-{}", i), window);
+        }
+        rl.check_and_increment("newest", 5, window);
+        let map = rl.attempts.lock().unwrap();
+        // Timestamps can tie at the cutoff, so allow a small overshoot — the
+        // point is that the flood cannot grow the map past the cap.
+        assert!(map.len() <= RATE_LIMITER_TRIM_AT + 64, "limiter kept {} keys", map.len());
+        assert!(map.len() >= RATE_LIMITER_KEY_CAP, "eviction must not empty a live limiter");
+        assert!(!map.contains_key("key-0"), "the oldest bucket must be the one dropped");
+        assert!(map.contains_key("newest"), "the fresh bucket must be kept");
+    }
+
+    /// Expired keys are dropped whenever a trim runs, so a short-window
+    /// limiter cannot leak one entry per distinct key for the process life.
+    #[test]
+    fn expired_keys_are_dropped() {
+        let base = Instant::now();
+        let mut map: HashMap<String, (u32, Instant)> = HashMap::new();
+        for i in 0..(RATE_LIMITER_TRIM_AT + 10) {
+            map.insert(format!("old-{}", i), (1, base - Duration::from_millis(10)));
+        }
+        evict_stale_keys(&mut map, Duration::from_millis(1), Instant::now());
+        assert!(map.is_empty(), "expired buckets were kept: {} keys", map.len());
+    }
+
+    #[test]
+    fn small_maps_are_left_alone() {
+        let rl = new_limiter();
+        let window = Duration::from_secs(60);
+        for i in 0..10 {
+            rl.increment(&format!("key-{}", i), window);
+        }
+        assert_eq!(rl.attempts.lock().unwrap().len(), 10);
+        assert!(rl.check_and_increment("key-3", 5, window));
+        assert_eq!(rl.attempts.lock().unwrap().len(), 10);
     }
 }
 
@@ -294,16 +383,47 @@ fn get_admin_tokens() -> std::sync::MutexGuard<'static, Option<HashMap<String, I
     ADMIN_TOKENS.lock().unwrap()
 }
 
+/// Expired admin tokens are only consulted during validation, so a long-lived
+/// process used to keep one dead entry per admin login (24 h each) forever.
+/// Prune on insert: the map then holds at most the tokens that can still
+/// authenticate, and validation keeps its fast path unchanged.
+fn prune_expired_admin_tokens(map: &mut HashMap<String, Instant>) {
+    let now = Instant::now();
+    map.retain(|_, expiry| *expiry > now);
+}
+
 fn store_admin_token(token: String) {
     let mut guard = get_admin_tokens();
     let map = guard.get_or_insert_with(HashMap::new);
+    prune_expired_admin_tokens(map);
     map.insert(token, Instant::now() + Duration::from_secs(24 * 3600));
 }
 
 fn store_admin_pre_token(token: String) {
     let mut guard = get_admin_tokens();
     let map = guard.get_or_insert_with(HashMap::new);
+    prune_expired_admin_tokens(map);
     map.insert(token, Instant::now() + Duration::from_secs(300)); // 5 min TTL
+}
+
+#[cfg(test)]
+mod admin_token_prune_tests {
+    use super::prune_expired_admin_tokens;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    /// The admin-token map used to keep one dead entry per login for the life
+    /// of the server process. Pruning on insert removes exactly the expired.
+    #[test]
+    fn expired_tokens_are_pruned_and_live_ones_kept() {
+        let now = Instant::now();
+        let mut map = HashMap::new();
+        map.insert("dead".to_string(), now - Duration::from_secs(1));
+        map.insert("live".to_string(), now + Duration::from_secs(60));
+        prune_expired_admin_tokens(&mut map);
+        assert!(!map.contains_key("dead"), "an expired token must not be kept");
+        assert!(map.contains_key("live"), "a live token must survive");
+    }
 }
 
 fn remove_admin_token(token: &str) {
@@ -1018,6 +1138,35 @@ pub async fn register(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": "identity_pq_public_key must be an ML-KEM-768 public key (1184 bytes)"
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // PQ hardening — a classical-only identity key is refused. An account that
+    // has an envelope key at all must be hybrid-addressable: without the
+    // ML-KEM half every sender silently falls back to v1 (X25519-only) for it,
+    // which is exactly the harvest-now-decrypt-later exposure the hybrid layer
+    // exists to close. Registering with NO identity key yet stays allowed —
+    // the client publishes one (with its PQ half) before it can receive
+    // anything. The shipped client always sends both; this closes the API
+    // path that could create a permanently classically-addressed account.
+    if let Some(k) = identity_key_bytes.as_ref() {
+        if k.len() != 32 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "identity_public_key must be a 32-byte X25519 public key"
+                })),
+            )
+                .into_response();
+        }
+        if identity_pq_bytes.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "identity_pq_public_key is required when identity_public_key is provided (hybrid X25519 + ML-KEM-768)"
                 })),
             )
                 .into_response();
@@ -10637,6 +10786,74 @@ pub async fn set_self_destruct(
 }
 // === Soundboard Handlers ===
 
+/// A soundboard clip is seconds of audio, so one relayed temp-play entry has
+/// no business being tens of megabytes — without this the 64 MiB default body
+/// limit alone decided it, and decoded bytes go straight into server memory.
+const MAX_SB_TEMP_PLAY_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+/// Overall ceiling for the in-memory temp-play map. Entries live 15 minutes,
+/// so "an authenticated client at 64 MiB per upload, uncapped" was a remote
+/// OOM; oldest-first eviction under this ceiling is invisible to a real call
+/// (a handful of concurrent clips).
+const MAX_SB_TEMP_PLAY_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+/// Same per-item ceiling for the DB-stored soundboard clips (encrypted at
+/// rest by this server): a self-hosted box should not accept a 64 MiB "clip".
+const MAX_SB_CLIP_BYTES: usize = 8 * 1024 * 1024;
+
+/// Insert a temp-play entry, keeping the map within `max_total` bytes by
+/// dropping the OLDEST entries (each removal takes its bytes with it); an
+/// entry past its TTL is dropped before anything else is considered.
+fn sb_temp_play_insert(
+    map: &mut HashMap<String, (Vec<u8>, Instant)>,
+    token: String,
+    bytes: Vec<u8>,
+    max_total: usize,
+    ttl: Duration,
+) {
+    map.retain(|_, (_, created)| created.elapsed() < ttl);
+    map.insert(token, (bytes, Instant::now()));
+    let mut total: usize = map.values().map(|(b, _)| b.len()).sum();
+    while total > max_total {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, (_, created))| *created)
+            .map(|(t, _)| t.clone());
+        match oldest.and_then(|t| map.remove(&t)) {
+            Some((removed, _)) => total = total.saturating_sub(removed.len()),
+            None => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod soundboard_temp_play_tests {
+    use super::*;
+
+    /// The live map is bounded by TOTAL bytes, oldest-first: a flood of fresh
+    /// entries can never grow it without limit (the old code only had a TTL,
+    /// which an uploader could refresh faster than it expired).
+    #[test]
+    fn the_map_is_capped_by_total_bytes_oldest_first() {
+        let mut map: HashMap<String, (Vec<u8>, Instant)> = HashMap::new();
+        let ttl = Duration::from_secs(900);
+        sb_temp_play_insert(&mut map, "oldest".into(), vec![1; 40], 100, ttl);
+        sb_temp_play_insert(&mut map, "middle".into(), vec![2; 40], 100, ttl);
+        sb_temp_play_insert(&mut map, "newest".into(), vec![3; 40], 100, ttl);
+        assert!(map.contains_key("newest"), "the fresh entry must survive");
+        assert!(!map.contains_key("oldest"), "the oldest entry is evicted first");
+        let total: usize = map.values().map(|(b, _)| b.len()).sum();
+        assert!(total <= 100, "total {} exceeded the cap", total);
+    }
+
+    #[test]
+    fn expired_entries_are_dropped_before_the_cap_is_applied() {
+        let mut map: HashMap<String, (Vec<u8>, Instant)> = HashMap::new();
+        map.insert("stale".into(), (vec![0u8; 90], Instant::now() - Duration::from_secs(3600)));
+        sb_temp_play_insert(&mut map, "fresh".into(), vec![0u8; 40], 100, Duration::from_secs(900));
+        assert!(!map.contains_key("stale"), "a stale entry must not push out a fresh one");
+        assert!(map.contains_key("fresh"));
+    }
+}
+
 /// POST /api/soundboard/temp-play — upload decrypted audio bytes for fast relay.
 /// Returns { "token": "..." } that receivers can GET to fetch the audio.
 pub async fn upload_sb_temp_play(
@@ -10656,19 +10873,29 @@ pub async fn upload_sb_temp_play(
         Ok(b) => b,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid base64"}))).into_response(),
     };
-    // 60-char random hex token
+    // A relayed clip is seconds of audio; anything larger is a memory-exhaustion
+    // attempt, not playback (the 64 MiB default body limit is shared by every
+    // JSON route and cannot express this).
+    if audio_bytes.len() > MAX_SB_TEMP_PLAY_ENTRY_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Soundboard clip too large (max 8 MiB)"})),
+        )
+            .into_response();
+    }
+    // 60-char random hex token. Insert through the bounded helper: TTL backstop
+    // for finished playback plus the total-bytes ceiling, so 15 minutes of
+    // uploads can never park more than MAX_SB_TEMP_PLAY_TOTAL_BYTES in memory.
     let token = rand_hex_token(30);
-    state
-        .sb_temp_play
-        .write()
-        .unwrap()
-        .insert(token.clone(), (audio_bytes, std::time::Instant::now()));
-    // Cleanup entries older than 15 min (backstop — normal cleanup happens
-    // when playback stops or the player leaves voice). Entries must survive
-    // the whole playback so late joiners can still fetch the audio.
     {
         let mut map = state.sb_temp_play.write().unwrap();
-        map.retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(900));
+        sb_temp_play_insert(
+            &mut map,
+            token.clone(),
+            audio_bytes,
+            MAX_SB_TEMP_PLAY_TOTAL_BYTES,
+            Duration::from_secs(900),
+        );
     }
     (StatusCode::OK, Json(serde_json::json!({ "token": token }))).into_response()
 }
@@ -10742,6 +10969,13 @@ pub async fn upload_soundboard_clip(
         Some(a) => base64::engine::general_purpose::STANDARD.decode(a).unwrap_or_default(),
         None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "encrypted_audio required"}))).into_response(),
     };
+    if encrypted_audio.len() > MAX_SB_CLIP_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Soundboard clip too large (max 8 MiB)"})),
+        )
+            .into_response();
+    }
     let audio_nonce = match body["audio_nonce"].as_str() {
         Some(n) => base64::engine::general_purpose::STANDARD.decode(n).unwrap_or_default(),
         None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "audio_nonce required"}))).into_response(),

@@ -50,7 +50,17 @@ test.describe('Admin Panel - data endpoints return 200, not 500', () => {
 
     // Wait for admin panel to be visible
     await expect(page.locator('#admin-panel')).toBeVisible({ timeout: 5000 });
-    await page.waitForLoadState('networkidle');
+    // The panel loads every tab's data in one parallel burst when it shows;
+    // the users table renders as soon as its endpoint answers, which is the
+    // deterministic "burst has landed" signal.
+    //
+    // NOT waitForLoadState('networkidle'): the page fires a fire-and-forget
+    // POST /api/logout?cookie_only=1 at DOMContentLoaded and Chromium keeps
+    // reporting that one as in-flight forever (headers received; the page's
+    // fetch never resolves) even though the same request via curl or as a
+    // later in-page fetch completes in ~3 ms. networkidle therefore never
+    // settles on this page and used to time this spec out at 45 s.
+    await page.waitForSelector('#user-list tr', { timeout: 20000 });
 
     // No admin endpoint may 400+ (regression: dm-keys used to 500)
     expect(badResponses.length,
@@ -65,9 +75,12 @@ test.describe('Admin Panel - data endpoints return 200, not 500', () => {
 
     // Click real data tabs and verify the tables render
     await page.locator('.tab-btn[data-tab="server-keys"]').click();
-    await expect(page.locator('#server-key-list')).toBeVisible();
-    await page.locator('.tab-btn[data-tab="dm-channels"]').click();
-    await expect(page.locator('#dm-channel-list')).toBeVisible();
-  });
+    await expect(page.locator('#server-key-list')).toBeVisible();        await page.locator('.tab-btn[data-tab="dm-channels"]').click();
+        await expect(page.locator('#dm-channel-list')).toBeVisible();
+
+        // Tabs load their own data; nothing there may 4xx/5xx either.
+        expect(badResponses.length,
+          `No 400+ responses on admin endpoints after tab loads. Got: ${JSON.stringify(badResponses)}`).toBe(0);
+    });
 
 });

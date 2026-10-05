@@ -208,7 +208,7 @@ test.describe('Server Groups', () => {
         }, [s1, s2]);
 
         // Reload to see group
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await waitForWs(page);
         await page.waitForTimeout(1000);
 

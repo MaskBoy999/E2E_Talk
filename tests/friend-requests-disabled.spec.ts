@@ -21,6 +21,21 @@ test.describe('Friend Requests Disabled Setting', () => {
         }));
     }
 
+    // POST the same hashed value the settings UI sends: the server only ever
+    // sees HMAC(hmac_key, user_id + ':fr_disabled:' + '1'/'0') and derives the
+    // boolean from it, so a bare { disabled: true } body is rejected.
+    async function setDisabled(page: any, token: string, disabled: boolean) {
+        const disabledHash = await page.evaluate(async (val: string) => {
+            const hmacKey = await (window as any).ensureHmacKey();
+            const uid = JSON.parse(localStorage.getItem('user') || '{}').id;
+            return (window as any).E2ECrypto.hmacHex(hmacKey, uid + ':fr_disabled:' + val);
+        }, disabled ? '1' : '0');
+        return await page.request.post(`${BASE}/api/friends/requests/disabled`, {
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            data: { disabled_hash: disabledHash },
+        });
+    }
+
     test('toggle block incoming friend requests via settings UI', async ({ page }) => {
         const ts = Date.now();
         const username = 'frblock_toggle_' + ts;
@@ -78,11 +93,8 @@ test.describe('Friend Requests Disabled Setting', () => {
         const page2 = await ctx2.newPage();
         const body2 = await registerUser(page2, user2);
 
-        // User2 enables block via API
-        const blockRes = await page2.request.post(`${BASE}/api/friends/requests/disabled`, {
-            headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
-            data: { disabled: true },
-        });
+        // User2 enables block via the hashed-value contract the UI uses
+        const blockRes = await setDisabled(page2, body2.token, true);
         expect(blockRes.ok()).toBeTruthy();
 
         // User1 tries to send friend request to User2
@@ -119,10 +131,7 @@ test.describe('Friend Requests Disabled Setting', () => {
         const body2 = await registerUser(page2, user2);
 
         // User2 enables block
-        await page2.request.post(`${BASE}/api/friends/requests/disabled`, {
-            headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
-            data: { disabled: true },
-        });
+        await setDisabled(page2, body2.token, true);
 
         // User1 tries to send — should fail
         const friendCode2 = await page2.evaluate(() => localStorage.getItem('e2e_friend_code'));
@@ -133,10 +142,7 @@ test.describe('Friend Requests Disabled Setting', () => {
         expect(failRes.ok()).toBeFalsy();
 
         // User2 disables the block
-        const unblockRes = await page2.request.post(`${BASE}/api/friends/requests/disabled`, {
-            headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
-            data: { disabled: false },
-        });
+        const unblockRes = await setDisabled(page2, body2.token, false);
         expect(unblockRes.ok()).toBeTruthy();
 
         // User1 tries again — should succeed now
@@ -162,12 +168,10 @@ test.describe('Friend Requests Disabled Setting', () => {
         const username = 'frblock_persist_' + ts;
         await registerUser(page, username);
 
-        // Enable via API directly (more reliable than clicking the UI toggle)
+        // Enable via the hashed-value API directly (more reliable than clicking
+        // the UI toggle)
         const token = await page.evaluate(() => localStorage.getItem('token'));
-        const setRes = await page.request.post(`${BASE}/api/friends/requests/disabled`, {
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            data: { disabled: true },
-        });
+        const setRes = await setDisabled(page, token!, true);
         expect(setRes.ok()).toBeTruthy();
 
         // Verify via API that it was saved
@@ -225,10 +229,7 @@ test.describe('Friend Requests Disabled Setting', () => {
         expect(friends.some((f: any) => f.username === user2)).toBeTruthy();
 
         // User2 enables block
-        await page2.request.post(`${BASE}/api/friends/requests/disabled`, {
-            headers: { Authorization: `Bearer ${body2.token}`, 'Content-Type': 'application/json' },
-            data: { disabled: true },
-        });
+        await setDisabled(page2, body2.token, true);
 
         // Verify they are still friends
         const friendsAfter = await (await page.request.get(`${BASE}/api/friends`, {

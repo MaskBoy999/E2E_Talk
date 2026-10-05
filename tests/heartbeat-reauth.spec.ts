@@ -45,15 +45,29 @@ test.describe('Heartbeat refresh options + reauth custom duration', () => {
         // Heartbeat options exist (new opt-in ones + existing)
         for (const id of ['hb_refresh_keys', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_dms',
                            'hb_refresh_servers', 'hb_refresh_friend_requests', 'hb_refresh_presence',
-                           'hb_refresh_voice', 'hb_refresh_channels', 'hb_refresh_messages']) {
+                           'hb_refresh_voice', 'hb_refresh_channels', 'hb_refresh_messages',
+                           // Newest interval actions: PQ identity republish, admin-driven
+                           // client limits, security panel, soundboard clips, stickers.
+                           'hb_refresh_pq_identity', 'hb_refresh_client_config',
+                           'hb_refresh_security_panel', 'hb_refresh_soundboard', 'hb_refresh_stickers']) {
             await expect(page.locator('#' + id)).toBeVisible();
         }
         // Default-on actions show checked (they run unless toggled off)
         expect(await page.locator('#hb_refresh_keys').isChecked()).toBe(true);
         expect(await page.locator('#hb_refresh_messages').isChecked()).toBe(true);
+        // PQ identity republish is default-on too: a missed publish at load must
+        // not leave an account on v1-only envelopes forever.
+        expect(await page.locator('#hb_refresh_pq_identity').isChecked()).toBe(true);
         // Opt-in actions start unchecked
         expect(await page.locator('#hb_refresh_servers').isChecked()).toBe(false);
         expect(await page.locator('#hb_refresh_presence').isChecked()).toBe(false);
+        expect(await page.locator('#hb_refresh_client_config').isChecked()).toBe(false);
+        expect(await page.locator('#hb_refresh_security_panel').isChecked()).toBe(false);
+        expect(await page.locator('#hb_refresh_soundboard').isChecked()).toBe(false);
+        expect(await page.locator('#hb_refresh_stickers').isChecked()).toBe(false);
+        // Toggling a new opt-in action persists for the running heartbeat.
+        await page.locator('#hb_refresh_security_panel').check();
+        expect(await page.evaluate(() => localStorage.getItem('hb_refresh_security_panel'))).toBe('true');
     });
 
     test('heartbeat: new refresh helpers run without errors when enabled', async ({ page }) => {
@@ -86,9 +100,22 @@ test.describe('Heartbeat refresh options + reauth custom duration', () => {
             try { updateDmWaitingBanner(); } catch (e) { errors.push('waitingBanner: ' + e); }
             // refreshAll itself — no-op if WS isn't open, must never throw
             try { refreshAll(); } catch (e) { errors.push('refreshAll: ' + e); }
+            // New interval actions (PQ identity republish, admin client limits,
+            // security panel, soundboard): each must be callable and never throw.
+            try { await publishIdentityPqKeyIfNeeded(); } catch (e) { errors.push('pqIdentity: ' + e); }
+            try { await loadClientConfig(); } catch (e) { errors.push('clientConfig: ' + e); }
+            try { renderDevicesPanel(true); } catch (e) { errors.push('devicesQuiet: ' + e); }
+            try { if ((window as any)._load2FaStatus) await (window as any)._load2FaStatus(); } catch (e) { errors.push('twofaStatus: ' + e); }
+            try { if ((window as any)._loadKillSwitchStatus) await (window as any)._loadKillSwitchStatus(); } catch (e) { errors.push('killSwitchStatus: ' + e); }
+            try { if ((window as any)._loadSoundboardClips) await (window as any)._loadSoundboardClips(); } catch (e) { errors.push('soundboardClips: ' + e); }
             return errors;
         });
         expect(errs).toEqual([]);
+
+        // The security-panel status loaders live inside the settings closure;
+        // the heartbeat reaches them through these window handles.
+        expect(await page.evaluate(() => typeof (window as any)._load2FaStatus)).toBe('function');
+        expect(await page.evaluate(() => typeof (window as any)._loadKillSwitchStatus)).toBe('function');
 
         // The voice chip re-render hook is exposed on VoiceManager
         expect(await page.evaluate(() => !!(window.VoiceManager && window.VoiceManager.updateChannelChips))).toBe(true);
@@ -98,6 +125,66 @@ test.describe('Heartbeat refresh options + reauth custom duration', () => {
             localStorage.setItem('hb_refresh_servers', 'false');
         });
         expect(await page.evaluate(() => localStorage.getItem('hb_refresh_servers'))).toBe('false');
+    });
+
+    test('heartbeat: the new interval actions run on one tick', async ({ page }) => {
+        const ts = Date.now();
+        await registerUser(page, 'hb_tick_' + ts);
+        // The heartbeat only ticks while the socket is open.
+        await page.waitForFunction(() => (window as any).ws && (window as any).ws.readyState === 1, { timeout: 15000 });
+
+        // Enable the interval + every new opt-in action.
+        await page.evaluate(() => {
+            localStorage.setItem('key_heartbeat_interval', '15000');
+            ['hb_refresh_client_config', 'hb_refresh_security_panel', 'hb_refresh_soundboard', 'hb_refresh_stickers']
+                .forEach(id => localStorage.setItem(id, 'true'));
+        });
+
+        const counts = await page.evaluate(async () => {
+            const calls: Record<string, number> = {
+                config: 0, pq: 0, devices: 0, twofa: 0, killswitch: 0, soundboard: 0, sbDisabled: 0, stickers: 0,
+            };
+            // Stub every helper the new actions call, so one tick is observable
+            // without touching the network. refreshAll resolves these through
+            // window at call time, exactly like the real functions.
+            (window as any).loadClientConfig = async () => { calls.config++; };
+            (window as any).publishIdentityPqKeyIfNeeded = async () => { calls.pq++; };
+            (window as any).renderDevicesPanel = () => { calls.devices++; };
+            (window as any)._load2FaStatus = async () => { calls.twofa++; };
+            (window as any)._loadKillSwitchStatus = async () => { calls.killswitch++; };
+            (window as any)._loadSoundboardClips = async () => { calls.soundboard++; };
+            (window as any)._loadDisabledSoundboardUsers = async () => { calls.sbDisabled++; };
+
+            // Panels the guarded actions only touch while visible.
+            (document.getElementById('settings-modal') as HTMLElement).style.display = 'block';
+            (document.getElementById('soundboard-overlay') as HTMLElement).style.display = 'flex';
+
+            // Sticker panel: open it and land on the stickers tab so the interval
+            // action has something to refresh. Let the open-handler's async work
+            // finish before installing the counter.
+            (document.getElementById('sticker-btn') as HTMLElement).click();
+            await new Promise(r => setTimeout(r, 400));
+            const tab = document.querySelector('.sticker-tab[data-tab="stickers"]') as HTMLElement | null;
+            if (tab) tab.click();
+            await new Promise(r => setTimeout(r, 400));
+            calls.stickers = 0;
+            const originalRenderPanelTab = (window as any).renderPanelTab;
+            (window as any).renderPanelTab = (t: string) => { if (t === 'stickers') calls.stickers++; };
+
+            refreshAll();
+            await new Promise(r => setTimeout(r, 300));
+            (window as any).renderPanelTab = originalRenderPanelTab;
+            return calls;
+        });
+
+        expect(counts.pq, 'PQ identity republish').toBe(1);
+        expect(counts.config, 'client limits').toBe(1);
+        expect(counts.devices, 'devices list').toBe(1);
+        expect(counts.twofa, '2FA status').toBe(1);
+        expect(counts.killswitch, 'kill-switch status').toBe(1);
+        expect(counts.soundboard, 'soundboard clips').toBe(1);
+        expect(counts.sbDisabled, 'soundboard disabled list').toBe(1);
+        expect(counts.stickers, 'sticker grid').toBe(1);
     });
 
     test('reauth: custom 1-hour duration honored end-to-end', async ({ page }) => {

@@ -233,6 +233,37 @@ test.describe('release publishing', () => {
     expect(verify).not.toContain('find src-tauri/target -type f');
   });
 
+  // GitHub rewrites spaces in an uploaded asset's name to dots — built-in
+  // upload behavior, not a gh CLI quirk (cli/cli#10585, community discussion
+  // #60449). The Tauri bundles carry the product name "E2E Chat", so v0.2.45
+  // published `E2E.Chat_...` files while SHA256SUMS-windows-x64.txt listed
+  // `E2E Chat_...`: every hash matched but every NAME existed nowhere on the
+  // release, and the `sha256sum -c` line the release notes advertise failed on
+  // a pristine download. The workflow now normalizes the bundle names before
+  // the upload and before the list is written, so disk name, asset name and
+  // checksum name agree by construction — and tools/release-workflow-sim.sh
+  // proves it by executing both steps against a fake gh that applies GitHub's
+  // own substitution to every upload.
+  test('published asset names and checksum names are the same name', () => {
+    const [, raw] = WORKFLOWS[0];
+    const publishAt = raw.indexOf('- name: Publish release assets');
+    const checksumsAt = raw.indexOf('- name: Generate checksums');
+    expect(publishAt, 'the publisher is missing from release.yml').toBeGreaterThan(-1);
+    expect(checksumsAt).toBeGreaterThan(publishAt);
+    const publish = code(raw.slice(publishAt, checksumsAt));
+    // The same substitution GitHub performs, applied to the files themselves.
+    expect(publish).toContain("tr ' ()~:' '.....'");
+    expect(publish).toContain('mv "$f"');
+    // It must run before the upload list is built from the bundle tree —
+    // otherwise gh uploads the spaced names and GitHub dots them anyway.
+    expect(publish.indexOf("tr ' ()~:'")).toBeLessThan(publish.indexOf('files=('));
+    // ...and the checksum step must list what is on disk, never re-invent a
+    // name from a different source (that divergence is the bug above).
+    const sums = code(raw.slice(checksumsAt, raw.indexOf('- name: Attach checksums to release')));
+    expect(sums).toContain('basename "$f"');
+    expect(sums, 'the checksum step must not sanitize names itself').not.toContain('tr ');
+  });
+
   // These steps do not run until a tag is pushed, and a shell syntax error in
   // one of them fails the job with a bare exit code (job logs need
   // authentication even on this public repo) at the exact moment a release is

@@ -11,7 +11,7 @@ test('capture console errors from page load', async ({ page }) => {
     });
     page.on('pageerror', err => errors.push('PAGE: ' + err.message));
 
-    await page.goto(`${BASE}/test-secure-minimal.html`, { waitUntil: 'networkidle' });
+    await page.goto(`${BASE}/test-secure-minimal.html`, { waitUntil: 'domcontentloaded' });
 
     // Check status from the page itself - did the last script run?
     const status = await page.evaluate(() => {

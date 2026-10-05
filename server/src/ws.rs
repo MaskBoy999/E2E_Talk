@@ -51,10 +51,12 @@ impl WsRateLimiter {
     fn check_and_increment(&self, key: &str, max_attempts: u32, window: Duration) -> bool {
         let mut map = self.attempts.lock().unwrap();
         let now = Instant::now();
-        // Evict expired entries when map grows large to prevent unbounded memory growth
-        if map.len() > 1000 {
-            map.retain(|_, (_, first)| now.duration_since(*first) <= window);
-        }
+        // Same bounded-eviction rule as the HTTP limiters: dropping expired
+        // keys alone is not a bound — a flood of FRESH distinct keys (one per
+        // spoofed-adjacent source) keeps every entry young, and the map grows
+        // without limit. This is keyed by hashed client IPs from unauthenticated
+        // upgrade attempts, so that flood is exactly what to expect here.
+        crate::handlers::evict_stale_keys(&mut map, window, now);
         if let Some(&(count, first_attempt)) = map.get(key) {
             if now.duration_since(first_attempt) > window {
                 map.insert(key.to_string(), (1, now));
@@ -266,8 +268,17 @@ async fn voice_broadcast_server_presence(state: &Arc<AppState>, server_id: &str)
     }
 }
 
+/// Per-connection outbound queue depth. The queue must be BOUNDED: a client can
+/// stop reading its socket at any time, and with an unbounded channel every
+/// broadcast to that client would accumulate in server memory forever — a
+/// trivial remote OOM. At capacity the oldest undeliverable messages are
+/// DROPPED (try_send), which is the right trade for a realtime stream: the
+/// stale ones lose their value anyway, and the socket’s own error path removes
+/// a dead connection within one send.
+const WS_SEND_QUEUE_CAPACITY: usize = 1024;
+
 pub struct WsManager {
-    connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, Option<String>, mpsc::UnboundedSender<WsMessage>)>>,
+    connections: tokio::sync::RwLock<std::collections::HashMap<u64, (String, Option<String>, mpsc::Sender<WsMessage>)>>,
 }
 
 impl WsManager {
@@ -277,7 +288,7 @@ impl WsManager {
         }
     }
 
-    pub async fn add_connection(&self, user_id: String, device_id: Option<String>, sender: mpsc::UnboundedSender<WsMessage>) -> u64 {
+    pub async fn add_connection(&self, user_id: String, device_id: Option<String>, sender: mpsc::Sender<WsMessage>) -> u64 {
         // Remove any existing connection for this device
         if let Some(ref dev_id) = device_id {
             let mut conns = self.connections.write().await;
@@ -301,7 +312,7 @@ impl WsManager {
         let mut ids = Vec::new();
         for (id, (uid, _did, sender)) in conns.iter() {
             if uid == user_id {
-                let _ = sender.send(WsMessage::Text(message.to_string()));
+                let _ = sender.try_send(WsMessage::Text(message.to_string()));
                 ids.push(*id);
             }
         }
@@ -320,7 +331,7 @@ impl WsManager {
         let conns = self.connections.read().await;
         for (uid, did, sender) in conns.values() {
             if uid == user_id && did.as_deref() == Some(device_id) {
-                let _ = sender.send(WsMessage::Text(message.to_string()));
+                let _ = sender.try_send(WsMessage::Text(message.to_string()));
             }
         }
     }
@@ -329,7 +340,7 @@ impl WsManager {
         let conns = self.connections.read().await;
         for (uid, _did, sender) in conns.values() {
             if user_ids.contains(uid) {
-                let _ = sender.send(WsMessage::Text(message.to_string()));
+                let _ = sender.try_send(WsMessage::Text(message.to_string()));
             }
         }
     }
@@ -340,7 +351,7 @@ impl WsManager {
         let conns = self.connections.read().await;
         for (uid, _did, sender) in conns.values() {
             if user_ids.contains(uid) {
-                let _ = sender.send(WsMessage::Binary(data.clone()));
+                let _ = sender.try_send(WsMessage::Binary(data.clone()));
             }
         }
     }
@@ -355,7 +366,7 @@ impl WsManager {
             if user_ids.contains(uid) {
                 let is_excluded = !exclude_device.is_empty() && did.as_deref() == Some(exclude_device);
                 if !is_excluded {
-                    let _ = sender.send(WsMessage::Text(message.to_string()));
+                    let _ = sender.try_send(WsMessage::Text(message.to_string()));
                 }
             }
         }
@@ -364,7 +375,7 @@ impl WsManager {
     pub async fn broadcast_to_server(&self, _server_id: &str, message: &str) {
         let conns = self.connections.read().await;
         for (_conn_id, _did, sender) in conns.values() {
-            let _ = sender.send(WsMessage::Text(message.to_string()));
+            let _ = sender.try_send(WsMessage::Text(message.to_string()));
         }
     }
 
@@ -383,7 +394,7 @@ impl WsManager {
     pub async fn broadcast_all(&self, message: &str) {
         let conns = self.connections.read().await;
         for (_, _, sender) in conns.values() {
-            let _ = sender.send(WsMessage::Text(message.to_string()));
+            let _ = sender.try_send(WsMessage::Text(message.to_string()));
         }
     }
 }
@@ -736,7 +747,7 @@ async fn handle_socket(
         }
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<WsMessage>();
+    let (tx, mut rx) = mpsc::channel::<WsMessage>(WS_SEND_QUEUE_CAPACITY);
 
     let conn_id = state.ws_manager.add_connection(user_id.clone(), device_id.clone(), tx).await;
 
@@ -3691,5 +3702,55 @@ pub async fn voice_remove_user_all_for_device(state: &Arc<AppState>, user_id: &s
     };
     for rid in room_ids {
         voice_remove_from_room(state, &rid, user_id, false).await;
+    }
+}
+
+#[cfg(test)]
+mod send_queue_tests {
+    use super::*;
+
+    /// A client that stops reading must never grow the server's memory. The
+    /// per-connection queue is bounded, so overflow is dropped by try_send —
+    /// the unbounded channel this replaced buffered every broadcast forever
+    /// for a stalled client, which is a trivial remote OOM.
+    #[tokio::test]
+    async fn a_stalled_client_drops_messages_instead_of_buffering_them() {
+        let mgr = WsManager::new();
+        let (tx, mut rx) = mpsc::channel(WS_SEND_QUEUE_CAPACITY);
+        let conn = mgr.add_connection("u1".to_string(), None, tx).await;
+
+        for i in 0..(WS_SEND_QUEUE_CAPACITY + 50) {
+            mgr.broadcast_to_users(&["u1".to_string()], &format!("m{}", i)).await;
+        }
+
+        // Exactly the capacity was queued; everything past it was dropped, not
+        // buffered. (No consumer ran, so the channel can never have drained.)
+        let mut queued = 0;
+        while rx.try_recv().is_ok() {
+            queued += 1;
+        }
+        assert_eq!(queued, WS_SEND_QUEUE_CAPACITY);
+
+        // Broadcasting to a disconnected client is a silent no-op, not a panic.
+        mgr.remove_connection(conn).await;
+        mgr.broadcast_to_users(&["u1".to_string()], "after").await;
+    }
+
+    /// The WS auth limiter sees unauthenticated upgrade attempts keyed by
+    /// hashed client IP. Expired-only eviction let a flood of FRESH distinct
+    /// keys grow the map forever; the shared bounded eviction must cap it.
+    #[test]
+    fn a_flood_of_fresh_ws_keys_is_capped() {
+        let rl = WsRateLimiter { attempts: Mutex::new(HashMap::new()) };
+        let window = Duration::from_secs(60);
+        for i in 0..(crate::handlers::RATE_LIMITER_TRIM_AT + 100) {
+            rl.check_and_increment(&format!("ws-ip-{}", i), 5, window);
+        }
+        let len = rl.attempts.lock().unwrap().len();
+        assert!(
+            len <= crate::handlers::RATE_LIMITER_TRIM_AT + 64,
+            "ws limiter kept {} keys",
+            len
+        );
     }
 }

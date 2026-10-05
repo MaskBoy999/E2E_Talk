@@ -51,6 +51,18 @@ envelope, escrow and login layers are hybrid in the shipped client and server;
 the exact rollout coverage and what remains (DM/message envelope call sites,
 voice frame keys, ratchet/MLS) is tracked per section and in §2.
 
+**Update 2026-10-05 — registration refuses a classical-only identity key.**
+`POST /api/register` now rejects an `identity_public_key` that is not a 32-byte
+X25519 key, and rejects one that arrives without a 1184-byte ML-KEM-768
+`identity_pq_public_key`. An account that has an envelope key at all is
+therefore hybrid-addressable by construction: senders never silently fall back
+to the v1 X25519-only envelope for a new account. Test:
+`tests/pq-envelopes.spec.ts` → *a classical-only identity key is refused at
+registration*. Accounts that predate the rollout are the only remaining v1
+holdouts — their next client load republishes the identity key via
+`/api/identity/pq-key`, and a password change re-keys the login half to
+Ed25519 + ML-DSA-65.
+
 ---
 
 ## 1. Inventory: what is hidden, and by what

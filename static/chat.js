@@ -1619,10 +1619,12 @@ function parseDbTime(str) {
     return isNaN(t) ? null : t;
 }
 
-function renderDevicesPanel() {
+// `quiet` skips the "Loading devices…" flash — the refresh heartbeat uses it so
+// a periodic tick never blanks the list while the user is reading it.
+function renderDevicesPanel(quiet) {
     var listEl = document.getElementById('devices-list');
     if (!listEl) return;
-    listEl.innerHTML = '<div class="session-log-empty">Loading devices…</div>';
+    if (!quiet) listEl.innerHTML = '<div class="session-log-empty">Loading devices…</div>';
     fetch('/api/auth/sessions', { headers: { 'Authorization': 'Bearer ' + token() } })
         .then(function (r) { return r.json(); })
         .then(function (data) {
@@ -8602,7 +8604,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // refreshAll(): the default-on group runs unless explicitly toggled off
     // (!== 'false'), the opt-in group only runs once the user enables it
     // (=== 'true'). The checkbox state mirrors the ACTUAL runtime behavior.
-    var refreshCheckboxes = ['hb_refresh_keys', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_messages'];
+    var refreshCheckboxes = ['hb_refresh_keys', 'hb_refresh_pq_identity', 'hb_refresh_profiles', 'hb_refresh_members', 'hb_refresh_messages'];
     refreshCheckboxes.forEach(function(id) {
         var cb = document.getElementById(id);
         if (!cb) return;
@@ -8615,7 +8617,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Opt-in heartbeat actions: heavier refreshes that rebuild DOM sections
     // (DM sidebar, server strip) or hit extra endpoints. Disabled until the
     // user explicitly enables them.
-    var optInRefreshCheckboxes = ['hb_refresh_dms', 'hb_refresh_servers', 'hb_refresh_friend_requests', 'hb_refresh_presence', 'hb_refresh_voice', 'hb_refresh_channels'];
+    var optInRefreshCheckboxes = ['hb_refresh_dms', 'hb_refresh_servers', 'hb_refresh_friend_requests', 'hb_refresh_presence', 'hb_refresh_voice', 'hb_refresh_channels',
+        'hb_refresh_client_config', 'hb_refresh_security_panel', 'hb_refresh_soundboard', 'hb_refresh_stickers'];
     optInRefreshCheckboxes.forEach(function(id) {
         var cb = document.getElementById(id);
         if (!cb) return;
@@ -9083,6 +9086,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (disable2faBtn) disable2faBtn.style.display = on ? '' : 'none';
         } catch (_) {}
     }
+    // The refresh heartbeat re-reads this while the settings modal is open (it
+    // cannot reach into this closure), so a change made on another device shows
+    // up without a reload.
+    window._load2FaStatus = load2FaStatus;
 
     // 2FA flows are security-sensitive: these modals are deliberately NOT
     // dismissible by clicking the backdrop or pressing Escape — the only way
@@ -9337,6 +9344,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (ksRemoveBtn) ksRemoveBtn.style.display = on ? '' : 'none';
         } catch (_) {}
     }
+    // Exposed for the refresh heartbeat (see refreshAll) — same reason as
+    // window._load2FaStatus above.
+    window._loadKillSwitchStatus = loadKillSwitchStatus;
     if (ksSetBtn) {
         ksSetBtn.addEventListener('click', function () {
             var open = ksSetSection.style.display !== 'block';
@@ -14303,6 +14313,54 @@ function refreshAll() {
             }
         }
         retryFailedStickers();
+    }
+
+    // 11. Re-publish our PQ identity key if the server doesn't have it yet —
+    //     default-on. The publish at load is best-effort; retrying on the
+    //     heartbeat is how an account that failed once (offline blip, restarted
+    //     server) still ends up with hybrid v2 envelopes instead of silently
+    //     staying v1-only forever. Idempotent: one GET, and a POST only when the
+    //     stored key differs (see publishIdentityPqKeyIfNeeded).
+    if (localStorage.getItem('hb_refresh_pq_identity') !== 'false' && user) {
+        publishIdentityPqKeyIfNeeded();
+    }
+
+    // 12. Refresh the admin-panel-driven client limits (max upload size, icon
+    //     slot cap) — opt-in. Without this the page keeps whatever it read at
+    //     load until a full reload.
+    if (localStorage.getItem('hb_refresh_client_config') === 'true') {
+        loadClientConfig();
+    }
+
+    // 13. Refresh the security panel while the settings modal is open — opt-in.
+    //     Signed-in devices, 2FA status and kill-switch status are all
+    //     server-persisted and can change from another device; a quiet device
+    //     re-render avoids the "Loading devices…" flash on every tick.
+    if (localStorage.getItem('hb_refresh_security_panel') === 'true' && user) {
+        var _settingsModal = document.getElementById('settings-modal');
+        if (_settingsModal && _settingsModal.style.display !== 'none') {
+            try { renderDevicesPanel(true); } catch (_) {}
+            if (window._load2FaStatus) { try { window._load2FaStatus(); } catch (_) {} }
+            if (window._loadKillSwitchStatus) { try { window._loadKillSwitchStatus(); } catch (_) {} }
+        }
+    }
+
+    // 14. Refresh the soundboard clip list while the overlay is open — opt-in.
+    //     Clips are per-account and identity-encrypted; an upload or delete from
+    //     another device otherwise only shows up after reopening the overlay.
+    if (localStorage.getItem('hb_refresh_soundboard') === 'true') {
+        var _sbOverlayEl = document.getElementById('soundboard-overlay');
+        if (_sbOverlayEl && _sbOverlayEl.style.display !== 'none') {
+            if (window._loadSoundboardClips) { try { window._loadSoundboardClips(); } catch (_) {} }
+            if (window._loadDisabledSoundboardUsers) { try { window._loadDisabledSoundboardUsers(); } catch (_) {} }
+        }
+    }
+
+    // 15. Refresh the custom-sticker grid while the sticker panel is on the
+    //     stickers tab — opt-in. 'upload' is deliberately skipped: re-rendering
+    //     it would wipe a half-filled upload form.
+    if (localStorage.getItem('hb_refresh_stickers') === 'true' && stickerPanelOpen && activePanelTab === 'stickers') {
+        try { renderPanelTab('stickers'); } catch (_) {}
     }
 }
 

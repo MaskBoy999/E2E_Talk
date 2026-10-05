@@ -172,14 +172,24 @@ test.describe('saveKeyBlobToServer console.error logging', () => {
         const collector = collectConsoleErrors(page);
         collector.start();
         try {
-            await page.evaluate(() => {
+            await page.evaluate(async () => {
                 (window as any).__DEV_LOGS = true;
                 var origBuild = E2ECrypto.buildKeyBundle;
                 E2ECrypto.buildKeyBundle = function() {
                     throw new Error('deliberate buildKeyBundle failure');
                 };
-                saveKeyBlobToServer();
-                E2ECrypto.buildKeyBundle = origBuild;
+                try {
+                    saveKeyBlobToServer();
+                    // When no blob revision is known yet, saveKeyBlobToServer()
+                    // first probes /api/key-blob and re-enters itself from the
+                    // fetch callback — so the throwing bundle is only reached
+                    // asynchronously. Keep the stub installed until that
+                    // re-entry has run (was: restore immediately, making the
+                    // stub a no-op on a freshly logged-in page).
+                    await new Promise(r => setTimeout(r, 1500));
+                } finally {
+                    E2ECrypto.buildKeyBundle = origBuild;
+                }
             });
         } finally {
             collector.stop();

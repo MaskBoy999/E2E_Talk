@@ -2060,10 +2060,13 @@ html.select-text .doc-view-pdf .textLayer {
 /* ===== App-styled dropdowns =====
    .settings-select covers the settings selects (position, timestamps, read
    receipts); select.modal-input covers the security/voice dropdowns (session
-   length, heartbeat, video quality, black-feed watchdog). Both replace the
-   native grey control with a themed select + custom chevron. */
+   length, heartbeat, video quality, black-feed watchdog); select.settings-field
+   covers the settings tab's own selects (audio quality, captions, resolution,
+   watchdog, session length, heartbeat), which carry that class instead. All of
+   them replace the native grey control with a themed select + custom chevron. */
 .settings-select,
-select.modal-input {
+select.modal-input,
+select.settings-field {
     background-color: var(--bg-secondary);
     border: 1px solid var(--bg-border);
     color: var(--text-primary);
@@ -2079,11 +2082,13 @@ select.modal-input {
     max-width: 100%;
 }
 .settings-select:hover,
-select.modal-input:hover {
+select.modal-input:hover,
+select.settings-field:hover {
     border-color: var(--accent);
 }
 .settings-select:focus,
-select.modal-input:focus {
+select.modal-input:focus,
+select.settings-field:focus {
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);

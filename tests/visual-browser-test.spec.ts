@@ -73,7 +73,7 @@ test.describe('Visual 2-user test', () => {
                 body: JSON.stringify({ name: 'Voice', type: 'voice' })
             });
         }, sid);
-        await p1.reload({ waitUntil: 'networkidle' }); await waitWs(p1); await p1.waitForTimeout(3000);
+        await p1.reload({ waitUntil: 'domcontentloaded' }); await waitWs(p1); await p1.waitForTimeout(3000);
         await ss(p1, 'A-server-created');
 
         console.log(`Server: ${sid}, Invite: ${invite.substring(0, 8)}`);
@@ -96,7 +96,7 @@ test.describe('Visual 2-user test', () => {
         console.log('Join result:', JSON.stringify(jr));
 
         // Reload to trigger loadServers()
-        await p2.reload({ waitUntil: 'networkidle' }); await waitWs(p2); await p2.waitForTimeout(5000);
+        await p2.reload({ waitUntil: 'domcontentloaded' }); await waitWs(p2); await p2.waitForTimeout(5000);
 
         // CHECK: User B server icons
         const bIcons = await p2.evaluate(() => {

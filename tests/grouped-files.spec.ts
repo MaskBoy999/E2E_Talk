@@ -71,10 +71,26 @@ await page.click('#register-form button[type="submit"]');
     return { token: body.token, user: body.user, serverId: server.id, channelId, inviteCode };
 }
 
+// The chat UI (and chat.js) only loads for a signed-in session — a bare visit
+// to /index.html redirects to login.html, where none of the grouped-file
+// globals exist. Source-surface checks therefore need a real account.
+async function registerLight(page: any): Promise<string> {
+    const username = 'gf_light_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    await page.goto(`${BASE}/login.html`);
+    await page.waitForSelector('#show-register');
+    await page.click('#show-register');
+    await page.fill('#register-username', username);
+    await page.fill('#register-password', 'GroupF!les2026x');
+    await page.fill('#register-confirm-password', 'GroupF!les2026x');
+    await page.click('#register-form button[type="submit"]');
+    await page.waitForURL('**/index.html', { timeout: 15000 });
+    return username;
+}
+
 test.describe('Grouped File Uploads', () => {
 
-    test('chat.js v11 is loaded (grouped files + inline audio)', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
+    test('chat.js is loaded (grouped files + inline audio)', async ({ page }) => {
+        await registerLight(page);
         const version = await page.evaluate(() => {
             // Check console for version string by looking at the script
             const scripts = document.querySelectorAll('script');
@@ -87,16 +103,14 @@ test.describe('Grouped File Uploads', () => {
     });
 
     test('uploadFileToServer function exists (replaced uploadSingleFile)', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(2000);
+        await registerLight(page);
         // Verify page loads successfully (function is internal, not global)
         const hasMsgList = await page.locator('#message-list').isVisible();
         expect(hasMsgList).toBeTruthy();
     });
 
     test('buildMultiFileCardHtml function exists', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(2000);
+        await registerLight(page);
         // Verify page loads (function is internal, not global)
         const hasMsgList = await page.locator('#message-list').isVisible();
         expect(hasMsgList).toBeTruthy();
@@ -106,7 +120,9 @@ test.describe('Grouped File Uploads', () => {
         const { } = await registerAndSetupServer(page);
 
         const fileChooserPromise = page.waitForEvent('filechooser');
+        // The attach button opens a popup menu; the file picker is the "upload" item.
         await page.click('#attach-btn');
+        await page.click('.attach-popup-item[data-action="upload"]');
         const fileChooser = await fileChooserPromise;
 
         await fileChooser.setFiles([
@@ -387,8 +403,7 @@ test.describe('Grouped File Uploads', () => {
     });
 
     test('buildMultiFileCardHtml generates correct HTML structure', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(1000);
+        await registerLight(page);
 
         const html = await page.evaluate(() => {
             return buildMultiFileCardHtml([
@@ -402,7 +417,7 @@ test.describe('Grouped File Uploads', () => {
         expect(html).toContain('msg-gallery-prev');
         expect(html).toContain('msg-gallery-next');
         expect(html).toContain('msg-gallery-counter');
-        expect(html).toContain('2 / 2');
+        expect(html).toContain('1 / 2'); // counter renders the initial position, not the last index
         expect(html).toContain('msg-gallery-items');
         expect(html).toContain('msg-gallery-strip');
         expect(html).toContain('a.png');
@@ -410,8 +425,7 @@ test.describe('Grouped File Uploads', () => {
     });
 
     test('buildMultiFileCardHtml with single file returns single card', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(1000);
+        await registerLight(page);
 
         const html = await page.evaluate(() => {
             return buildMultiFileCardHtml([
@@ -425,8 +439,7 @@ test.describe('Grouped File Uploads', () => {
     });
 
     test('empty file list returns empty string', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(1000);
+        await registerLight(page);
 
         const html = await page.evaluate(() => buildMultiFileCardHtml([]));
         expect(html).toBe('');
@@ -459,8 +472,7 @@ test.describe('Grouped File Uploads', () => {
     });
 
     test('appendMessage handles both type:file and type:files', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(1000);
+        await registerLight(page);
 
         const handlesBoth = await page.evaluate(() => {
             const src = appendMessage.toString();
@@ -470,8 +482,7 @@ test.describe('Grouped File Uploads', () => {
     });
 
     test('appendDmMessage handles both type:file and type:files', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(1000);
+        await registerLight(page);
 
         const handlesBoth = await page.evaluate(() => {
             const src = appendDmMessage.toString();
@@ -481,8 +492,7 @@ test.describe('Grouped File Uploads', () => {
     });
 
     test('gallery navigation event delegation is registered', async ({ page }) => {
-        await page.goto(`${BASE}/index.html`);
-        await page.waitForTimeout(1000);
+        await registerLight(page);
 
         const hasDelegation = await page.evaluate(() => {
             // Check that the message-list has click listeners for gallery nav

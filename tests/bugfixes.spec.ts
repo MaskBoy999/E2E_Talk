@@ -140,7 +140,7 @@ test.describe('Bug Fixes', () => {
         }, { sid: serverIds, tok: token });
 
         // Reload to get fresh state
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await waitForWs(page);
         await page.waitForTimeout(1500);
 
@@ -401,7 +401,7 @@ test.describe('Bug Fixes', () => {
         expect(joinResult.ok).toBe(true);
 
         // Reload and check server list
-        await page2.reload({ waitUntil: 'networkidle' });
+        await page2.reload({ waitUntil: 'domcontentloaded' });
         await waitForWs(page2);
         await page2.waitForTimeout(3000);
 

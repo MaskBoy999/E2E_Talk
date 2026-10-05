@@ -628,7 +628,7 @@ and you never have to trust the download blindly:
 sha256sum -c SHA256SUMS-linux-x64.txt
 
 # Windows PowerShell
-Get-FileHash .\E2E.Chat_0.2.44_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\E2E.Chat_0.2.46_x64-setup.exe -Algorithm SHA256
 ```
 
 ### First launch (all platforms)

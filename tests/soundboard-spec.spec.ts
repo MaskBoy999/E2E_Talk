@@ -162,6 +162,43 @@ test.describe('Soundboard temp-play endpoint', () => {
         expect(result.ok).toBe(true);
     });
 
+    // Server-side memory is the resource at stake, not playback: before the
+    // caps, one authenticated account could park 64 MiB bodies in the
+    // in-memory temp-play map for 15 minutes (and write 64 MiB "clips" to the
+    // DB). Both endpoints must refuse an audio blob over 8 MiB with 413.
+    test('T6: oversized soundboard audio is refused instead of stored', async ({ page }) => {
+        const u = unique('tpbig');
+        await register(page, u);
+        await waitForWs(page);
+        const result = await page.evaluate(async () => {
+            const token = localStorage.getItem('token');
+            const h = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+            // 11,184,900 base64 chars ≈ 8.4 MiB decoded — just over the cap,
+            // without materializing the bytes twice in the page.
+            const oversized = 'A'.repeat(11_184_900);
+            const temp = await fetch('/api/soundboard/temp-play', {
+                method: 'POST', headers: h, body: JSON.stringify({ audio: oversized }),
+            });
+            const tempBody = await temp.json().catch(() => ({}));
+            const clip = await fetch('/api/soundboard', {
+                method: 'POST', headers: h,
+                body: JSON.stringify({
+                    server_id: '_global', name: 'oversized',
+                    encrypted_audio: oversized, audio_nonce: 'AAAA', duration_ms: 1000,
+                }),
+            });
+            const clipBody = await clip.json().catch(() => ({}));
+            return {
+                tempStatus: temp.status, tempError: tempBody.error || '',
+                clipStatus: clip.status, clipError: clipBody.error || '',
+            };
+        });
+        expect(result.tempStatus, 'temp-play must refuse >8 MiB').toBe(413);
+        expect(result.tempError).toContain('too large');
+        expect(result.clipStatus, 'clip upload must refuse >8 MiB').toBe(413);
+        expect(result.clipError).toContain('too large');
+    });
+
     test('T2: stop clears the token from server memory', async ({ page }) => {
         test.setTimeout(150000);
         const u = unique('tpc');

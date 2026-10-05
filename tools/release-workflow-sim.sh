@@ -21,6 +21,12 @@
 #      just before the Arch download must republish it, or makepkg 404s.
 #   5. it cannot be republished -> LOUD failure naming the root cause, instead
 #      of a release whose assets 404 for every anonymous visitor.
+#   6. the bundles carry the product name ("E2E Chat"), which GitHub rewrites
+#      to dots on upload (cli/cli#10585) — the on-disk name, the published
+#      asset name and the SHA256SUMS entry must therefore all be the dotted
+#      one, or `sha256sum -c` fails on a pristine download (v0.2.45 shipped
+#      exactly that). The fake gh applies GitHub's substitution to every
+#      upload and the checksum list is verified against what it recorded.
 #
 # Usage: bash tools/release-workflow-sim.sh
 set -u
@@ -33,9 +39,12 @@ bin="$work/bin"
 mkdir -p "$bin" "$steps"
 
 node "$root/tools/extract-workflow-steps.mjs" "$root/.github/workflows/release.yml" "$steps" \
-  "Create release" "Publish release assets" > /dev/null || {
+  "Create release" "Publish release assets" "Generate checksums" "Attach checksums to release" > /dev/null || {
   echo "could not extract the release steps"; exit 1;
 }
+# `${{ matrix.label }}` is expanded by GitHub before bash ever runs; the
+# checksum step is executed here from a Linux-shaped run.
+sed 's/\${{ matrix.label }}/linux-x64/g' "$steps/generate-checksums.sh" > "$work/generate-checksums.sh"
 
 # ---------------------------------------------------------------------------
 # A fake `gh` that keeps its state in $FAKE_STATE. DRAFT_MODE drives when the
@@ -90,7 +99,17 @@ case "$cmd" in
     if [ "${SCENARIO:-}" = edit_fails ]; then echo "Resource not accessible by integration" >&2; exit 1; fi
     echo never > "$S/draft_mode"; echo false > "$S/draft"
     ;;
-  "release upload") bump uploads ;;
+  "release upload")
+    bump uploads
+    # GitHub's own upload sanitizes names — spaces (and a few other
+    # characters) become dots. Record what the RELEASE would show, not the
+    # name on disk, so a workflow that forgets to normalize is caught here.
+    for a in "$@"; do
+      [ -f "$a" ] || continue
+      b="${a##*/}"
+      printf '%s\n' "$(printf '%s' "$b" | tr ' ()~:' '.....')" >> "$S/assets"
+    done
+    ;;
   *) echo "fake gh: unexpected call: $*" >&2; exit 9 ;;
 esac
 exit 0
@@ -117,7 +136,7 @@ run() { # <scenario> <script>
   FAKE_STATE="$work/state"
   rm -rf "$FAKE_STATE"; mkdir -p "$FAKE_STATE/tmp"
   echo "${DRAFT_MODE:-never}" > "$FAKE_STATE/draft_mode"
-  for f in view create_calls created edit_calls uploads; do : > "$FAKE_STATE/$f"; done
+  for f in view create_calls created edit_calls uploads assets; do : > "$FAKE_STATE/$f"; done
   [ "${PRE_EXISTS:-0}" = 1 ] && touch "$FAKE_STATE/exists"
   export FAKE_STATE SCENARIO="$1"
   out=$(GITHUB_REF_NAME=v0.2.35 GITHUB_REPOSITORY=MaskBoy999/E2E_Talk RUNNER_TEMP="$FAKE_STATE/tmp" \
@@ -172,6 +191,66 @@ run edit_fails "$steps/publish-release-assets.sh"
 check "non-zero exit" "$rc" 1
 check "names cli/cli#8458" "$(echo "$out" | grep -c 'cli/cli#8458')" 1
 check "annotated" "$(echo "$out" | grep -c '::error::')" 1
+
+echo "=== publish-assets + checksums: on-disk, published and checksum names agree ==="
+# GitHub rewrites spaces to dots on upload (cli/cli#10585), so the release
+# shows `E2E.Chat_...` while the built file is `E2E Chat_...`. The checksum
+# list is written from the ON-DISK name, which made v0.2.45's
+# `sha256sum -c SHA256SUMS-<platform>.txt` fail on a pristine download. The
+# fake gh above applies GitHub's own substitution to every upload, so if the
+# workflow stops normalizing the bundle names this scenario fails here.
+sandbox="$work/e2e"
+rm -rf "$sandbox"
+mkdir -p "$sandbox"/src-tauri/target/release/bundle/{nsis,msi,appimage,deb,rpm}
+mkdir -p "$sandbox/dist" "$sandbox/verify"
+for spec in \
+  "nsis/E2E Chat_0.2.35_x64-setup.exe" \
+  "msi/E2E Chat_0.2.35_x64_en-US.msi" \
+  "appimage/E2E Chat_0.2.35_amd64.AppImage" \
+  "deb/E2E Chat_0.2.35_amd64.deb" \
+  "rpm/E2E Chat-0.2.35-1.x86_64.rpm"; do
+  printf 'bundle %s\n' "$spec" > "$sandbox/src-tauri/target/release/bundle/$spec"
+done
+printf 'arch package\n' > "$sandbox/dist/e2e-chat-bin-0.2.35-1-x86_64.pkg.tar.zst"
+
+FAKE_STATE="$work/state"
+rm -rf "$FAKE_STATE"; mkdir -p "$FAKE_STATE/tmp"
+echo never > "$FAKE_STATE/draft_mode"; touch "$FAKE_STATE/exists"
+for f in view create_calls created edit_calls uploads assets; do : > "$FAKE_STATE/$f"; done
+export FAKE_STATE SCENARIO=""
+(cd "$sandbox" && GITHUB_REF_NAME=v0.2.35 GITHUB_REPOSITORY=MaskBoy999/E2E_Talk \
+  RUNNER_TEMP="$FAKE_STATE/tmp" PATH="$bin:$PATH" bash "$steps/publish-release-assets.sh" > /dev/null 2>&1)
+pub_rc=$?
+(cd "$sandbox" && GITHUB_WORKSPACE="$sandbox" GITHUB_REF_NAME=v0.2.35 \
+  bash "$work/generate-checksums.sh" > /dev/null 2>&1)
+sum_rc=$?
+(cd "$sandbox" && GITHUB_REF_NAME=v0.2.35 GITHUB_REPOSITORY=MaskBoy999/E2E_Talk \
+  RUNNER_TEMP="$FAKE_STATE/tmp" PATH="$bin:$PATH" bash "$steps/attach-checksums-to-release.sh" > /dev/null 2>&1)
+attach_rc=$?
+sums="$sandbox/SHA256SUMS-linux-x64.txt"
+check "publish exit code" "$pub_rc" 0
+check "checksum exit code" "$sum_rc" 0
+check "attach exit code" "$attach_rc" 0
+check "bundles renamed before upload" "$(find "$sandbox/src-tauri/target/release/bundle" -name '* *' | wc -l | tr -d ' ')" 0
+check "published names carry no spaces" "$(grep -c ' ' "$FAKE_STATE/assets" | tr -d ' ')" 0
+check "checksum file lists all six artifacts" "$([ -f "$sums" ] && wc -l < "$sums" | tr -d ' ')" 6
+missing=0
+while IFS= read -r line; do
+  name="${line#*  }"
+  grep -qxF "$name" "$FAKE_STATE/assets" || { missing=$((missing + 1)); echo "  no such published asset: $name"; }
+done < "$sums"
+check "every checksum names a published asset" "$missing" 0
+check "dotted .deb (the PKGBUILD's download name) published" "$(grep -cxF 'E2E.Chat_0.2.35_amd64.deb' "$FAKE_STATE/assets")" 1
+check "both uploaders ran" "$(r uploads)" 2
+# The verification line the release notes advertise, run for real: copy the
+# published (dotted) files into one directory, as a downloader would have
+# them, and check the list against those bytes.
+find "$sandbox/src-tauri/target/release/bundle" -type f \
+  \( -name '*.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) \
+  -exec cp {} "$sandbox/verify/" \;
+cp "$sandbox/dist/e2e-chat-bin-0.2.35-1-x86_64.pkg.tar.zst" "$sandbox/verify/"
+check "sha256sum -c verifies the downloaded set" \
+  "$(cd "$sandbox/verify" && sha256sum -c "$sums" >/dev/null 2>&1 && echo ok || echo fail)" "ok"
 
 echo
 echo "release-workflow-sim: passed=$pass failed=$fail"

@@ -149,6 +149,9 @@ test.describe('Scheduled Messages', () => {
     });
 
     test('Scheduler fires and sends encrypted message', async ({ page }) => {
+        // This test deliberately waits ~70s for a 65s schedule to fire, which is
+        // longer than the suite-wide 45s default — raise only this test's budget.
+        test.setTimeout(150000);
         const ts = unique('sched');
         await register(page, ts);
         await createServerAndChannel(page);
@@ -199,7 +202,7 @@ test.describe('Scheduled Messages', () => {
         await openScheduleModal(page);
         await scheduleMessage(page, 'Persist', 3600000);
 
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         // After reload, page may land on index.html or redirect to login.html
         const url = page.url();
         if (url.includes('login')) {

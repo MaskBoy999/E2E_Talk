@@ -235,13 +235,18 @@ test.describe('Disappearing messages (server-enforced TTL + shredding)', () => {
         });
         expect(messageId).toBeTruthy();
 
-        // The banner label ticks down (e.g. 0:04 → 0:03), not frozen.
+        // The banner label ticks down (e.g. 0:04 → 0:03), not frozen. Wait for
+        // a real change instead of a fixed 1.1 s sleep: the shared ticker runs
+        // every 250 ms but Chromium throttles timers on a backgrounded page, so
+        // a single sleep can land between two ticks and read the same label.
         const label1 = await pageA.evaluate(() => (document.querySelector('.disappearing-timer') as HTMLElement)?.textContent || '');
-        await pageA.waitForTimeout(1100);
-        const label2 = await pageA.evaluate(() => (document.querySelector('.disappearing-timer') as HTMLElement)?.textContent || '');
         expect(label1).toMatch(/^0:\d+$/);
-        expect(label2).toMatch(/^0:\d+$/);
-        expect(label2).not.toBe(label1);
+        await pageA.waitForFunction((first) => {
+            const el = document.querySelector('.disappearing-timer') as HTMLElement | null;
+            return !!el && el.textContent !== first;
+        }, label1, { timeout: 8000 }).catch(() => {});
+        const label2 = await pageA.evaluate(() => (document.querySelector('.disappearing-timer') as HTMLElement)?.textContent || '');
+        expect(label2, 'the countdown ticked down (or the message expired)').not.toBe(label1);
 
         // After the TTL + sweep, the row is GONE from the DB (ciphertext shredded)
         // and both clients removed the message live via message_expired. The server

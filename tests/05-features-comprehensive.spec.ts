@@ -15,7 +15,10 @@ test.describe('5 Features — DM Search, Channel Search, Infinite Scroll, Notifi
         await page.fill('#register-confirm-password', 'password123');
         await page.click('#register-form button[type="submit"]');
         await page.waitForURL('**/index.html', { timeout: 15000 });
-        await page.waitForLoadState('networkidle');
+        // App-ready signal. NOT networkidle: pages keep their own
+        // fire-and-forget requests listed as in-flight in Chromium (see
+        // SECURITY_REVIEW_FIXES.md §8), so networkidle can never settle here.
+        await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 20000 });
         await page.waitForTimeout(1000);
         return await page.evaluate(() => ({
             token: localStorage.getItem('token'),
@@ -291,7 +294,10 @@ test.describe('5 Features — DM Search, Channel Search, Infinite Scroll, Notifi
 
         // Reload the page so the UI picks up the server created via API
         await page.reload();
-        await page.waitForLoadState('networkidle');
+        // App-ready signal. NOT networkidle: pages keep their own
+        // fire-and-forget requests listed as in-flight in Chromium (see
+        // SECURITY_REVIEW_FIXES.md §8), so networkidle can never settle here.
+        await page.waitForSelector('#settings-btn', { state: 'visible', timeout: 20000 });
         await page.waitForTimeout(3000);
 
         // Now click on the server to see channels

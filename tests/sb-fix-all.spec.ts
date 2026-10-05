@@ -1,7 +1,9 @@
 import { test, expect } from '@playwright/test';
 
 const BASE = 'https://localhost:3443';
-const PASSWORD = '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000';
+// Must satisfy the client-side strength floor in auth.js (score > 1: at least
+// two character classes, not a single repeated character).
+const PASSWORD = 'Sb!Fix_2026_beta';
 
 let counter = 0;
 function unique(prefix: string) { return `${prefix}_${Date.now().toString(36)}_${(counter++).toString(36)}`; }

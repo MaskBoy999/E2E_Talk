@@ -89,13 +89,13 @@ test.describe('Folder Features', () => {
         const s2Id = await page.evaluate(() => (window as any).__s2);
 
         // Reload to pick up new servers
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(3000);
         await waitForWs(page);
 
         // Create group via API
         const gid = await createGroupViaAPI(page, s1Id, s2Id);
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(3000);
         await waitForWs(page);
 
@@ -153,7 +153,7 @@ test.describe('Folder Features', () => {
             (window as any).__muteGid = gd.id;
         });
 
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(3000);
         await waitForWs(page);
 
@@ -215,7 +215,7 @@ test.describe('Folder Features', () => {
             await fetch('/api/servers/' + d2.id + '/group', { method: 'PUT', headers: h, body: JSON.stringify({ group_id: gd.id }) });
         });
 
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(3000);
         await waitForWs(page);
 
@@ -252,7 +252,7 @@ test.describe('Folder Features', () => {
             await fetch('/api/servers/' + d2.id + '/group', { method: 'PUT', headers: h, body: JSON.stringify({ group_id: gd.id }) });
         });
 
-        await page.reload({ waitUntil: 'networkidle' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(3000);
         await waitForWs(page);
 
