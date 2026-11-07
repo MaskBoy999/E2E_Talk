@@ -60,8 +60,16 @@ click **Test connection**, then **Save & Launch**. Change it later from the tray
 
 ## Build from source
 
-Prerequisites: Rust (stable), Node 18+, and — for the desktop app — the
+Prerequisites: Node 18+ and — for the desktop app — the
 [Tauri system dependencies](https://v2.tauri.app/start/prerequisites/) for your OS.
+
+`./start-server.sh` installs the server's build dependencies itself. On every
+launch it checks for a C compiler, make, pkg-config, OpenSSL headers, lsof,
+psmisc and Rust, detects the distro (Arch, Debian/Ubuntu, Fedora/RHEL,
+openSUSE, Alpine) and installs only what is missing — Rust comes from rustup
+into `~/.cargo`, so no root is needed for it. Run
+`scripts/deps/install.sh --check` to see what a machine is missing without
+changing anything.
 
 ```bash
 # Run the server (its own terminal; serves the web app on :3443)

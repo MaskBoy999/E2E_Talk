@@ -1,7 +1,22 @@
 #!/bin/bash
 # Start the E2E Chat server.
-# Kills any existing instance, cleans artifacts, builds release if needed, then starts.
-cd "$(dirname "$0")/server"
+# Installs any missing build dependencies for this distro, kills any existing
+# instance, cleans artifacts, builds release if needed, then starts.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+# rustup drops cargo in ~/.cargo/bin; keep it on PATH even when the shell
+# profile (or a desktop launcher) did not load it.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Bootstrap: compiler, make, pkg-config, OpenSSL headers, lsof/psmisc and the
+# Rust toolchain. Detects the distro (scripts/deps/install.sh) and installs only
+# what is missing — on a prepared machine this is just a few version checks.
+echo "==> Checking build dependencies..."
+if ! bash "$ROOT/scripts/deps/install.sh"; then
+    echo "DEPENDENCY INSTALL FAILED"
+    exit 1
+fi
+
+cd "$ROOT/server" || exit 1
 
 echo "==> Checking for existing server processes..."
 killall e2e-chat 2>/dev/null || true
