@@ -1,5 +1,9 @@
 # PROGRESS
 
+> Forward-looking work lives in [`OUTSTANDING_WORK.md`](OUTSTANDING_WORK.md) — binding
+> requirements that must not be dropped. This file is the historical record.
+
+
 ## Hybrid PQ envelopes and logins, IP-hash rate-limit keys, every remaining limit on the panel (0.2.44)
 
 **Post-quantum phases 0–2 shipped: hybrid envelopes, hybrid escrow, hybrid logins.**

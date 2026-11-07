@@ -40,6 +40,9 @@ certs/
 vapid_private.pem
 *.pem
 
+# Transient startup report (start-server.sh --check output)
+.start-server-missing
+
 # Environment files
 .env
 
