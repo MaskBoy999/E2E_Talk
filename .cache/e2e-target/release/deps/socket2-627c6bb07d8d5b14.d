@@ -1,0 +1,11 @@
+/mnt/stocare/x/Documents/GitHub/E2E_Talk/.cache/e2e-target/release/deps/socket2-627c6bb07d8d5b14.d: /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/lib.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockaddr.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/socket.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockref.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sys/unix.rs
+
+/mnt/stocare/x/Documents/GitHub/E2E_Talk/.cache/e2e-target/release/deps/libsocket2-627c6bb07d8d5b14.rlib: /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/lib.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockaddr.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/socket.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockref.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sys/unix.rs
+
+/mnt/stocare/x/Documents/GitHub/E2E_Talk/.cache/e2e-target/release/deps/libsocket2-627c6bb07d8d5b14.rmeta: /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/lib.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockaddr.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/socket.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockref.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sys/unix.rs
+
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/lib.rs:
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockaddr.rs:
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/socket.rs:
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sockref.rs:
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.4/src/sys/unix.rs:

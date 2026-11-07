@@ -1,0 +1,10 @@
+/mnt/stocare/x/Documents/GitHub/E2E_Talk/.cache/e2e-target/release/deps/unicase-d04f27e5ae731817.d: /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/lib.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/ascii.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/mod.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/map.rs
+
+/mnt/stocare/x/Documents/GitHub/E2E_Talk/.cache/e2e-target/release/deps/libunicase-d04f27e5ae731817.rlib: /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/lib.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/ascii.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/mod.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/map.rs
+
+/mnt/stocare/x/Documents/GitHub/E2E_Talk/.cache/e2e-target/release/deps/libunicase-d04f27e5ae731817.rmeta: /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/lib.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/ascii.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/mod.rs /home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/map.rs
+
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/lib.rs:
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/ascii.rs:
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/mod.rs:
+/home/maskboy999/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.9.0/src/unicode/map.rs:

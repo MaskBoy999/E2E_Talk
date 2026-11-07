@@ -46,3 +46,7 @@ ed25519-dalek = "2"
 # vendored @noble/post-quantum, server verifies both halves).
 ml-kem = { version = "0.3", features = ["getrandom"] }
 ml-dsa = "0.1"
+
+[dependencies.darling_core]
+version = "0.20"
+default-features = false
