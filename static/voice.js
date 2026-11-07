@@ -7252,7 +7252,7 @@
                     // sidebar + chat header + input) so you see only the call.
                     el2.style.left = '0';
                     el2.style.top = '0';
-                    el2.style.bottom = '0';
+                    el2.classList.remove('u-ad3760bf', 'u-2c82370c'), el2.classList.add('u-ad3760bf');
                     el2.style.height = 'auto';
                 } else {
                     // Collapsed: top panel of the text area (measured chat-body
@@ -7263,7 +7263,7 @@
                     // scrolling the tiles.
                     el2.style.left = left + 'px';
                     el2.style.top = top + 'px';
-                    el2.style.bottom = '';
+                    el2.style.bottom = '', el2.classList.remove('u-ad3760bf', 'u-2c82370c');
                     var dh = clampDmPanelHeight(S.dmPanelHeight);
                     el2.style.height = dh ? dh + 'px' : '';
                 }
@@ -7271,7 +7271,7 @@
                 // Voice view fullscreen: covers the ENTIRE viewport too.
                 el2.style.left = '0';
                 el2.style.top = '0';
-                el2.style.bottom = '0';
+                el2.classList.remove('u-ad3760bf', 'u-2c82370c'), el2.classList.add('u-ad3760bf');
                 el2.style.height = 'auto';
             } else {
                 // Voice channel view: its own channel view covering the whole
@@ -7279,7 +7279,7 @@
                 // text input space at the bottom are covered too.
                 el2.style.left = left + 'px';
                 el2.style.top = '0';
-                el2.style.bottom = '0';
+                el2.classList.remove('u-ad3760bf', 'u-2c82370c'), el2.classList.add('u-ad3760bf');
                 el2.style.height = 'auto'; // override the CSS 52vh so top+bottom win
             }
         });        ['voice-bar', 'dm-mini-bar'].forEach(function (id) {
@@ -7292,7 +7292,7 @@
             // stylesheet's top: 12px anchor applies again.
             el2.style.left = left + 'px';
             el2.style.top = '';
-            el2.style.bottom = '';
+            el2.style.bottom = '', el2.classList.remove('u-ad3760bf', 'u-2c82370c');
         });
     }
 
@@ -7312,7 +7312,7 @@
             if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
                 el2.style.left = saved.left + 'px';
                 el2.style.top = saved.top + 'px';
-                el2.style.bottom = 'auto';
+                el2.classList.remove('u-ad3760bf', 'u-2c82370c'), el2.classList.add('u-2c82370c');
             }
         } catch (_) {}
 
@@ -7330,7 +7330,8 @@
             origLeft = r.left;
             origTop = r.top;
             // Anchor by top/left only for the whole drag — see restore above.
-            el2.style.bottom = 'auto';
+            el2.classList.remove('u-ad3760bf', 'u-2c82370c'), above.
+            el2.classList.add('u-2c82370c');
             el2.classList.add('dragging');
             try { el2.setPointerCapture(e.pointerId); } catch (_) {}
             e.preventDefault();

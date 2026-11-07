@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>E2E Chat - Admin</title>
     <link rel="icon" href="/favicon.ico" sizes="any">
-    <link rel="stylesheet" href="style.css?v=6">
+    <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
@@ -35,7 +35,7 @@
         <div id="admin-login" class="auth-card">
             <h1>Admin Panel</h1>
             <p id="admin-login-subtitle" class="subtitle">Enter admin password</p>
-            <div id="admin-login-2fa-hint" class="subtitle" style="display:none;color:#4fc3f7;margin-bottom:8px">2FA code required</div>
+            <div id="admin-login-2fa-hint" class="subtitle u-20172512" style="display:none">2FA code required</div>
             <div id="error-message" class="error" style="display: none;"></div>
             <form id="admin-login-form" autocomplete="off">
                 <div class="auth-input-row">
@@ -55,7 +55,7 @@
         <div id="admin-panel" class="admin-card" style="display: none;">
             <div class="admin-header">
                 <h1>Admin Panel</h1>
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <div class="u-f78bd55b" style="display:flex">
                     <button class="u-d8f079a4" id="admin-2fa-panel-btn" >2FA: Checking...</button>
                     <button id="runtime-limits-btn" class="btn-download u-badf9fd9" ><svg class="ui-icon" width="14" height="14"><use href="#icon-gear"/></svg> Runtime Limits</button>
                     <button id="export-db-btn" class="btn-download u-d8f079a4" ><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Export DB</button>
@@ -495,9 +495,9 @@
                         <span class="record-count" id="raw-tables-count"></span>
                     </div>
                 </div>
-                <div id="raw-tables-list" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">Loading…</div>
+                <div class="u-8c69c158" id="raw-tables-list" style="display:flex">Loading…</div>
                 <div class="table-scroll">
-                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                    <div class="u-fcdb2ff4" style="display:flex">
                         <strong class="u-ba62946b" id="raw-table-title" ></strong>
                         <span class="record-count" id="raw-table-rows-count"></span>
                     </div>
@@ -519,14 +519,14 @@
             </p>
             <div id="export-db-fields">
                 <div class="u-da12f285" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                    <label class="u-746612da" style="display:block">Password</label>
                     <div class="auth-input-row">
                         <input type="password" id="export-password-input" placeholder="Encryption password" autocomplete="off" class="modal-input auth-code-input u-7623f055"  />
                         <button type="button" class="toggle-visibility-btn" id="toggle-export-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                     </div>
                 </div>
                 <div class="u-da12f285" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm Password</label>
+                    <label class="u-746612da" style="display:block">Confirm Password</label>
                     <div class="auth-input-row">
                         <input type="password" id="export-password-confirm-input" placeholder="Confirm encryption password" autocomplete="off" class="modal-input auth-code-input u-7623f055"  />
                         <button type="button" class="toggle-visibility-btn" id="toggle-export-password-confirm" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
@@ -534,12 +534,12 @@
                 </div>
             </div>
             <div class="u-87c136df" >
-                <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer">
+                <label class="settings-checkbox-label u-f3829e5e" style="display:flex">
                     <input class="u-ebb3297b" type="checkbox" id="export-db-nopw" >
                     Export without a password (not encrypted)
                 </label>
             </div>
-            <div id="export-password-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="export-password-error" style="display:none"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-export-db">Cancel</button>
                 <button class="btn-invite u-9879f0c5" id="confirm-export-db" >&#128190; Export</button>
@@ -556,37 +556,37 @@
                 Values are stored in the DB and take precedence over env vars.
                 Size limits are entered in KB / MB / GB.
             </p>
-            <div class="rt-config-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+            <div class="rt-config-grid u-1afe1b33" style="display:grid">
                 <div>
-                    <label for="rt-mutation-user-max" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                    <label class="u-746612da" for="rt-mutation-user-max" style="display:block">
                         Mutations / user / 10s <span id="rt-src-user" class="rt-source"></span>
                     </label>
                     <input type="number" id="rt-mutation-user-max" min="0" class="modal-input u-6008941a"  />
                 </div>
                 <div>
-                    <label for="rt-mutation-ip-max" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                    <label class="u-746612da" for="rt-mutation-ip-max" style="display:block">
                         Mutations / IP / 10s <span id="rt-src-ip" class="rt-source"></span>
                     </label>
                     <input type="number" id="rt-mutation-ip-max" min="0" class="modal-input u-6008941a"  />
                 </div>
                 <div>
-                    <label for="rt-quota-bytes" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                    <label class="u-746612da" for="rt-quota-bytes" style="display:block">
                         Per-user storage quota (bytes) <span id="rt-src-quota" class="rt-source"></span>
                     </label>
                     <input type="number" id="rt-quota-bytes" min="0" class="modal-input u-6008941a"  />
                 </div>
                 <div>
-                    <label for="rt-max-file-size-mb" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                    <label class="u-746612da" for="rt-max-file-size-mb" style="display:block">
                         Max file size per file (MB) <span id="rt-src-file-size" class="rt-source"></span>
                     </label>
                     <input type="number" id="rt-max-file-size-mb" min="0" class="modal-input u-6008941a"  />
                     <div class="u-627512f7" >Per-file cap — users may upload any number of files, each up to this size. The per-user storage quota above caps the total. Default 1024 (1&nbsp;GB). <code>0</code> = unlimited.</div>
                 </div>
                 <div>
-                    <label for="rt-redact-ips" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+                    <label class="u-746612da" for="rt-redact-ips" style="display:block">
                         F5 — Redact IPs in admin audit log
                     </label>
-                    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);cursor:pointer">
+                    <label class="u-8501583b" style="display:flex">
                         <input type="checkbox" id="rt-redact-ips" />
                         Store <code>*.*.*.*</code> instead of the raw client IP
                     </label>
@@ -598,14 +598,14 @@
                  save/load code can't drift apart. -->
             <div id="rt-dynamic-fields"></div>
             <div class="u-414aebc9" >
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                <div class="u-7357596b" style="display:flex">
                     <h3 class="u-bb4084e9" >Live usage (mutation limiter)</h3>
-                    <div style="display:flex;align-items:center;gap:8px;">
+                    <div class="u-250fc4eb" style="display:flex">
                         <span class="u-9b4e79d3" id="rt-usage-updated" ></span>
                         <button class="u-70df1374" id="rt-usage-refresh" ><svg class="ui-icon" width="12" height="12"><use href="#icon-refresh-alt"/></svg> Refresh</button>
                     </div>
                 </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+                <div class="u-857c6016" style="display:grid">
                     <div>
                         <div class="u-c6f6c282" >Top users (requests in 10s window)</div>
                         <div class="u-5d05b83f" id="rt-usage-users" >Loading…</div>
@@ -634,13 +634,13 @@
                 Enter the password to decrypt the database file.
             </p>
             <div class="u-da12f285" >
-                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                <label class="u-746612da" style="display:block">Password</label>
                 <div class="auth-input-row">
                     <input type="password" id="import-password-input" placeholder="Decryption password" autocomplete="off" class="modal-input auth-code-input u-7623f055"  />
                     <button type="button" class="toggle-visibility-btn" id="toggle-import-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
             </div>
-            <div id="import-password-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="import-password-error" style="display:none"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-import-db">Cancel</button>
                 <button class="btn-invite u-dc530f9a" id="confirm-import-db" >&#128230; Decrypt &amp; Import</button>
@@ -656,7 +656,7 @@
                 Importing a new database will <strong class="u-3c6f5e4b" >REPLACE all current data</strong>.
                 The server will reconnect and you will need to re-login. This cannot be undone.
             </p>
-            <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer;margin-bottom:14px">
+            <label class="settings-checkbox-label u-297a81b5" style="display:flex">
                 <input class="u-ebb3297b" type="checkbox" id="import-validate-first" >
                 Validate before importing — run a dry run first, review the results, then import if it looks good
             </label>
@@ -672,7 +672,7 @@
         <div class="modal-content u-e2b01b0d" >
             <h3 class="u-106d0cb6" >🔍 Backup Validation (dry run)</h3>
             <p class="u-96e55dc5"  id="import-results-summary"></p>
-            <div id="import-results-errors" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px;white-space:pre-wrap"></div>
+            <div class="u-c7960ef7" id="import-results-errors" style="display:none"></div>
             <div class="table-scroll u-aa8117e0" >
                 <table class="data-table">
                     <thead><tr><th>Table</th><th>Rows</th><th>Size</th></tr></thead>
@@ -684,7 +684,7 @@
                 Click a table row to preview its columns and rows.
             </div>
             <div class="modal-actions">
-                <button class="btn-invite" id="import-from-results" style="background:#2e7d32;border-color:#2e7d32;display:none">📤 Import this backup</button>
+                <button class="btn-invite u-2586c076" id="import-from-results" style="display:none">📤 Import this backup</button>
                 <button class="btn-cancel" id="close-import-results">Close</button>
             </div>
         </div>
@@ -716,11 +716,11 @@
                 in this backup. Importing it will <strong class="u-3c6f5e4b" >REPLACE all current data</strong>
                 with a database that failed validation — messages, keys, and files may be missing or corrupt.
             </p>
-            <label for="risky-import-input" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+            <label class="u-746612da" for="risky-import-input" style="display:block">
                 Type <strong class="u-746cd973" >IMPORT</strong> to confirm:
             </label>
             <input type="text" id="risky-import-input" placeholder="Type IMPORT" autocomplete="off" class="modal-input u-68c4858c"  />
-            <div id="risky-import-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="risky-import-error" style="display:none"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-risky-import">Cancel</button>
                 <button class="btn-delete u-d0c80f65" id="confirm-risky-import" disabled ><svg class="ui-icon" width="14" height="14"><use href="#icon-warning"/></svg> Import Anyway</button>
@@ -737,11 +737,11 @@
                 channel, message, key, file, and the audit log. The server returns to its fresh-install state
                 and the admin password must be set up again. <strong class="u-e0fa6031" >This cannot be undone.</strong>
             </p>
-            <label for="wipe-confirm-input" style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">
+            <label class="u-746612da" for="wipe-confirm-input" style="display:block">
                 Type <strong class="u-746cd973" >DELETE</strong> to confirm:
             </label>
             <input type="text" id="wipe-confirm-input" placeholder="Type DELETE" autocomplete="off" class="modal-input u-68c4858c"  />
-            <div id="wipe-confirm-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="wipe-confirm-error" style="display:none"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-wipe-confirm">Cancel</button>
                 <button class="btn-delete u-d0c80f65" id="confirm-wipe-all" disabled ><svg class="ui-icon" width="14" height="14"><use href="#icon-warning"/></svg> Wipe Everything</button>
@@ -750,22 +750,22 @@
     </div>
 
     <!-- Admin 2FA Settings Modal -->
-    <div id="admin-2fa-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99998;align-items:center;justify-content:center">
+    <div class="u-feff1576" id="admin-2fa-modal" style="display:none">
         <div class="u-c1943e3e" >
             <h3 class="u-7ca71798"  id="admin-2fa-modal-title">Admin 2FA</h3>
             <p class="u-fccc28e4"  id="admin-2fa-modal-hint"></p>
             <div class="u-8096e1e0" id="admin-2fa-qr" ></div>
-            <div id="admin-2fa-secret" style="background:var(--bg-primary,#12122b);border:1px solid var(--border-color,#333);border-radius:6px;padding:10px;margin-bottom:12px;font-family:monospace;font-size:12px;color:var(--text-primary,#e0e0e0);word-break:break-all;display:none"></div>
-            <div id="admin-2fa-codes-wrap" style="margin-bottom:12px;display:none">
+            <div class="u-06fb764b" id="admin-2fa-secret" style="display:none"></div>
+            <div class="u-da12f285" id="admin-2fa-codes-wrap" style="display:none">
                 <div class="u-255cc640" >Recovery codes (save these!):</div>
-                <div id="admin-2fa-codes" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+                <div class="u-822392ce" id="admin-2fa-codes" style="display:flex"></div>
                 <button class="u-be90b065" id="admin-2fa-copy-codes" >Copy Codes</button>
             </div>
-            <div style="display:flex;gap:8px;margin-bottom:8px">
+            <div class="u-f0598ef0" style="display:flex">
                 <input class="u-ee18efc5" type="text" id="admin-2fa-code-input" placeholder="Enter 6-digit code" maxlength="6" pattern="[0-9]{6}" autocomplete="off" >
             </div>
-            <div id="admin-2fa-error" style="color:#f44336;font-size:12px;margin-bottom:12px;display:none"></div>
-            <div style="display:flex;gap:8px;justify-content:flex-end">
+            <div class="u-9fc81fcf" id="admin-2fa-error" style="display:none"></div>
+            <div class="u-88d23e89" style="display:flex">
                 <button class="u-15690157" id="admin-2fa-cancel" >Cancel</button>
                 <button class="u-04c3b6d1" id="admin-2fa-submit" >Verify</button>
             </div>
@@ -775,7 +775,7 @@
     <!-- Busy overlay: shown during export/import/validate so the admin knows
          the long encryption/upload is still working (it can take a while for
          a large database) and is not stuck. -->
-    <div id="admin-busy-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;align-items:center;justify-content:center;flex-direction:column;gap:14px">
+    <div class="u-da26b98a" id="admin-busy-overlay" style="display:none">
         <div class="admin-spinner"></div>
         <div class="u-835cd4c7" id="admin-busy-label" >Working…</div>
     </div>
@@ -789,6 +789,6 @@
     <!-- Native save bridge: an <a download> writes nothing inside a shell, so
          the DB export needs the shell's own file write. -->
     <script src="box-shell.js?v=5"></script>
-    <script src="admin.js?v=9"></script>
+    <script src="admin.js?v=11"></script>
 </body>
 </html>

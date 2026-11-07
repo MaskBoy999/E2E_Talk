@@ -3847,7 +3847,7 @@ function showVaultLockScreen() {
             '<p class="vault-lock-hint">Your storage key is sealed with your password on this device — it is no longer kept in a form that can be read from disk. Enter your password to open it.</p>' +
             '<div class="vault-lock-pw-row u-ec17010e" >' +
                 '<input type="password" id="vault-lock-password" class="modal-input auth-code-input u-a8059227" placeholder="Password" autocomplete="current-password"  />' +
-                '<button type="button" class="toggle-visibility-btn" id="toggle-vault-lock-pw" title="Show/Hide" aria-label="Show or hide password" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:#aaa;cursor:pointer;padding:4px;display:flex;align-items:center"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>' +
+                '<button type="button" class="toggle-visibility-btn u-6a661cd7" id="toggle-vault-lock-pw" title="Show/Hide" aria-label="Show or hide password" style="display:flex"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>' +
             '</div>' +
             '<div class="vault-lock-error" id="vault-lock-error" style="display:none"></div>' +
             '<button type="button" class="btn btn-primary u-9202fe4c" id="vault-lock-submit" >Unlock</button>' +
@@ -7005,7 +7005,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     syncNotificationSoundToServer(file);
                     hideNotifTrim();
                 } catch (err) {
-                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '#f44336'; }
+                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
                 }
             };
             reader.readAsDataURL(file);
@@ -7013,7 +7013,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (notifTrimCancelBtn) notifTrimCancelBtn.addEventListener('click', function () {
             hideNotifTrim();
-            if (notifSoundStatus) { notifSoundStatus.textContent = 'Cancelled'; notifSoundStatus.style.color = 'var(--text-muted)'; }
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Cancelled'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-5872de20'); }
             setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 2000);
         });
 
@@ -7021,14 +7021,14 @@ document.addEventListener('DOMContentLoaded', () => {
             var file = e.target.files[0];
             if (!file) return;
             if (!file.type.startsWith('audio/')) {
-                if (notifSoundStatus) { notifSoundStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; notifSoundStatus.style.color = '#f44336'; }
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
                 return;
             }
             // Notification sounds are capped at 30s. Large source files are
             // allowed (they get trimmed to a 30s WAV before storing), so only
             // reject absurd files that would be unwieldy to decode client-side.
             if (file.size > 200 * 1024 * 1024) {
-                if (notifSoundStatus) { notifSoundStatus.textContent = 'File too large (max 200 MB). Try a shorter or lower-quality audio file.'; notifSoundStatus.style.color = '#f44336'; }
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'File too large (max 200 MB). Try a shorter or lower-quality audio file.'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
                 return;
             }
             e.target.value = '';
@@ -7053,7 +7053,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (file.size > 20 * 1024 * 1024) {
                         if (notifSoundStatus) {
                             notifSoundStatus.textContent = 'File is under 30s but too large to store (max 20 MB). Use a compressed format (MP3) or a shorter clip.';
-                            notifSoundStatus.style.color = '#f44336';
+                            notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7');
                         }
                         setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent.indexOf('under 30s') === 0) notifSoundStatus.textContent = ''; }, 6000);
                         return;
@@ -7065,7 +7065,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             saveNotifSoundData(ev.target.result, file.name, 'Custom sound saved!');
                             syncNotificationSoundToServer(file);
                         } catch (err) {
-                            if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '#f44336'; }
+                            if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save sound. IndexedDB may be unavailable.'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
                         }
                     };
                     reader.readAsDataURL(file);
@@ -7073,13 +7073,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     showNotifTrim(buf.duration);
                     if (notifSoundStatus) {
                         notifSoundStatus.textContent = 'This audio is ' + fmtSec(buf.duration) + ' — pick the 1–30s part to keep.';
-                        notifSoundStatus.style.color = '#ff9800';
+                        notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-0857ace5');
                     }
                 }
             }).catch(function (err) {
                 if (notifSoundStatus) {
                     notifSoundStatus.textContent = 'Could not read that audio file: ' + (err && err.message ? err.message : 'decode failed');
-                    notifSoundStatus.style.color = '#f44336';
+                    notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7');
                 }
                 setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent.indexOf('Could not') === 0) notifSoundStatus.textContent = ''; }, 5000);
             });
@@ -7096,7 +7096,7 @@ document.addEventListener('DOMContentLoaded', () => {
             localStorage.removeItem('notification_sound_url');
             localStorage.removeItem('notification_sound_name');
             if (notifSoundFileName) { notifSoundFileName.style.display = 'none'; notifSoundFileName.textContent = ''; }
-            if (notifSoundStatus) { notifSoundStatus.textContent = 'Reset to default sound'; notifSoundStatus.style.color = '#4caf50'; }
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Reset to default sound'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-a1b79af8'); }
             setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 3000);
             // Delete from server too
             authFetch('/api/notification-sound', { method: 'DELETE' }).catch(function () {});
@@ -7107,7 +7107,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (notifSoundTestBtn) {
         notifSoundTestBtn.addEventListener('click', function () {
-            if (notifSoundStatus) { notifSoundStatus.textContent = 'Playing...'; notifSoundStatus.style.color = 'var(--text-muted)'; }
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Playing...'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-5872de20'); }
             playNotificationSound(true);
             setTimeout(function () { if (notifSoundStatus && notifSoundStatus.textContent === 'Playing...') notifSoundStatus.textContent = ''; }, _notifCurrentDuration > 0 ? _notifCurrentDuration * 1000 + 500 : 2500);
         });
@@ -7116,7 +7116,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (notifSoundStopBtn) {
         notifSoundStopBtn.addEventListener('click', function () {
             stopNotificationSound();
-            if (notifSoundStatus) { notifSoundStatus.textContent = 'Stopped'; notifSoundStatus.style.color = '#ff9800'; }
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Stopped'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-0857ace5'); }
             setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 2000);
         });
     }
@@ -7145,7 +7145,7 @@ document.addEventListener('DOMContentLoaded', () => {
             _notifMediaRecorder.stop();
             if (notifSoundStatus) {
                 notifSoundStatus.textContent = 'Recording stopped at the 30s max';
-                notifSoundStatus.style.color = '#ff9800';
+                notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-0857ace5');
             }
         }
     }
@@ -7165,7 +7165,7 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.setItem('notification_sound_name', fileName);
         localStorage.removeItem('notification_sound_url');
         if (notifSoundFileName) { notifSoundFileName.textContent = fileName; notifSoundFileName.style.display = ''; }
-        if (notifSoundStatus) { notifSoundStatus.textContent = statusMsg; notifSoundStatus.style.color = '#4caf50'; }
+        if (notifSoundStatus) { notifSoundStatus.textContent = statusMsg; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-a1b79af8'); }
         setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 3000);
     }
 
@@ -7178,7 +7178,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 saveNotifSoundData(ev.target.result, fileName, 'Recording saved as notification sound!');
                 syncNotificationSoundToServer(file);
             } catch (err) {
-                if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save recording.'; notifSoundStatus.style.color = '#f44336'; }
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Failed to save recording.'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
             }
         };
         reader.readAsDataURL(blob);
@@ -7187,7 +7187,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (notifRecordBtn) {
         notifRecordBtn.addEventListener('click', function () {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
-                if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording not supported in this browser.'; notifSoundStatus.style.color = '#f44336'; }
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording not supported in this browser.'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
                 return;
             }
             navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
@@ -7208,7 +7208,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     cleanupNotifRecording();
                 };
                 _notifMediaRecorder.onerror = function () {
-                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording error occurred.'; notifSoundStatus.style.color = '#f44336'; }
+                    if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording error occurred.'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
                     cleanupNotifRecording();
                 };
                 _notifMediaRecorder.start();
@@ -7218,7 +7218,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 _notifRecordTimer = setInterval(updateNotifRecordTimer, 200);
                 if (notifSoundStatus) notifSoundStatus.textContent = '';
             }).catch(function (err) {
-                if (notifSoundStatus) { notifSoundStatus.textContent = 'Microphone access denied. ' + err.message; notifSoundStatus.style.color = '#f44336'; }
+                if (notifSoundStatus) { notifSoundStatus.textContent = 'Microphone access denied. ' + err.message; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-3cbcede7'); }
             });
         });
     }
@@ -7239,7 +7239,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 _notifMediaRecorder.stop();
             }
             cleanupNotifRecording();
-            if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording cancelled'; notifSoundStatus.style.color = 'var(--text-muted)'; }
+            if (notifSoundStatus) { notifSoundStatus.textContent = 'Recording cancelled'; notifSoundStatus.style.color = '', notifSoundStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), notifSoundStatus.classList.add('u-5872de20'); }
             setTimeout(function () { if (notifSoundStatus) notifSoundStatus.textContent = ''; }, 2000);
         });
     }
@@ -7547,12 +7547,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     _idbRingtonePut('name', file.name).catch(function () {});
                     try { localStorage.setItem('ringtone_name', file.name); } catch (_) {}
                     if (ringtoneFileName) { ringtoneFileName.textContent = file.name; ringtoneFileName.style.display = ''; }
-                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Ringtone saved (' + len + 's)!'; ringtoneStatus.style.color = '#4caf50'; }
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Ringtone saved (' + len + 's)!'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-a1b79af8'); }
                     setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
                     syncRingtoneToServer(file);
                     hideRingTrim();
                 } catch (err) {
-                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone.'; ringtoneStatus.style.color = '#f44336'; }
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone.'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
                 }
             };
             reader.readAsDataURL(file);
@@ -7560,7 +7560,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (ringTrimCancelBtn) ringTrimCancelBtn.addEventListener('click', function () {
             hideRingTrim();
-            if (ringtoneStatus) { ringtoneStatus.textContent = 'Cancelled'; ringtoneStatus.style.color = 'var(--text-muted)'; }
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Cancelled'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-5872de20'); }
             setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 2000);
         });
 
@@ -7568,14 +7568,14 @@ document.addEventListener('DOMContentLoaded', () => {
             var file = e.target.files[0];
             if (!file) return;
             if (!file.type.startsWith('audio/')) {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; ringtoneStatus.style.color = '#f44336'; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Please select an audio file (MP3, WAV, etc.)'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
                 return;
             }
             // Ringtones are capped at 30s. Large source files are allowed (they
             // get trimmed to a 30s WAV before storing), so only reject absurd
             // files that would be unwieldy to decode client-side.
             if (file.size > 200 * 1024 * 1024) {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'File too large (max 200 MB). Try a shorter or lower-quality audio file.'; ringtoneStatus.style.color = '#f44336'; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'File too large (max 200 MB). Try a shorter or lower-quality audio file.'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
                 return;
             }
             e.target.value = '';
@@ -7601,7 +7601,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (file.size > 20 * 1024 * 1024) {
                         if (ringtoneStatus) {
                             ringtoneStatus.textContent = 'File is under 30s but too large to store (max 20 MB). Use a compressed format (MP3) or a shorter clip.';
-                            ringtoneStatus.style.color = '#f44336';
+                            ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7');
                         }
                         setTimeout(function () { if (ringtoneStatus && ringtoneStatus.textContent.indexOf('under 30s') === 0) ringtoneStatus.textContent = ''; }, 6000);
                         return;
@@ -7617,11 +7617,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             _idbRingtonePut('name', file.name).catch(function () {});
                             try { localStorage.setItem('ringtone_name', file.name); } catch (_) {}
                             if (ringtoneFileName) { ringtoneFileName.textContent = file.name; ringtoneFileName.style.display = ''; }
-                            if (ringtoneStatus) { ringtoneStatus.textContent = 'Custom ringtone saved!'; ringtoneStatus.style.color = '#4caf50'; }
+                            if (ringtoneStatus) { ringtoneStatus.textContent = 'Custom ringtone saved!'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-a1b79af8'); }
                             setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
                             syncRingtoneToServer(file);
                         } catch (err) {
-                            if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone. IndexedDB may be unavailable.'; ringtoneStatus.style.color = '#f44336'; }
+                            if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save ringtone. IndexedDB may be unavailable.'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
                         }
                     };
                     reader.readAsDataURL(file);
@@ -7629,13 +7629,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     showRingTrim(buf.duration);
                     if (ringtoneStatus) {
                         ringtoneStatus.textContent = 'This audio is ' + fmtSec(buf.duration) + ' — pick the 1–30s part to keep.';
-                        ringtoneStatus.style.color = '#ff9800';
+                        ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-0857ace5');
                     }
                 }
             }).catch(function (err) {
                 if (ringtoneStatus) {
                     ringtoneStatus.textContent = 'Could not read that audio file: ' + (err && err.message ? err.message : 'decode failed');
-                    ringtoneStatus.style.color = '#f44336';
+                    ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7');
                 }
                 setTimeout(function () { if (ringtoneStatus && ringtoneStatus.textContent.indexOf('Could not') === 0) ringtoneStatus.textContent = ''; }, 5000);
             });
@@ -7650,7 +7650,7 @@ document.addEventListener('DOMContentLoaded', () => {
             _idbRingtoneDel('name').catch(function () {});
             try { localStorage.removeItem('ringtone_name'); } catch (_) {}
             if (ringtoneFileName) { ringtoneFileName.style.display = 'none'; ringtoneFileName.textContent = ''; }
-            if (ringtoneStatus) { ringtoneStatus.textContent = 'Reset to default ringtone'; ringtoneStatus.style.color = '#4caf50'; }
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Reset to default ringtone'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-a1b79af8'); }
             setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
             authFetch('/api/ringtone', { method: 'DELETE' }).catch(function () {});
         });
@@ -7658,7 +7658,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (ringtoneTestBtn) {
         ringtoneTestBtn.addEventListener('click', function () {
-            if (ringtoneStatus) { ringtoneStatus.textContent = 'Playing...'; ringtoneStatus.style.color = 'var(--text-muted)'; }
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Playing...'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-5872de20'); }
             // Play the ringtone once (non-looping) via the shared voice helper.
             var vm = window.VoiceManager;
             if (vm && typeof vm.testRingtone === 'function') {
@@ -7667,7 +7667,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (ringtoneTestBtn) ringtoneTestBtn.style.display = 'none';
                 startRingVisualizer(3500);
             } else {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'Voice module not ready yet, try again in a moment'; ringtoneStatus.style.color = '#f44336'; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Voice module not ready yet, try again in a moment'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
             }
             setTimeout(function () { if (ringtoneStatus && ringtoneStatus.textContent === 'Playing...') ringtoneStatus.textContent = ''; }, 4000);
         });
@@ -7681,7 +7681,7 @@ document.addEventListener('DOMContentLoaded', () => {
             stopRingVisualizer();
             if (ringtoneStopBtn) ringtoneStopBtn.style.display = 'none';
             if (ringtoneTestBtn) ringtoneTestBtn.style.display = '';
-            if (ringtoneStatus) { ringtoneStatus.textContent = 'Stopped'; ringtoneStatus.style.color = '#ff9800'; }
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Stopped'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-0857ace5'); }
             setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 2000);
         });
     }
@@ -7709,7 +7709,7 @@ document.addEventListener('DOMContentLoaded', () => {
             _ringMediaRecorder.stop();
             if (ringtoneStatus) {
                 ringtoneStatus.textContent = 'Recording stopped at the 30s max';
-                ringtoneStatus.style.color = '#ff9800';
+                ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-0857ace5');
             }
         }
     }
@@ -7734,11 +7734,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 _idbRingtonePut('name', fileName).catch(function () {});
                 try { localStorage.setItem('ringtone_name', fileName); } catch (_) {}
                 if (ringtoneFileName) { ringtoneFileName.textContent = fileName; ringtoneFileName.style.display = ''; }
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording saved as ringtone!'; ringtoneStatus.style.color = '#4caf50'; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording saved as ringtone!'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-a1b79af8'); }
                 setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 3000);
                 syncRingtoneToServer(file);
             } catch (err) {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save recording.'; ringtoneStatus.style.color = '#f44336'; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Failed to save recording.'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
             }
         };
         reader.readAsDataURL(blob);
@@ -7747,7 +7747,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (ringtoneRecordBtn) {
         ringtoneRecordBtn.addEventListener('click', function () {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording not supported in this browser.'; ringtoneStatus.style.color = '#f44336'; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording not supported in this browser.'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
                 return;
             }
             navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
@@ -7768,7 +7768,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     cleanupRingRecording();
                 };
                 _ringMediaRecorder.onerror = function () {
-                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording error occurred.'; ringtoneStatus.style.color = '#f44336'; }
+                    if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording error occurred.'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
                     cleanupRingRecording();
                 };
                 _ringMediaRecorder.start();
@@ -7778,7 +7778,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 _ringRecordTimer = setInterval(updateRingRecordTimer, 200);
                 if (ringtoneStatus) ringtoneStatus.textContent = '';
             }).catch(function (err) {
-                if (ringtoneStatus) { ringtoneStatus.textContent = 'Microphone access denied. ' + err.message; ringtoneStatus.style.color = '#f44336'; }
+                if (ringtoneStatus) { ringtoneStatus.textContent = 'Microphone access denied. ' + err.message; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-3cbcede7'); }
             });
         });
     }
@@ -7799,7 +7799,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 _ringMediaRecorder.stop();
             }
             cleanupRingRecording();
-            if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording cancelled'; ringtoneStatus.style.color = 'var(--text-muted)'; }
+            if (ringtoneStatus) { ringtoneStatus.textContent = 'Recording cancelled'; ringtoneStatus.style.color = '', ringtoneStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), ringtoneStatus.classList.add('u-5872de20'); }
             setTimeout(function () { if (ringtoneStatus) ringtoneStatus.textContent = ''; }, 2000);
         });
     }
@@ -8959,7 +8959,7 @@ document.addEventListener('DOMContentLoaded', () => {
         saveBackupNowBtn.addEventListener('click', async function () {
             saveBackupNowBtn.disabled = true;
             saveBackupNowBtn.innerHTML = icon('refresh') + ' Saving...';
-            if (saveBackupStatus) { saveBackupStatus.textContent = 'Encrypting keys...'; saveBackupStatus.style.color = 'var(--text-muted)'; }
+            if (saveBackupStatus) { saveBackupStatus.textContent = 'Encrypting keys...'; saveBackupStatus.style.color = '', saveBackupStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), saveBackupStatus.classList.add('u-5872de20'); }
             try {
                 // The password no longer lives in a localStorage bootstrap
                 // (the vault owns it now) — read it through the one accessor
@@ -8977,11 +8977,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ encrypted_blob: enc.encrypted_private_key, salt: enc.salt, nonce: enc.nonce })
                 });
                 if (!res.ok) throw new Error('Server returned ' + res.status);
-                if (saveBackupStatus) { saveBackupStatus.textContent = 'Backup saved! (' + Object.keys(bundle).length + ' keys encrypted)'; saveBackupStatus.style.color = '#43b581'; }
+                if (saveBackupStatus) { saveBackupStatus.textContent = 'Backup saved! (' + Object.keys(bundle).length + ' keys encrypted)'; saveBackupStatus.style.color = '', saveBackupStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), saveBackupStatus.classList.add('u-72a78706'); }
                 // Refresh the status indicator
                 fetchBackupStatus();
             } catch (e) {
-                if (saveBackupStatus) { saveBackupStatus.textContent = (e.message || 'Save failed'); saveBackupStatus.style.color = 'var(--danger)'; }
+                if (saveBackupStatus) { saveBackupStatus.textContent = (e.message || 'Save failed'); saveBackupStatus.style.color = '', saveBackupStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), saveBackupStatus.classList.add('u-497726e8'); }
             } finally {
                 saveBackupNowBtn.disabled = false;
                 saveBackupNowBtn.innerHTML = icon('download') + ' Save Backup Now';
@@ -9029,7 +9029,7 @@ document.addEventListener('DOMContentLoaded', () => {
         restoreBackupConfirmBtn.addEventListener('click', async function () {
             var pw = restoreBackupPassword ? restoreBackupPassword.value.trim() : '';
             if (!pw) {
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Please enter your password.'; restoreBackupStatus.style.color = 'var(--danger)'; }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Please enter your password.'; restoreBackupStatus.style.color = '', restoreBackupStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), restoreBackupStatus.classList.add('u-497726e8'); }
                 return;
             }
             restoreBackupConfirmBtn.disabled = true;
@@ -9038,11 +9038,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (restoreBackupStatus) { restoreBackupStatus.textContent = msg; restoreBackupStatus.style.color = color || 'var(--text-muted)'; }
             });
             if (result.ok) {
-                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Keys restored successfully! All encryption keys, server keys, media caches, and friend code have been recovered.'; restoreBackupStatus.style.color = '#43b581'; }
+                if (restoreBackupStatus) { restoreBackupStatus.textContent = 'Keys restored successfully! All encryption keys, server keys, media caches, and friend code have been recovered.'; restoreBackupStatus.style.color = '', restoreBackupStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), restoreBackupStatus.classList.add('u-72a78706'); }
                 if (restoreBackupPassword) restoreBackupPassword.value = '';
             } else if (restoreBackupStatus) {
                 restoreBackupStatus.textContent = result.error;
-                restoreBackupStatus.style.color = 'var(--danger)';
+                restoreBackupStatus.style.color = '', restoreBackupStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), restoreBackupStatus.classList.add('u-497726e8');
             }
             restoreBackupConfirmBtn.disabled = false;
             restoreBackupConfirmBtn.innerHTML = icon('refresh') + ' Restore';
@@ -9506,16 +9506,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     var data = await res.json();
                     if (res.ok) {
                         sdStatus.textContent = days > 0 ? 'Self-destruct set: account deletes after ' + days + ' days of inactivity' : 'Self-destruct disabled';
-                        sdStatus.style.color = 'var(--accent,#4fc3f7)';
+                        sdStatus.style.color = '', sdStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), sdStatus.classList.add('u-c7853c39');
                         sdPwSection.style.display = 'none';
                         resetPwInputs();
                     } else {
                         sdStatus.textContent = data.error || 'Failed to save';
-                        sdStatus.style.color = 'var(--danger,#ed4245)';
+                        sdStatus.style.color = '', sdStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), sdStatus.classList.add('u-68b8dbec');
                     }
                 } catch (e) {
                     sdStatus.textContent = 'Server not reachable';
-                    sdStatus.style.color = 'var(--danger,#ed4245)';
+                    sdStatus.style.color = '', sdStatus.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), sdStatus.classList.add('u-68b8dbec');
                 }
             });
         }
@@ -10407,34 +10407,34 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraCaptureModal.innerHTML = '<div class="camera-capture-content u-97eb3485" >'
                 + '<button class="camera-capture-close u-01073ed5" >&times;</button>'
                 + '<video class="u-e7e9cf5d" id="camera-capture-video" autoplay playsinline ></video>'
-                + '<div class="camera-countdown" id="camera-countdown" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font-size:72px;font-weight:700;text-shadow:0 0 20px rgba(0,0,0,0.8);z-index:5;pointer-events:none;"></div>'
+                + '<div class="camera-countdown u-4793c3fa" id="camera-countdown" style="display:none"></div>'
                 // Timer row
-                + '<div class="camera-timer-row" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;padding:0 16px;">'
+                + '<div class="camera-timer-row u-1cb91999" style="display:flex">'
                 + '<span class="u-da4463b9" >⏱</span>'
                 + '<button class="camera-timer-btn u-ab633f52" data-timer="0" >Instant</button>'
                 + '<button class="camera-timer-btn u-01674bb9" data-timer="3" >3s</button>'
                 + '<button class="camera-timer-btn u-01674bb9" data-timer="5" >5s</button>'
                 + '<button class="camera-timer-btn u-01674bb9" data-timer="10" >10s</button>'
-                + '<input type="number" id="camera-custom-timer" min="1" max="99" placeholder="s" style="width:40px;padding:4px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;background:transparent;color:#fff;font-size:11px;text-align:center;display:none;">'
+                + '<input class="u-c81256c9" type="number" id="camera-custom-timer" min="1" max="99" placeholder="s" style="display:none">'
                 + '</div>'
                 // Resolution selector for photo
-                + '<div class="camera-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
+                + '<div class="camera-res-row u-d9d0ca43" style="display:flex">'
                 + '<span class="u-13e3cfbc" >' + icon('monitor') + '</span>'
                 + '<button class="camera-res-btn u-0ee30450" data-res="720p" >720p</button>'
                 + '<button class="camera-res-btn u-01674bb9" data-res="1080p" >1080p</button>'
                 + '<button class="camera-res-btn u-01674bb9" data-res="4K" >4K</button>'
                 + '</div>'
-                + '<div class="camera-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
+                + '<div class="camera-zoom-row u-c4cc10d3" style="display:none">'
                 + '<span class="u-13e3cfbc" >' + icon('search') + '</span>'
                 + '<input class="u-b97ec8b4" type="range" id="camera-zoom-slider" min="1" max="3" step="0.1" value="1" >'
                 + '<span class="u-09ecd9e1" id="camera-zoom-label" >1.0×</span>'
                 + '</div>'
-                + '<div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-top:4px;padding:0 10px;">'
-                + '<button class="camera-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">' + icon('flash') + '</button>'
-                + '<button class="camera-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">' + icon('mirror') + '</button>'
-                + '<button class="camera-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('flip') + '</button>'
-                + '<button class="camera-capture-btn" style="background:#fff;border:none;border-radius:50%;width:56px;height:56px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,0.3);transition:transform 0.1s;"><div class="u-348991e0" ></div></button>'
-                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:42px;height:42px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
+                + '<div class="u-97a80618" style="display:flex">'
+                + '<button class="camera-flash-btn u-289d12e3" style="display:flex" title="Flash">' + icon('flash') + '</button>'
+                + '<button class="camera-mirror-btn u-289d12e3" style="display:flex" title="Mirror">' + icon('mirror') + '</button>'
+                + '<button class="camera-flip-btn u-abb5a37c" style="display:flex">' + icon('flip') + '</button>'
+                + '<button class="camera-capture-btn u-96a4b844" style="display:flex"><div class="u-348991e0" ></div></button>'
+                + '<button class="camera-cancel-btn u-f9ab2ed1" style="display:flex">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_cameraCaptureModal);
             _cameraCaptureVideo = _cameraCaptureModal.querySelector('#camera-capture-video');
@@ -10496,10 +10496,10 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraCaptureModal.querySelectorAll('.camera-res-btn').forEach(function (btn) {
                 btn.addEventListener('click', function () {
                     _cameraCaptureModal.querySelectorAll('.camera-res-btn').forEach(function (b) {
-                        b.style.background = 'transparent';
-                        b.style.color = '#aaa';
-                        b.style.borderColor = 'rgba(255,255,255,0.2)';
-                        b.style.fontWeight = '400';
+                        b.style.background = '', b.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), b.classList.add('u-a8869dbe');
+                        b.style.color = '', b.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), b.classList.add('u-1d85e1b4');
+                        b.style.borderColor = '', b.classList.remove('u-f37f29a3', 'u-6b7e0115'), b.classList.add('u-f37f29a3');
+                        b.style.fontWeight = '', b.classList.remove('u-7e3a9447', 'u-eed0f8fb'), b.classList.add('u-7e3a9447');
                     });
                     var res = btn.dataset.res;
                     btn.style.background = 'rgba(255,255,255,0.2)';
@@ -10595,9 +10595,9 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraCaptureModal.querySelectorAll('.camera-timer-btn').forEach(function (btn) {
                 btn.addEventListener('click', function () {
                     _cameraCaptureModal.querySelectorAll('.camera-timer-btn').forEach(function (b) {
-                        b.style.background = 'transparent';
-                        b.style.color = '#aaa';
-                        b.style.borderColor = 'rgba(255,255,255,0.2)';
+                        b.style.background = '', b.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), b.classList.add('u-a8869dbe');
+                        b.style.color = '', b.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), b.classList.add('u-1d85e1b4');
+                        b.style.borderColor = '', b.classList.remove('u-f37f29a3', 'u-6b7e0115'), b.classList.add('u-f37f29a3');
                     });
                     var timer = parseInt(btn.dataset.timer, 10);
                     btn.style.background = 'rgba(255,255,255,0.2)';
@@ -10618,9 +10618,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (customTimerInput) {
                 customTimerInput.addEventListener('focus', function () {
                     _cameraCaptureModal.querySelectorAll('.camera-timer-btn').forEach(function (b) {
-                        b.style.background = 'transparent';
-                        b.style.color = '#aaa';
-                        b.style.borderColor = 'rgba(255,255,255,0.2)';
+                        b.style.background = '', b.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), b.classList.add('u-a8869dbe');
+                        b.style.color = '', b.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), b.classList.add('u-1d85e1b4');
+                        b.style.borderColor = '', b.classList.remove('u-f37f29a3', 'u-6b7e0115'), b.classList.add('u-f37f29a3');
                     });
                     customTimerInput.style.display = '';
                 });
@@ -10647,10 +10647,10 @@ document.addEventListener('DOMContentLoaded', () => {
             _cameraPhotoPreviewEl.style.cssText = 'display:none;z-index:2001;background:rgba(0,0,0,0.95);';
             _cameraPhotoPreviewEl.innerHTML = '<div class="camera-capture-content u-97eb3485" >'
                 + '<img class="u-13a8174d" id="camera-photo-preview-img" >'
-                + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
-                + '<button class="camera-retake-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('refresh') + ' Retake</button>'
-                + '<button class="camera-accept-btn" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">' + icon('check') + '</div></button>'
-                + '<button class="camera-cancel-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
+                + '<div class="u-c507e864" style="display:flex">'
+                + '<button class="camera-retake-btn u-57a959da" style="display:flex">' + icon('refresh') + ' Retake</button>'
+                + '<button class="camera-accept-btn u-d7ccf639" style="display:flex"><div class="u-72370601" style="display:flex">' + icon('check') + '</div></button>'
+                + '<button class="camera-cancel-btn u-dd89cb6a" style="display:flex">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_cameraPhotoPreviewEl);
             
@@ -11061,26 +11061,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 + '<button class="video-rec-close u-01073ed5" >&times;</button>'
                 + '<video class="u-a511b8ad" id="video-rec-preview" autoplay playsinline muted ></video>'
                 // Zoom row
-                + '<div class="video-rec-zoom-row" style="display:none;align-items:center;justify-content:center;gap:8px;margin-top:8px;padding:0 20px;">'
+                + '<div class="video-rec-zoom-row u-c4cc10d3" style="display:none">'
                 + '<span class="u-13e3cfbc" >' + icon('search') + '</span>'
                 + '<input class="u-b97ec8b4" type="range" id="video-rec-zoom-slider" min="1" max="3" step="0.1" value="1" >'
                 + '<span class="u-09ecd9e1" id="video-rec-zoom-label" >1.0×</span>'
                 + '</div>'
                 // Resolution selector
-                + '<div class="video-rec-res-row" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:0 16px;">'
+                + '<div class="video-rec-res-row u-d9d0ca43" style="display:flex">'
                 + '<span class="u-13e3cfbc" >' + icon('monitor') + '</span>'
                 + '<button class="video-rec-res-btn u-0ee30450" data-res="720p" >720p</button>'
                 + '<button class="video-rec-res-btn u-01674bb9" data-res="1080p" >1080p</button>'
                 + '<button class="video-rec-res-btn u-01674bb9" data-res="4K" >4K</button>'
                 + '</div>'
-                + '<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-top:4px;padding:0 16px;">'
+                + '<div class="u-e9022760" style="display:flex">'
                 + '<span class="u-3e3c3fbd" id="video-rec-timer" >0:00</span>'
-                + '<button id="video-rec-flash-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Flash">' + icon('sun') + '</button>'
-                + '<button id="video-rec-mirror-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#aaa;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;" title="Mirror">' + icon('mirror') + '</button>'
-                + '<button id="video-rec-flip-btn" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;" title="Flip camera">' + icon('flip') + '</button>'
-                + '<button id="video-rec-toggle-btn" style="background:#f44336;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(244,67,54,0.3);transition:all 0.15s;"><div class="u-b4d0bdf6" ></div></button>'
-                + '<button id="video-rec-finish-btn" style="display:none;background:#4caf50;border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;cursor:pointer;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:all 0.15s;color:#fff;font-size:22px;">' + icon('check') + '</button>'
-                + '<button class="video-rec-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:40px;height:40px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
+                + '<button class="u-fddf7c3f" id="video-rec-flash-btn" style="display:flex" title="Flash">' + icon('sun') + '</button>'
+                + '<button class="u-fddf7c3f" id="video-rec-mirror-btn" style="display:flex" title="Mirror">' + icon('mirror') + '</button>'
+                + '<button class="u-01742899" id="video-rec-flip-btn" style="display:flex" title="Flip camera">' + icon('flip') + '</button>'
+                + '<button class="u-fab4d0c2" id="video-rec-toggle-btn" style="display:flex"><div class="u-b4d0bdf6" ></div></button>'
+                + '<button class="u-b07e007e" id="video-rec-finish-btn" style="display:none">' + icon('check') + '</button>'
+                + '<button class="video-rec-cancel u-9dd24f8e" style="display:flex">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_videoRecModal);
             _videoRecVideo = _videoRecModal.querySelector('#video-rec-preview');
@@ -11215,10 +11215,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Don't switch resolution while recording or paused — would break the MediaRecorder
                     if (_videoRecorder && _videoRecorder.state !== 'inactive') return;
                     _videoRecModal.querySelectorAll('.video-rec-res-btn').forEach(function (b) {
-                        b.style.background = 'transparent';
-                        b.style.color = '#aaa';
-                        b.style.borderColor = 'rgba(255,255,255,0.2)';
-                        b.style.fontWeight = '400';
+                        b.style.background = '', b.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), b.classList.add('u-a8869dbe');
+                        b.style.color = '', b.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), b.classList.add('u-1d85e1b4');
+                        b.style.borderColor = '', b.classList.remove('u-f37f29a3', 'u-6b7e0115'), b.classList.add('u-f37f29a3');
+                        b.style.fontWeight = '', b.classList.remove('u-7e3a9447', 'u-eed0f8fb'), b.classList.add('u-7e3a9447');
                     });
                     var res = btn.dataset.res;
                     btn.style.background = 'rgba(255,255,255,0.2)';
@@ -11242,10 +11242,10 @@ document.addEventListener('DOMContentLoaded', () => {
             _videoRecPreviewEl.innerHTML = '<div class="u-97eb3485" >'
                 + '<video class="u-e7e9cf5d" id="video-rec-preview-playback" autoplay loop playsinline muted ></video>'
                 + '<div class="u-0dea4edb" id="video-rec-preview-duration" ></div>'
-                + '<div style="display:flex;align-items:center;justify-content:center;gap:40px;margin-top:16px;padding:0 20px;">'
-                + '<button class="video-rec-preview-retake" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('refresh') + ' Retake</button>'
-                + '<button class="video-rec-preview-accept" style="background:#4caf50;border:none;border-radius:50%;width:64px;height:64px;aspect-ratio:1;flex-shrink:0;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(76,175,80,0.3);transition:transform 0.1s;"><div style="width:54px;height:54px;border-radius:50%;background:#4caf50;border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;">' + icon('check') + '</div></button>'
-                + '<button class="video-rec-preview-cancel" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:48px;height:48px;aspect-ratio:1;flex-shrink:0;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.15s;">' + icon('close') + '</button>'
+                + '<div class="u-c507e864" style="display:flex">'
+                + '<button class="video-rec-preview-retake u-57a959da" style="display:flex">' + icon('refresh') + ' Retake</button>'
+                + '<button class="video-rec-preview-accept u-d7ccf639" style="display:flex"><div class="u-72370601" style="display:flex">' + icon('check') + '</div></button>'
+                + '<button class="video-rec-preview-cancel u-dd89cb6a" style="display:flex">' + icon('close') + '</button>'
                 + '</div></div>';
             document.body.appendChild(_videoRecPreviewEl);
             
@@ -11488,9 +11488,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reset toggle button to initial state
         var toggleBtn = document.getElementById('video-rec-toggle-btn');
         if (toggleBtn) {
-            toggleBtn.style.background = '#f44336';
+            toggleBtn.style.background = '', toggleBtn.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), toggleBtn.classList.add('u-a09de3c8');
             toggleBtn.innerHTML = '<div class="u-b4d0bdf6" ></div>';
-            toggleBtn.style.boxShadow = '0 0 0 4px rgba(244,67,54,0.3)';
+            toggleBtn.style.boxShadow = '', toggleBtn.classList.remove('u-fd59c43f', 'u-50e90d8f', 'u-9456933b'), toggleBtn.classList.add('u-9456933b');
         }
         var finishBtn = document.getElementById('video-rec-finish-btn');
         if (finishBtn) finishBtn.style.display = 'none';
@@ -13066,7 +13066,7 @@ function showMissedActivityNotification(newDms, newServerMsgs) {
     if (toast) {
         toast.innerHTML = icon('send') + ' ' + msg;
         toast.style.display = 'block';
-        toast.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        toast.style.background = '', toast.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), toast.classList.add('u-b57bdb15');
         toast.onclick = function () {
             toast.style.display = 'none';
             toast.onclick = null;
@@ -13226,7 +13226,7 @@ async function syncNotificationSoundToServer(file) {
         var identity = E2ECrypto.getIdentityKeyPair();
         if (!identity) {
             var statusEl = document.getElementById('notif-sound-status');
-            if (statusEl) { statusEl.textContent = 'Encryption keys not ready, sound not synced to server'; statusEl.style.color = '#f44336'; }
+            if (statusEl) { statusEl.textContent = 'Encryption keys not ready, sound not synced to server'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-3cbcede7'); }
             return;
         }
         // Encrypt file_name with a key derived from identity public key (SHA-256)
@@ -13248,7 +13248,7 @@ async function syncNotificationSoundToServer(file) {
         });
         if (!uploadRes.ok) {
             var statusEl = document.getElementById('notif-sound-status');
-            if (statusEl) { statusEl.textContent = 'Server sync failed, sound may not persist across refresh'; statusEl.style.color = '#f44336'; }
+            if (statusEl) { statusEl.textContent = 'Server sync failed, sound may not persist across refresh'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-3cbcede7'); }
         }
     } catch (e) {
         console.warn('Failed to sync notification sound:', e);
@@ -13315,7 +13315,7 @@ async function syncRingtoneToServer(file) {
         var identity = E2ECrypto.getIdentityKeyPair();
         if (!identity) {
             var statusEl = document.getElementById('ringtone-status');
-            if (statusEl) { statusEl.textContent = 'Encryption keys not ready, ringtone not synced to server'; statusEl.style.color = '#f44336'; }
+            if (statusEl) { statusEl.textContent = 'Encryption keys not ready, ringtone not synced to server'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-3cbcede7'); }
             return;
         }
         var rawFileName = file.name || 'ringtone.mp3';
@@ -13335,7 +13335,7 @@ async function syncRingtoneToServer(file) {
         });
         if (!uploadRes.ok) {
             var statusEl = document.getElementById('ringtone-status');
-            if (statusEl) { statusEl.textContent = 'Server sync failed, ringtone may not persist across refresh'; statusEl.style.color = '#f44336'; }
+            if (statusEl) { statusEl.textContent = 'Server sync failed, ringtone may not persist across refresh'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-3cbcede7'); }
         }
     } catch (e) {
         console.warn('Failed to sync ringtone:', e);
@@ -13958,13 +13958,13 @@ function showMentionToast(username, serverId, channelId, messageId) {
     if (_mentionToastTimer) clearTimeout(_mentionToastTimer);
     toast.textContent = 'New mention from @' + (username || 'Someone');
     toast.style.display = '';
-    toast.style.animation = 'mentionToastSlideIn 0.25s ease-out';
+    toast.classList.remove('u-170bef3e', 'u-4ff789dc'), toast.classList.add('u-170bef3e');
     toast.onclick = function () {
         navigateToMessage(serverId, channelId, null, messageId);
     };
     // Auto-hide after 5 seconds
     _mentionToastTimer = setTimeout(function () {
-        toast.style.animation = 'mentionToastFadeOut 0.3s ease-out';
+        toast.classList.remove('u-170bef3e', 'u-4ff789dc'), toast.classList.add('u-4ff789dc');
         setTimeout(function () { toast.style.display = 'none'; }, 300);
     }, 5000);
 }
@@ -18226,7 +18226,7 @@ async function loadChannels(serverId) {
             }
             const nameSpan = document.createElement('span');
             nameSpan.textContent = (isVoice ? '\ud83d\udd0a ' : '# ') + chDisplayName;
-            nameSpan.style.flex = '1';
+            nameSpan.classList.add('u-97445a8d');
             div.appendChild(nameSpan);
             if (isOwner) {
                 const delBtn = document.createElement('button');
@@ -21523,7 +21523,7 @@ function refreshDmSidebarItem(userId) {
             // screen until the list happened to re-render.
             if (avatarEl) {
                 avatarEl.innerHTML = displayName.charAt(0).toUpperCase();
-                avatarEl.style.background = '';
+                avatarEl.style.background = '', avatarEl.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db');
                 avatarEl.setAttribute('data-profile-pic-load', cacheKey);
             }
             // Trigger async fetch now that userDisplayNameCache has the key
@@ -21549,7 +21549,7 @@ function renderDmSidebar() {
     html += '<button class="key-action-btn u-886a61a0" id="regen-friend-code-btn" title="Generate new friend code" >' + icon('refresh') + '</button>';
     html += '</div>';
     html += '<div id="friend-code-status" class="friend-code-status u-01a658d0" ></div>';
-    html += '<div id="friend-qr-container" class="qr-code-container" style="display:none;margin-top:10px;margin-bottom:10px;">';
+    html += '<div id="friend-qr-container" class="qr-code-container u-e1ff6bda" style="display:none">';
     html += '<div id="friend-qr-canvas" class="qr-code-canvas"></div>';
     html += '<p class="qr-warning">' + icon('warning') + ' This shows your friend code. Only show to trusted people.</p>';
     html += '<div class="qr-actions">';
@@ -23231,7 +23231,7 @@ function updateMemberListItem(userId) {
             var picUrl = getProfilePicUrl(cache.profile_picture_file_id, userId);
             if (picUrl) {
                 avatarEl.innerHTML = '<img src="' + picUrl + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">';
-                avatarEl.style.background = 'transparent';
+                avatarEl.style.background = '', avatarEl.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), avatarEl.classList.add('u-a8869dbe');
             } else if (!avatarEl.hasAttribute('data-profile-pic-load')) {
                 avatarEl.setAttribute('data-profile-pic-load', userId + ':' + cache.profile_picture_file_id);
             }
@@ -23249,7 +23249,7 @@ function updatePresenceDots() {
         if (!dot) {
             dot = document.createElement('div');
             dot.className = 'presence-dot';
-            avatar.style.position = 'relative';
+            avatar.style.position = '', avatar.classList.remove('u-072a0df7', 'u-d461c96d'), avatar.classList.add('u-d461c96d');
             avatar.appendChild(dot);
         }
         dot.className = 'presence-dot ' + (onlineUsers.has(uid) ? 'online' : 'offline');
@@ -23263,7 +23263,7 @@ function updatePresenceDots() {
         if (!dot) {
             dot = document.createElement('div');
             dot.className = 'presence-dot';
-            avatar.style.position = 'relative';
+            avatar.style.position = '', avatar.classList.remove('u-072a0df7', 'u-d461c96d'), avatar.classList.add('u-d461c96d');
             avatar.appendChild(dot);
         }
         dot.className = 'presence-dot ' + (onlineUsers.has(uid) ? 'online' : 'offline');
@@ -23275,7 +23275,7 @@ function updatePresenceDots() {
         if (!dot) {
             dot = document.createElement('div');
             dot.className = 'presence-dot';
-            profileAvatar.style.position = 'relative';
+            profileAvatar.style.position = '', profileAvatar.classList.remove('u-072a0df7', 'u-d461c96d'), profileAvatar.classList.add('u-d461c96d');
             profileAvatar.appendChild(dot);
         }
         dot.className = 'presence-dot ' + (onlineUsers.has(user.id) ? 'online' : 'offline');
@@ -23812,7 +23812,7 @@ async function loadMyFriendCode() {
         myFriendCode = localStorage.getItem('e2e_friend_code') || '';
         // If missing locally, try auto-recovery with stored password
         if (!myFriendCode) {
-            if (statusEl) { statusEl.textContent = '⏳ Fetching from server...'; statusEl.style.color = '#888'; }
+            if (statusEl) { statusEl.textContent = '⏳ Fetching from server...'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-8b490eb6'); }
             // Attempt to recover from server using stored encrypted password
             try {
                 var pw = loadDecryptedPassword();
@@ -23820,17 +23820,17 @@ async function loadMyFriendCode() {
                     await handleFriendCodeRecover(pw);
                     // If recovery succeeded, myFriendCode is now set
                     if (myFriendCode) {
-                        if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '#888'; }
+                        if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-8b490eb6'); }
                     }
                 }
             } catch (_) {}
             // If still missing after recovery attempt, show the password modal
             if (!myFriendCode && statusEl) {
                 statusEl.textContent = '🔑 Friend code not available — use password to recover';
-                statusEl.style.color = '#ff9800';
+                statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-0857ace5');
             }
         } else {
-            if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '#888'; }
+            if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-8b490eb6'); }
         }
         const el = document.getElementById('my-friend-code');
         if (el) {
@@ -24018,24 +24018,24 @@ async function handleFriendCodeRecover(storedPw) {
     
     // Show loading state
     var recoverStatusEl = document.getElementById('friend-code-status');
-    if (recoverStatusEl) { recoverStatusEl.textContent = '⏳ Fetching friend code from server...'; recoverStatusEl.style.color = '#888'; }
+    if (recoverStatusEl) { recoverStatusEl.textContent = '⏳ Fetching friend code from server...'; recoverStatusEl.style.color = '', recoverStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), recoverStatusEl.classList.add('u-8b490eb6'); }
     try {
         const res = await authFetch('/api/friend-code');
         if (!res.ok) {
             const err = await res.json();
-            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ ' + (err.error || 'Failed to fetch'); recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ ' + (err.error || 'Failed to fetch'); recoverStatusEl.style.color = '', recoverStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), recoverStatusEl.classList.add('u-3cbcede7'); setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = err.error || 'Failed to fetch friend code from server.'; errorEl.style.display = 'block'; }
             return;
         }
         const data = await res.json();
         if (recoverStatusEl) { recoverStatusEl.textContent = '⏳ Decrypting...'; }
         if (!data.encrypted_friend_code || !data.salt || !data.nonce) {
-            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ No encrypted code on server'; recoverStatusEl.style.color = '#ff9800'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ No encrypted code on server'; recoverStatusEl.style.color = '', recoverStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), recoverStatusEl.classList.add('u-0857ace5'); setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'No encrypted friend code stored on the server. Use "Generate New" to create one.'; errorEl.style.display = 'block'; }
             return;
         }
         if (typeof E2ECrypto === 'undefined' || !E2ECrypto.decryptWithPassword) {
-            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Crypto module missing'; recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+            if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Crypto module missing'; recoverStatusEl.style.color = '', recoverStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), recoverStatusEl.classList.add('u-3cbcede7'); setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'Crypto module not loaded. Please refresh the page.'; errorEl.style.display = 'block'; }
             return;
         }
@@ -24046,7 +24046,7 @@ async function handleFriendCodeRecover(storedPw) {
             return;
         }
         // Update status indicator
-        if (recoverStatusEl) { recoverStatusEl.textContent = '✅ Recovered from server'; recoverStatusEl.style.color = '#4caf50'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 3000); }
+        if (recoverStatusEl) { recoverStatusEl.textContent = '✅ Recovered from server'; recoverStatusEl.style.color = '', recoverStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), recoverStatusEl.classList.add('u-a1b79af8'); setTimeout(function() { recoverStatusEl.textContent = ''; }, 3000); }
         
         // Success — store and update UI
         myFriendCode = decrypted;
@@ -24067,7 +24067,7 @@ async function handleFriendCodeRecover(storedPw) {
             setTimeout(function () { fcModal.style.display = 'none'; }, 2000);
         }
     } catch (e) {
-        if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Failed to fetch friend code'; recoverStatusEl.style.color = '#f44336'; setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
+        if (recoverStatusEl) { recoverStatusEl.textContent = '❌ Failed to fetch friend code'; recoverStatusEl.style.color = '', recoverStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), recoverStatusEl.classList.add('u-3cbcede7'); setTimeout(function() { recoverStatusEl.textContent = ''; }, 4000); }
         if (errorEl) { errorEl.textContent = 'Network error. Is the server running?'; errorEl.style.display = 'block'; }
         if (!errorEl) { alert('Network error. Is the server running?'); }
     }
@@ -24088,24 +24088,24 @@ async function _recoverFromBlob(password, errorEl, successEl) {
         }
         
         var statusEl = document.getElementById('friend-code-status');
-        if (statusEl) { statusEl.textContent = '⏳ Fetching key backup from server...'; statusEl.style.color = '#888'; }
+        if (statusEl) { statusEl.textContent = '⏳ Fetching key backup from server...'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-8b490eb6'); }
         
         const res = await authFetch('/api/key-blob');
         if (!res.ok) {
-            if (statusEl) { statusEl.textContent = '❌ Failed to fetch key backup'; statusEl.style.color = '#f44336'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            if (statusEl) { statusEl.textContent = '❌ Failed to fetch key backup'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-3cbcede7'); setTimeout(function() { statusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'Failed to fetch key backup from server.'; errorEl.style.display = 'block'; }
             return false;
         }
         
         const blobData = await res.json();
         if (!blobData.encrypted_blob || !blobData.salt || !blobData.nonce) {
-            if (statusEl) { statusEl.textContent = '❌ No key backup on server'; statusEl.style.color = '#ff9800'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            if (statusEl) { statusEl.textContent = '❌ No key backup on server'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-0857ace5'); setTimeout(function() { statusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'No key backup found on the server. You may need to log in again.'; errorEl.style.display = 'block'; }
             return false;
         }
         
         if (typeof E2ECrypto === 'undefined' || !E2ECrypto.decryptKeyBundle) {
-            if (statusEl) { statusEl.textContent = '❌ Crypto module missing'; statusEl.style.color = '#f44336'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            if (statusEl) { statusEl.textContent = '❌ Crypto module missing'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-3cbcede7'); setTimeout(function() { statusEl.textContent = ''; }, 4000); }
             return false;
         }
         
@@ -24113,7 +24113,7 @@ async function _recoverFromBlob(password, errorEl, successEl) {
         
         const bundle = E2ECrypto.decryptKeyBundle(blobData.encrypted_blob, password, blobData.salt, blobData.nonce);
         if (!bundle) {
-            if (statusEl) { statusEl.textContent = '❌ Wrong password'; statusEl.style.color = '#f44336'; setTimeout(function() { statusEl.textContent = ''; }, 4000); }
+            if (statusEl) { statusEl.textContent = '❌ Wrong password'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-3cbcede7'); setTimeout(function() { statusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'Wrong password. Cannot decrypt key backup.'; errorEl.style.display = 'block'; }
             return false;
         }
@@ -24148,7 +24148,7 @@ async function _recoverFromBlob(password, errorEl, successEl) {
         // keys (e.g. server keys for servers joined after the last blob save).
         saveKeyBlobToServer();
         
-        if (statusEl) { statusEl.textContent = '✅ Keys recovered!'; statusEl.style.color = '#4caf50'; setTimeout(function() { statusEl.textContent = ''; }, 3000); }
+        if (statusEl) { statusEl.textContent = '✅ Keys recovered!'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-a1b79af8'); setTimeout(function() { statusEl.textContent = ''; }, 3000); }
         
         return true;
     } catch (e) {
@@ -24206,21 +24206,21 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
     if (errorEl) errorEl.style.display = 'none';
     if (successEl) successEl.style.display = 'none';
     // Show loading state
-    if (regenStatusEl) { regenStatusEl.textContent = '⏳ Generating new friend code...'; regenStatusEl.style.color = '#888'; }
+    if (regenStatusEl) { regenStatusEl.textContent = '⏳ Generating new friend code...'; regenStatusEl.style.color = '', regenStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), regenStatusEl.classList.add('u-8b490eb6'); }
     try {
         // Generate a new friend code client-side
         var newCode = generateCode(16);
         if (regenStatusEl) { regenStatusEl.textContent = '⏳ Encrypting...'; }
         // Encrypt it with the password (same as key escrow encryption)
         if (typeof E2ECrypto === 'undefined' || !E2ECrypto.encryptWithPassword) {
-            if (regenStatusEl) { regenStatusEl.textContent = '❌ Crypto module missing'; regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
+            if (regenStatusEl) { regenStatusEl.textContent = '❌ Crypto module missing'; regenStatusEl.style.color = '', regenStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), regenStatusEl.classList.add('u-3cbcede7'); setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'Crypto module not loaded. Please refresh the page.'; errorEl.style.display = 'block'; }
             if (!errorEl) { alert('Crypto module not loaded. Please refresh the page.'); }
             return;
         }
         var encrypted = E2ECrypto.encryptWithPassword(newCode, rawPw);
         if (!encrypted || !encrypted.encrypted_private_key || !encrypted.salt || !encrypted.nonce) {
-            if (regenStatusEl) { regenStatusEl.textContent = '❌ Encryption failed'; regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
+            if (regenStatusEl) { regenStatusEl.textContent = '❌ Encryption failed'; regenStatusEl.style.color = '', regenStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), regenStatusEl.classList.add('u-3cbcede7'); setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = 'Encryption failed. Please try again.'; errorEl.style.display = 'block'; }
             if (!errorEl) { alert('Encryption failed. Please try again.'); }
             return;
@@ -24242,12 +24242,12 @@ async function handleFriendCodeRegenerate(preverifiedPw) {
         });
         const data = await res.json();
         if (!res.ok) {
-            if (regenStatusEl) { regenStatusEl.textContent = '❌ ' + (data.error || 'Server rejected'); regenStatusEl.style.color = '#f44336'; setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
+            if (regenStatusEl) { regenStatusEl.textContent = '❌ ' + (data.error || 'Server rejected'); regenStatusEl.style.color = '', regenStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), regenStatusEl.classList.add('u-3cbcede7'); setTimeout(function() { regenStatusEl.textContent = ''; }, 4000); }
             if (errorEl) { errorEl.textContent = data.error || 'Failed to regenerate friend code. Wrong password?'; errorEl.style.display = 'block'; }
             if (!errorEl) { alert(data.error || 'Failed to regenerate friend code.'); }
             return;
         }
-        if (regenStatusEl) { regenStatusEl.textContent = '✅ New code generated!'; regenStatusEl.style.color = '#4caf50'; setTimeout(function() { regenStatusEl.textContent = ''; }, 3000); }
+        if (regenStatusEl) { regenStatusEl.textContent = '✅ New code generated!'; regenStatusEl.style.color = '', regenStatusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), regenStatusEl.classList.add('u-a1b79af8'); setTimeout(function() { regenStatusEl.textContent = ''; }, 3000); }
         // Success — store and update UI
         myFriendCode = newCode;
         localStorage.setItem('e2e_friend_code', myFriendCode);
@@ -24876,7 +24876,7 @@ function updateExistingMessageStyles(userId) {
                 avatarEl.setAttribute('data-profile-pic', cacheKey);
                 avatarEl.removeAttribute('data-profile-pic-load');
                 avatarEl.innerHTML = '<img class="avatar-img" src="' + existingPic + '" alt="" data-profile-pic="' + cacheKey + '">';
-                avatarEl.style.background = 'transparent'; // hide accent color behind rounded image edges
+                avatarEl.style.background = '', avatarEl.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), avatarEl.classList.add('u-a8869dbe'); // hide accent color behind rounded image edges
             } else {
                 // Set up async loading
                 avatarEl.setAttribute('data-profile-pic-load', cacheKey);
@@ -26924,7 +26924,7 @@ function renderUploadPreview() {
         video.controls = true;
         video.muted = true;
         video.playsInline = true;
-        video.style.borderRadius = '8px';
+        video.style.borderRadius = '', video.classList.add('u-28a50dd5');
         video.onloadeddata = function() { _applyUploadTransformsToPreview(); };
         preview.appendChild(video);
     } else if (file.type && file.type.startsWith('audio/')) {
@@ -28628,19 +28628,19 @@ function openTextEditorModal(file) {
             // Width/height use viewport units and the rows wrap, so the editor
             // is usable on a phone (a fixed 800px box with a 400px-min textarea
             // overflowed the screen).
-            modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:min(96vw,800px);max-height:88vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
-                + '<div style="padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+            modal.innerHTML = '<div class="u-7807d2f6" style="display:flex">'
+                + '<div class="u-a2f68c06" style="display:flex">'
                 + '<span class="u-f72d3dfa" ><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Text</span>'
                 + '<span class="u-0fd6d726" id="text-edit-filename" ></span></div>'
                 + '<div class="u-4dc2ab2b" >'
                 + '<textarea class="u-83fbfbba" id="text-edit-area" ></textarea>'
                 + '</div>'
-                + '<div style="padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
-                + '<div style="display:flex;gap:8px">'
+                + '<div class="u-1965b8db" style="display:flex">'
+                + '<div class="u-33fcd4c3" style="display:flex">'
                 + '<button class="u-4eba1e04" id="text-edit-undo" >' + icon('undo') + ' Undo</button>'
                 + '<button class="u-4eba1e04" id="text-edit-redo" >' + icon('redo') + ' Redo</button>'
                 + '<span class="u-3b5a9e24" id="text-edit-info" ></span></div>'
-                + '<div style="display:flex;gap:8px">'
+                + '<div class="u-33fcd4c3" style="display:flex">'
                 + '<button class="u-ea740c70" id="text-edit-cancel" >Cancel</button>'
                 + '<button class="u-911b78f9" id="text-edit-confirm" >' + icon('check') + ' Save & Upload</button>'
                 + '</div></div></div>';
@@ -28812,15 +28812,15 @@ function _sheetBuildModal() {
         // Viewport-sized with wrapping rows: usable on a phone as well as a
         // desktop, same contract as the text editor above.
         modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:none;align-items:center;justify-content:center';
-        modal.innerHTML = '<div style="background:#1a1a2e;border-radius:12px;width:min(96vw,1000px);max-height:88vh;display:flex;flex-direction:column;border:1px solid #333;overflow:hidden">'
-            + '<div style="padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+        modal.innerHTML = '<div class="u-3c519abc" style="display:flex">'
+            + '<div class="u-a2f68c06" style="display:flex">'
             + '<span class="u-f72d3dfa" ><svg class="ui-icon" width="16" height="16"><use href="#icon-edit"/></svg> Edit Spreadsheet</span>'
             + '<span class="u-0e71be35" id="sheet-edit-filename" ></span></div>'
-            + '<div id="sheet-edit-tabs" style="display:flex;gap:4px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid #333"></div>'
+            + '<div class="u-74c8be1e" id="sheet-edit-tabs" style="display:flex"></div>'
             + '<div class="u-234d094d" id="sheet-edit-body" ></div>'
-            + '<div style="padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+            + '<div class="u-1965b8db" style="display:flex">'
             + '<span class="u-557c1505" id="sheet-edit-info" ></span>'
-            + '<div style="display:flex;gap:8px">'
+            + '<div class="u-33fcd4c3" style="display:flex">'
             + '<button class="u-ea740c70" id="sheet-edit-cancel" >Cancel</button>'
             + '<button class="u-911b78f9" id="sheet-edit-confirm" >Save &amp; Upload</button>'
             + '</div></div></div>';
@@ -28852,8 +28852,8 @@ function _sheetBuildModal() {
             body.querySelectorAll('table[data-sheet]').forEach(function (t) {
                 t.style.display = t.dataset.sheet === name ? '' : 'none';
             });
-            tabs.querySelectorAll('button').forEach(function (b) { b.style.background = '#2a2a3e'; });
-            tab.style.background = '#4fc3f7';
+            tabs.querySelectorAll('button').forEach(function (b) { b.style.background = '', b.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), b.classList.add('u-abab0ce8'); });
+            tab.style.background = '', tab.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), tab.classList.add('u-57cd45d1');
         };
         tabs.appendChild(tab);
     });
@@ -30579,7 +30579,7 @@ function openMediaViewer(url, type, fileData, galleryItems) {
     }
 
     viewer.style.display = 'flex';
-    document.body.style.overflow = 'hidden';
+    document.body.classList.remove('u-69824400'), document.body.classList.add('u-69824400');
 }
 
 function viewerKeyHandler(e) {
@@ -30741,7 +30741,7 @@ function closeMediaViewer() {
     // Do NOT revoke - shared with inline preview
     content.innerHTML = '';
     viewer.style.display = 'none';
-    document.body.style.overflow = '';
+    document.body.style.overflow = '', document.body.classList.remove('u-69824400');
     viewerZoomed = false;
     document.getElementById('video-controls').style.display = 'none';
     document.getElementById('audio-controls').style.display = 'none';
@@ -32426,7 +32426,7 @@ function renderUploadStickerPanel(container) {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'padding:16px;text-align:center;';
     wrap.innerHTML = '<p class="u-696ae0ee" >Add to your personal collection</p>' +
-        '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">' +
+        '<div class="u-a142aabb" style="display:flex">' +
         '<button class="u-79fb88bd" id="sticker-upload-trigger" >' + icon('image') + ' Upload Sticker</button>' +
         '<button class="u-2b9c48bc" id="gif-upload-trigger" >' + icon('video') + ' Upload GIF</button>' +
         '<button class="u-5f6fbce5" id="emoji-upload-trigger" >😊 Upload Emoji</button>' +
@@ -33014,7 +33014,7 @@ async function loadDmForwardList() {
         list.innerHTML = html;
         list.querySelectorAll('.dm-forward-item').forEach(item => {
             item.addEventListener('mouseenter', () => item.style.background = 'rgba(79,195,247,0.08)');
-            item.addEventListener('mouseleave', () => item.style.background = '');
+            item.addEventListener('mouseleave', () => item.style.background = '', item.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'));
             item.addEventListener('click', () => {
                 const userId = item.dataset.userId;
                 const username = item.dataset.username;
@@ -33263,7 +33263,7 @@ function _pfpObserverPush(mutations) {
                     n.removeAttribute('data-profile-pic-load');
                     n.setAttribute('data-profile-pic-manual', own);
                     if (!n.getAttribute('title')) n.setAttribute('title', 'Click to load profile picture');
-                    n.style.cursor = 'pointer';
+                    n.style.cursor = '', n.classList.remove('u-3b6a3a65', 'u-2a9295c3'), n.classList.add('u-3b6a3a65');
                 }
             }
             if (n.querySelectorAll) markProfilePicsManual(n);
@@ -33283,7 +33283,7 @@ function setProfilePicsAutoLoad(enabled) {
             var key = el.getAttribute('data-profile-pic-manual');
             el.removeAttribute('data-profile-pic-manual');
             el.removeAttribute('title');
-            el.style.cursor = '';
+            el.style.cursor = '', el.classList.remove('u-3b6a3a65', 'u-2a9295c3');
             if (!key) continue;
             el.setAttribute('data-profile-pic-load', key);
             if (seen[key]) continue;
@@ -33314,7 +33314,7 @@ document.addEventListener('click', function (e) {
     if (idx <= 0) return;
     el.removeAttribute('data-profile-pic-manual');
     el.removeAttribute('title');
-    el.style.cursor = '';
+    el.style.cursor = '', el.classList.remove('u-3b6a3a65', 'u-2a9295c3');
     el.setAttribute('data-profile-pic-load', key);
     getProfilePicUrl(key.slice(idx + 1), key.slice(0, idx), { manual: true });
 });
@@ -33582,7 +33582,7 @@ function getProfilePicUrl(fileId, userId, opts) {
             document.querySelectorAll('[data-profile-pic-manual="' + cacheKeyForLoad + '"]').forEach(function (el) {
                 el.innerHTML = '<img class="avatar-img" src="' + url + '" alt="" data-profile-pic="' + cacheKeyForLoad + '">';
                 el.style.background = 'transparent';
-                el.style.cursor = '';
+                el.style.cursor = '', el.classList.remove('u-3b6a3a65', 'u-2a9295c3');
                 el.removeAttribute('title');
                 el.removeAttribute('data-profile-pic-manual');
             });
@@ -33668,7 +33668,7 @@ function updateSidebarFooter() {
     usernameEl.style.color = userColor;
     if (subEl) {
         subEl.textContent = '@' + user.username;
-        subEl.style.color = ''; // keep subtitle default muted color
+        subEl.style.color = '', subEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'); // keep subtitle default muted color
     }
     
     // Remove stale data attributes
@@ -33680,7 +33680,7 @@ function updateSidebarFooter() {
         var picUrl = getProfilePicUrl(myProfile.profile_picture_file_id, user.id);
         if (picUrl) {
             avatarEl.innerHTML = '<img class="avatar-img" src="' + picUrl + '" alt="" data-profile-pic="' + cacheKey + '">';
-            avatarEl.style.background = 'transparent';
+            avatarEl.style.background = '', avatarEl.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), avatarEl.classList.add('u-a8869dbe');
         } else {
             avatarEl.innerHTML = initial;
             avatarEl.setAttribute('data-profile-pic-load', cacheKey);
@@ -33977,7 +33977,7 @@ function updateProfileSettingsUI(data) {
         var picUrl = getProfilePicUrl(data.profile_picture_file_id, user.id);
         if (picUrl) {
             avatarEl.innerHTML = '<img src="' + picUrl + '" alt="">';
-            avatarEl.style.background = 'transparent';
+            avatarEl.style.background = '', avatarEl.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), avatarEl.classList.add('u-a8869dbe');
         } else {
             // Async load - show initial while loading
             avatarEl.innerHTML = initial;
@@ -33988,7 +33988,7 @@ function updateProfileSettingsUI(data) {
                 var cacheKey = user.id + ':' + data.profile_picture_file_id;
                 if (profilePicCache[cacheKey]) {
                     avatarEl.innerHTML = '<img src="' + profilePicCache[cacheKey] + '" alt="">';
-                    avatarEl.style.background = 'transparent';
+                    avatarEl.style.background = '', avatarEl.classList.remove('u-a8869dbe', 'u-8bedf092', 'u-7d7d7972', 'u-2a771314', 'u-a09de3c8', 'u-b57bdb15', 'u-abab0ce8', 'u-57cd45d1', 'u-e571f7db'), avatarEl.classList.add('u-a8869dbe');
                     updateSidebarFooter();
                     clearInterval(checkCache);
                 }
@@ -35428,7 +35428,7 @@ function renderProfileView(data, decrypted, uid) {
     if (borderColor) {
         dnEl.style.textShadow = '0 0 8px ' + borderColor + ', 0 0 16px ' + borderColor;
     } else {
-        dnEl.style.textShadow = 'none';
+        dnEl.style.textShadow = '', dnEl.classList.add('u-49c19f28');
     }
     
     // Set nickname
@@ -35856,7 +35856,7 @@ function renderEditGlowOptions(baseColor) {
                 if (val) {
                     ep.style.textShadow = '0 0 8px ' + val + ', 0 0 16px ' + val;
                 } else {
-                    ep.style.textShadow = 'none';
+                    ep.style.textShadow = '', ep.classList.add('u-49c19f28');
                 }
             }
         });
@@ -36039,7 +36039,7 @@ async function saveProfile() {
     var statusEl = document.getElementById('profile-edit-status');
     if (!statusEl) return;
     statusEl.style.display = 'block';
-    statusEl.style.color = 'var(--text-muted)';
+    statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-5872de20');
     statusEl.textContent = 'Saving...';
     
     var displayName = document.getElementById('profile-edit-display-name').value.trim();
@@ -36053,22 +36053,22 @@ async function saveProfile() {
     var borderColor = glowInput ? glowInput.value : '';
     
     // Validate
-    if (displayName.length > 21) { statusEl.textContent = 'Display name too long (max 21 chars)'; statusEl.style.color = 'var(--danger)'; return; }
-    if (nickname.length > 32) { statusEl.textContent = 'Nickname too long (max 32 chars)'; statusEl.style.color = 'var(--danger)'; return; }
+    if (displayName.length > 21) { statusEl.textContent = 'Display name too long (max 21 chars)'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-497726e8'); return; }
+    if (nickname.length > 32) { statusEl.textContent = 'Nickname too long (max 32 chars)'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-497726e8'); return; }
     // Hard-cap description at 300 characters
     if (description.length > 300) {
         description = description.substring(0, 300);
         document.getElementById('profile-edit-description').value = description;
         updateDescriptionWordCount();
     }
-    if (description.length > 300) { statusEl.textContent = 'Description too long (max 300 characters)'; statusEl.style.color = 'var(--danger)'; return; }
+    if (description.length > 300) { statusEl.textContent = 'Description too long (max 300 characters)'; statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-497726e8'); return; }
     
     try {
         // Get identity key FIRST — needed for encrypting PFP/banner keys in profileData
         var identityForKeys = E2ECrypto.getIdentityKeyPair();
         if (!identityForKeys) {
             statusEl.textContent = 'Identity key not found. Please log in again.';
-            statusEl.style.color = 'var(--danger)';
+            statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-497726e8');
             return;
         }
 
@@ -36185,12 +36185,12 @@ async function saveProfile() {
         if (!res.ok) {
             var errData = await res.json().catch(function() { return {}; });
             statusEl.textContent = errData.error || 'Failed to save profile';
-            statusEl.style.color = 'var(--danger)';
+            statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-497726e8');
             return;
         }
         
         statusEl.textContent = 'Profile saved!';
-        statusEl.style.color = 'var(--success)';
+        statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-5a452988');
         
         // Reload profile data and explicitly update the sidebar footer
         await loadMyProfile();
@@ -36246,7 +36246,7 @@ async function saveProfile() {
         setTimeout(function() { statusEl.style.display = 'none'; }, 2000);
     } catch (e) {
         statusEl.textContent = 'Error saving profile: ' + e.message;
-        statusEl.style.color = 'var(--danger)';
+        statusEl.style.color = '', statusEl.classList.remove('u-5872de20', 'u-a86fac23', 'u-72a78706', 'u-3cbcede7', 'u-0857ace5', 'u-a1b79af8', 'u-497726e8', 'u-c7853c39', 'u-68b8dbec', 'u-1d85e1b4', 'u-729d2fa4', 'u-8b490eb6', 'u-5a452988'), statusEl.classList.add('u-497726e8');
     }
 }
 
@@ -36958,9 +36958,9 @@ document.addEventListener('error', function (e) {
 
 function buildLinkPreviewHtml(preview) {
     if (!preview) return '';
-    var html = '<div class="link-preview-card" style="display:flex;border:1px solid var(--border-color,#333);border-radius:8px;overflow:hidden;max-width:420px;margin-top:6px;background:var(--bg-secondary,#1a1a2e)">';
+    var html = '<div class="link-preview-card u-87cb356c" style="display:flex">';
     if (preview.image) {
-        html += '<div style="width:120px;min-height:80px;flex-shrink:0;background:#111;display:flex;align-items:center;justify-content:center;overflow:hidden">';
+        html += '<div class="u-36f0b566" style="display:flex">';
         html += '<img src="' + escapeHtml(preview.image) + '" alt="" style="width:100%;height:100%;object-fit:cover" class="link-preview-thumb">';
         html += '</div>';
     }
@@ -36973,7 +36973,7 @@ function buildLinkPreviewHtml(preview) {
     }
     if (preview.description) {
         var desc = preview.description.length > 120 ? preview.description.substring(0, 120) + '…' : preview.description;
-        html += '<div style="font-size:12px;color:var(--text-muted,#888);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + escapeHtml(desc) + '</div>';
+        html += '<div class="u-5ebbd878" style="display:-webkit-box">' + escapeHtml(desc) + '</div>';
     }
     if (preview.domain) {
         html += '<div class="u-adb28073" >' + escapeHtml(preview.domain) + '</div>';

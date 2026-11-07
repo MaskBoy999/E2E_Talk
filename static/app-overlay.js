@@ -336,13 +336,13 @@
             if (!armed) {
                 armed = true;
                 erase.textContent = 'Really erase everything?';
-                status.style.color = '#ed4245';
+                status.classList.remove('u-66b6af1c', 'u-1871df3f'), status.classList.add('u-66b6af1c');
                 status.textContent = 'Press again to erase. Everything local is deleted and you sign in from scratch.';
                 setTimeout(function () {
                     if (!armed) return;
                     armed = false;
                     erase.textContent = 'Erase everything';
-                    status.style.color = '#949ba4';
+                    status.classList.remove('u-66b6af1c', 'u-1871df3f'), status.classList.add('u-1871df3f');
                     status.textContent = '';
                 }, 12000);
                 return;
@@ -350,7 +350,7 @@
             armed = false;
             erase.disabled = true;
             erase.textContent = 'Erasing…';
-            status.style.color = '#949ba4';
+            status.classList.remove('u-66b6af1c', 'u-1871df3f'), status.classList.add('u-1871df3f');
             status.textContent = 'Signing out…';
 
             // 1. drop the socket/call first, so nothing new arrives mid-wipe. The

@@ -17,7 +17,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-    <link rel="stylesheet" href="style.css?v=35">
+    <link rel="stylesheet" href="style.css?v=37">
 </head>
 <body>
     <!-- Inlined SVG icon sprite (hidden, referenced via <use href="#icon-name">) -->
@@ -120,13 +120,13 @@
          one is ever shown, and the still path is untouched. See the
          "Animated wallpaper" block in chat.js. -->
     <div id="app-bg">
-        <img id="app-bg-anim-img" alt="" style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center center;pointer-events:none">
-        <video id="app-bg-anim-video" muted loop playsinline autoplay style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center center;pointer-events:none"></video>
+        <img class="u-5621dda2" id="app-bg-anim-img" alt="" style="display:none">
+        <video class="u-5621dda2" id="app-bg-anim-video" muted loop playsinline autoplay style="display:none"></video>
         <!-- Nothing in this file's own header makes a browser play a GIF at a
              rate other than the one baked into it, so a speed other than 1×
              decodes the frames and draws them here instead. Hidden at 1×, where
              the <img> above animates natively. -->
-        <canvas id="app-bg-anim-canvas" aria-hidden="true" style="display:none;position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+        <canvas class="u-0af070d3" id="app-bg-anim-canvas" aria-hidden="true" style="display:none"></canvas>
     </div>
     <!-- Transparent drag surface, only active while editing the background (desktop) -->
     <div id="app-bg-drag" title="Drag to move the background"></div>
@@ -161,7 +161,7 @@
             </select>
             <label class="app-bg-ctrl-label" for="app-bg-edit-zoom">Zoom <span id="app-bg-edit-zoom-val">100%</span></label>
             <input type="range" id="app-bg-edit-zoom" min="100" max="300" step="10" value="100" class="app-bg-zoom">
-            <span id="app-bg-edit-speed-wrap" style="display:none;align-items:center;gap:8px">
+            <span class="u-250fc4eb" id="app-bg-edit-speed-wrap" style="display:none">
                 <label class="app-bg-ctrl-label" for="app-bg-edit-speed">Speed <span id="app-bg-edit-speed-val">1×</span></label>
                 <input type="range" id="app-bg-edit-speed" min="0.25" max="3" step="0.05" value="1" class="app-bg-zoom">
             </span>
@@ -365,7 +365,7 @@
                 <button class="key-action-btn" id="copy-invite-btn" title="Copy"><svg class="ui-icon" width="14" height="14"><use href="#icon-copy"/></svg></button>
                 <button class="key-action-btn" id="invite-qr-btn" title="Show QR Code"><svg class="ui-icon" width="14" height="14"><use href="#icon-qrcode"/></svg></button>
             </div>
-            <div id="invite-qr-container" class="qr-code-container" style="display:none;margin-top:10px;">
+            <div id="invite-qr-container" class="qr-code-container u-d2c171b1" style="display:none">
                 <div id="invite-qr-canvas" class="qr-code-canvas"></div>
                 <p class="qr-warning"><svg class="ui-icon" width="14" height="14"><use href="#icon-warning"/></svg> This shows the invite code. Only show to trusted people.</p>
                 <div class="qr-actions">
@@ -444,36 +444,36 @@
                 <h3 class="u-7a23ddbd" >Server Settings</h3>
                 <!-- Server Picture -->
                 <div class="settings-group u-ddd36873" id="server-settings-picture-section" >
-                    <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;">
-                        <div id="server-settings-picture-preview" class="server-settings-picture" style="width:48px;height:48px;border-radius:12px;background:var(--bg-secondary);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:var(--text-primary);flex-shrink:0;overflow:hidden;">
+                    <div class="u-cdad223d" style="display:flex">
+                        <div id="server-settings-picture-preview" class="server-settings-picture u-2ebdc574" style="display:flex">
                             <span id="server-settings-pic-fallback">#</span>
                         </div>
                         <div>
                             <button class="btn btn-sm u-5f3f7844" id="server-picture-upload-btn" ><svg class="ui-icon" width="12" height="12"><use href="#icon-image"/></svg> Upload Picture</button>
-                            <button class="btn btn-sm" id="server-picture-remove-btn" style="font-size:12px;padding:5px 12px;display:none;color:var(--danger);"><svg class="ui-icon" width="12" height="12"><use href="#icon-close"/></svg> Remove Picture</button>
+                            <button class="btn btn-sm u-6e78c437" id="server-picture-remove-btn" style="display:none"><svg class="ui-icon" width="12" height="12"><use href="#icon-close"/></svg> Remove Picture</button>
                             <p class="u-2cf3baea" >Crop a square region. Max 420×420 px.</p>
                         </div>
                     </div>
                     <input type="file" id="server-picture-file-input" accept="image/*" style="display:none">
                     <!-- Server picture crop modal (inside settings) -->
-                    <div id="server-picture-crop-container" style="display:none;margin-top:12px;">
+                    <div class="u-56f43562" id="server-picture-crop-container" style="display:none">
                         <div class="profile-crop-frame" id="server-picture-crop-frame">
                             <img id="server-picture-crop-image" style="display:none;" alt="Crop preview">
                             <div id="server-picture-crop-overlay" class="profile-crop-dark-overlay u-e5280047" ></div>
                         </div>
                         <p class="u-9cd6ee18" id="server-picture-crop-info" >Drag or resize the square to select the area to keep. It will be resized to 420×420.</p>
-                        <div style="display:flex;gap:8px;justify-content:flex-end;">
+                        <div class="u-88d23e89" style="display:flex">
                             <button class="btn-cancel u-e71ae94b" id="server-picture-crop-cancel" >Cancel</button>
                             <button class="btn-invite u-e71ae94b" id="server-picture-crop-confirm" >Crop & Save</button>
                         </div>
-                        <div id="server-picture-upload-progress" style="display:none;margin-top:8px;">
+                        <div class="u-8a77e5a3" id="server-picture-upload-progress" style="display:none">
                             <div class="progress-bar u-da05748b" >
                                 <div id="server-picture-upload-progress-fill" class="progress-fill u-3036d02f" ></div>
                             </div>
                             <span class="u-62714d3f" id="server-picture-upload-progress-text" >Processing...</span>
                         </div>
-                        <div id="server-picture-upload-error" style="color:var(--danger);font-size:12px;display:none;margin-top:6px;"></div>
-                        <div id="server-picture-upload-status" style="font-size:12px;color:var(--accent);display:none;margin-top:6px;"></div>
+                        <div class="u-e7a408cb" id="server-picture-upload-error" style="display:none"></div>
+                        <div class="u-af659135" id="server-picture-upload-status" style="display:none"></div>
                     </div>
                 </div>
                 <div class="settings-group u-ddd36873" id="server-settings-joins-section" >
@@ -491,9 +491,9 @@
 
                 <!-- Roles & permissions (rendered by roles.js / ServerRoles) -->
                 <div class="settings-group u-abf06627" id="server-roles-section" >
-                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                    <div class="u-7357596b" style="display:flex">
                         <h4 class="u-5bbed932" >Roles &amp; Permissions</h4>
-                        <button class="btn btn-sm" id="create-role-btn" style="font-size:12px;padding:4px 10px;display:none">+ Create Role</button>
+                        <button class="btn btn-sm u-ab5fb27a" id="create-role-btn" style="display:none">+ Create Role</button>
                     </div>
                     <p class="settings-hint u-8494ee64" >
                         Permissions are granted through roles (one role per member). <b>@everyone</b> applies to everyone without another role. A role can only affect roles ranked below it — the owner always keeps every permission.
@@ -503,7 +503,7 @@
                         <div class="role-editor-actions u-fdf33f23" >
                             <button class="btn-invite" id="save-role-btn">Save role</button>
                             <button class="btn-cancel" id="cancel-role-btn">Cancel</button>
-                            <button class="btn-cancel" id="delete-role-btn" style="display:none;color:var(--danger)">Delete role</button>
+                            <button class="btn-cancel u-497726e8" id="delete-role-btn" style="display:none">Delete role</button>
                         </div>
                         <div class="role-editor-head">
                             <input type="color" id="role-color-input" class="role-color-input" value="#99aab5" title="Role color (member list circle)">
@@ -518,11 +518,11 @@
                         </label>
                         <div id="role-perm-boxes" class="role-perm-boxes"></div>
                         <div class="role-overwrite">
-                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                            <div class="u-61c61b9a" style="display:flex">
                                 <div class="u-96607bd3" >Channel / category overrides</div>
-                                <div style="display:flex;gap:6px">
-                                    <button class="btn-cancel" id="cancel-role-overwrite-btn" style="font-size:11px;padding:3px 8px;display:none">Cancel</button>
-                                    <button class="btn btn-sm btn-invite" id="save-role-overwrite-btn" style="font-size:11px;padding:3px 8px;display:none;background:var(--accent);border-color:var(--accent)">Save</button>
+                                <div class="u-f0abc1db" style="display:flex">
+                                    <button class="btn-cancel u-d04c880c" id="cancel-role-overwrite-btn" style="display:none">Cancel</button>
+                                    <button class="btn btn-sm btn-invite u-4319b23c" id="save-role-overwrite-btn" style="display:none">Save</button>
                                 </div>
                             </div>
                             <select id="role-overwrite-target" class="role-ow-target"></select>
@@ -551,7 +551,7 @@
                         <button id="friend-scan-qr-btn" class="btn-import-qr"><svg class="ui-icon" width="14" height="14"><use href="#icon-search"/></svg> Scan QR Code</button>
                 <input type="file" id="friend-qr-file-input" accept="image/*" style="display:none">
             </div>
-            <div id="add-friend-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="add-friend-error" style="display:none"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="cancel-add-friend">Cancel</button>
                 <button class="btn-invite" id="confirm-add-friend">Send Friend Request</button>
@@ -586,7 +586,7 @@
     </div>
 
     <!-- QR Scanner Modal -->
-    <div class="modal" id="qr-scanner-modal" style="display:none;z-index:2000">
+    <div class="modal u-6980be83" id="qr-scanner-modal" style="display:none">
         <div class="qr-scanner-content">
             <button id="qr-scanner-close" class="qr-scanner-close">&times;</button>
             <div class="qr-scanner-viewport">
@@ -656,7 +656,7 @@
                         <span class="toggle-label u-9d3f8575" >Block incoming friend requests</span>
                     </label>
                     <p class="settings-hint">When enabled, other users cannot send you friend requests.</p>
-                    <div style="display:flex;align-items:center;gap:8px;margin-top:14px">
+                    <div class="u-4196f9d7" style="display:flex">
                         <label class="settings-row-label" for="auto-lock-minutes">Auto-lock after (idle minutes, 0 = off):</label>
                         <input type="number" id="auto-lock-minutes" min="0" max="1440" step="1" class="settings-field settings-field-narrow" />
                     </div>
@@ -852,7 +852,7 @@
                     </select>
                     <p class="settings-hint">How long to keep a finger still on a server, folder, channel, category, DM or role before its right-click menu opens. Moving further than the Touch Drag distance inside that window starts a drag instead, so holding is the touch equivalent of a right-click.</p>
                 </div>
-                <div class="settings-group" id="hardware-acceleration-group" style="display:none;padding-bottom:12px;border-bottom:1px solid var(--bg-border);margin-top:16px">
+                <div class="settings-group u-ea646701" id="hardware-acceleration-group" style="display:none">
                     <h4>Hardware Acceleration</h4>
                     <label class="settings-toggle">
                         <input type="checkbox" id="hardware-acceleration-toggle">
@@ -900,17 +900,17 @@
                         <button class="btn btn-secondary" id="notif-sound-record-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Record</button>
                         <button class="btn btn-danger" id="notif-sound-reset-btn">Reset to Default</button>
                     </div>
-                    <div id="notif-sound-recording" style="display:none;margin-top:8px;padding:8px 12px;background:rgba(244,67,54,0.1);border-radius:6px;border:1px solid rgba(244,67,54,0.3);font-size:13px;color:var(--text-primary);">
-                        <span id="notif-record-indicator" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f44336;margin-right:8px;animation:pulse 1s infinite;"></span>
+                    <div class="u-10c34ff3" id="notif-sound-recording" style="display:none">
+                        <span class="u-a60f809e" id="notif-record-indicator" style="display:inline-block"></span>
                         Recording... <span id="notif-record-timer">0:00</span>
                         <button class="btn btn-secondary u-4ba40a15" id="notif-record-stop-btn" >Stop</button>
                         <button class="btn-cancel u-dd2196f8" id="notif-record-cancel-btn" >Cancel</button>
                     </div>
-                    <p class="notif-sound-file-name" id="notif-sound-file-name" style="display:none;margin-top:8px;"></p>
+                    <p class="notif-sound-file-name u-8a77e5a3" id="notif-sound-file-name" style="display:none"></p>
                     <p class="notif-sound-status u-cb5a88fc" id="notif-sound-status" ></p>
-                    <div id="notif-trim" style="display:none;margin-top:10px;padding:10px 12px;background:rgba(88,101,242,0.08);border-radius:6px;border:1px solid var(--border-color);font-size:13px;color:var(--text-primary);">
+                    <div class="u-c275bbe4" id="notif-trim" style="display:none">
                         <div class="u-63312162" >This audio is <span id="notif-trim-total">0:00</span> — pick the part to keep (1s–30s):</div>
-                        <canvas id="notif-trim-waveform" width="560" height="80" style="display:block;width:100%;height:80px;margin-top:8px;border-radius:6px;background:#0e0e14;cursor:pointer;" title="Click to jump the start time there"></canvas>
+                        <canvas class="u-451a797a" id="notif-trim-waveform" width="560" height="80" style="display:block" title="Click to jump the start time there"></canvas>
                         <div class="u-b17b0beb" >Click the waveform to set the start time.</div>
                         <div class="u-b1ecc496" >
                             <label class="u-d59a4f23" for="notif-trim-start" >Start</label>
@@ -922,18 +922,18 @@
                             <input class="u-cad980f4" type="range" id="notif-trim-len" min="1" max="30" step="1" value="10" >
                             <div class="u-9b4e79d3"  id="notif-trim-len-label">10s</div>
                         </div>
-                        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                        <div class="u-6ea24883" style="display:flex">
                             <button class="btn btn-secondary" id="notif-trim-preview-btn"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg> Preview</button>
                             <button class="btn btn-primary" id="notif-trim-save-btn">Save This Part</button>
                             <button class="btn btn-secondary" id="notif-trim-cancel-btn">Cancel</button>
                         </div>
                     </div>
-                    <div class="notif-volume-row" style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;color:var(--text-muted)">
+                    <div class="notif-volume-row u-07b0440b" style="display:flex">
                         <label for="notif-volume-slider">Volume:</label>
                         <input type="range" id="notif-volume-slider" min="0" max="100" value="50" class="notif-volume-slider">
                         <span id="notif-volume-label">50%</span>
                     </div>
-                    <canvas class="notif-visualizer" id="notif-visualizer" width="280" height="50" style="display:none;margin-top:8px;border-radius:6px;"></canvas>
+                    <canvas class="notif-visualizer u-1ae38463" id="notif-visualizer" width="280" height="50" style="display:none"></canvas>
                     <label class="settings-toggle u-d2c171b1" >
                         <input type="checkbox" id="notif-background-only">
                         <span class="toggle-slider"></span>
@@ -1037,22 +1037,22 @@
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_stickers"> <span>Refresh custom stickers</span></label>
                         <label class="settings-checkbox-label"><input type="checkbox" id="hb_refresh_messages"> <span>Update message display styles</span></label>
                     </div>
-                    <div id="reauth-section" style="display:none;margin-top:12px;">
-                        <div style="display:flex;align-items:center;gap:8px;">
+                    <div class="u-56f43562" id="reauth-section" style="display:none">
+                        <div class="u-250fc4eb" style="display:flex">
                             <div class="auth-input-row u-301af42c" >
                                 <input type="password" id="reauth-password" placeholder="Enter your password" class="modal-input auth-code-input" />
                                 <button type="button" class="toggle-visibility-btn" id="toggle-reauth-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                             </div>
                             <button class="btn-reauth-confirm u-810fdb7a" id="reauth-confirm-btn" >Confirm</button>
                         </div>
-                        <p id="reauth-error" class="error-text" style="display:none;margin-top:8px;"></p>
+                        <p id="reauth-error" class="error-text u-8a77e5a3" style="display:none"></p>
                     </div>
                 </div>
                 <div class="settings-group">
                     <h4>Change Password</h4>
                     <p class="settings-hint">Change the password you use to sign in. Your identity, messages, and data are unaffected — the password just unlocks the same keys. All other devices are signed out immediately and will need the new password to sign in again; this device stays signed in.</p>
                     <button class="btn-reauth u-b1ecc496" id="change-pw-btn" >Change Password</button>
-                    <div id="password-change-section" style="display:none;margin-top:10px;">
+                    <div class="u-d2c171b1" id="password-change-section" style="display:none">
                         <div class="auth-input-row u-e4ad4a16" >
                             <input type="password" id="change-pw-current" placeholder="Current password" class="modal-input auth-code-input u-7623f055" autocomplete="current-password"  />
                             <button type="button" class="toggle-visibility-btn" id="toggle-change-pw-current" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
@@ -1085,20 +1085,20 @@
                     <h4>Two-Factor Authentication (2FA)</h4>
                     <p class="settings-hint">Protect your account with a one-time code from an authenticator app (Google Authenticator, Authy, 1Password, &hellip;). You&rsquo;ll need it at every login, or one of your 8 one-time recovery codes.</p>
                     <p class="settings-hint u-0b87e9e0" id="twofa-status-line" >Checking&hellip;</p>
-                    <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;">
+                    <div class="u-fe4c02ee" style="display:flex">
                         <button class="btn-reauth" id="enable-2fa-btn">Enable 2FA</button>
-                        <button class="btn-delete-account" id="disable-2fa-btn" style="background:var(--danger,#ed4245);color:#fff;display:none;">Disable 2FA</button>
+                        <button class="btn-delete-account u-616d1209" id="disable-2fa-btn" style="display:none">Disable 2FA</button>
                     </div>
                 </div>
                 <div class="settings-group">
                     <h4>Kill Switch</h4>
                     <p class="settings-hint">Set a second password. If anyone enters it instead of your real password at the login page, your account is deleted on the spot — with all its data. If you have 2FA enabled, the 2FA code is required too, and the login just looks like a failed attempt. Off by default.</p>
                     <p class="settings-hint u-0b87e9e0" id="kill-switch-status-line" >Checking&hellip;</p>
-                    <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;">
+                    <div class="u-fe4c02ee" style="display:flex">
                         <button class="btn-reauth" id="kill-switch-set-btn">Set Kill Switch</button>
-                        <button class="btn-delete-account" id="kill-switch-remove-btn" style="background:var(--danger,#ed4245);color:#fff;display:none;">Remove Kill Switch</button>
+                        <button class="btn-delete-account u-616d1209" id="kill-switch-remove-btn" style="display:none">Remove Kill Switch</button>
                     </div>
-                    <div id="kill-switch-set-section" style="display:none;margin-top:10px;">
+                    <div class="u-d2c171b1" id="kill-switch-set-section" style="display:none">
                         <div class="auth-input-row u-e4ad4a16" >
                             <input type="password" id="kill-switch-pw" placeholder="Kill switch password (min 8 characters)" class="modal-input auth-code-input u-7623f055"  autocomplete="new-password" />
                             <button type="button" class="toggle-visibility-btn" id="toggle-kill-switch-pw" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
@@ -1118,7 +1118,7 @@
                 <div class="settings-group">
                     <h4>Self-Destruct</h4>
                     <p class="settings-hint">Auto-delete your account after a period of inactivity. Off by default. If enabled and you don't sign in within the chosen period, your account and all data will be permanently deleted.</p>
-                    <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
+                    <div class="u-378b0e45" style="display:flex">
                         <label class="u-b129f2fc" >Auto-delete after:</label>
                         <select id="self-destruct-days" class="settings-select u-f836a58a" >
                             <option value="0">Off</option>
@@ -1130,12 +1130,12 @@
                         </select>
                         <button class="btn-reauth-confirm u-ef407bde" id="self-destruct-save-btn" >Save</button>
                     </div>
-                    <div id="self-destruct-password-section" style="display:none;margin-top:10px;">
+                    <div class="u-d2c171b1" id="self-destruct-password-section" style="display:none">
                         <div class="auth-input-row u-e4ad4a16" >
                             <input type="password" id="self-destruct-password" placeholder="Enter your password to confirm" class="modal-input auth-code-input u-7623f055"  autocomplete="current-password" />
                             <button type="button" class="toggle-visibility-btn" id="toggle-self-destruct-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
-                        <div style="display:flex;gap:8px;margin-top:6px;">
+                        <div class="u-23e32a93" style="display:flex">
                             <button class="btn-reauth-confirm u-ef407bde" id="self-destruct-confirm-btn" >Confirm</button>
                             <button class="btn-delete-account u-a7affba7" id="self-destruct-cancel-btn" >Cancel</button>
                         </div>
@@ -1162,18 +1162,18 @@
                     <h4><svg class="ui-icon" width="16" height="16"><use href="#icon-shield"/></svg> Restore from Server Backup</h4>
                     <p class="settings-hint">Lost your device or cleared browser data? Enter your account password to restore all encryption keys (identity, server keys, media caches, friend code) from the server backup. This only works if you have a key backup saved (created automatically at login/registration).</p>
                     <p class="settings-hint u-83f4c875" id="backup-status-line" >Checking backup status…</p>
-                    <div id="backup-age-warning" style="display:none;margin-top:8px;padding:10px 14px;border-radius:8px;font-size:13px;background:rgba(250,166,26,0.1);border:1px solid rgba(250,166,26,0.3);color:#faa61a;"></div>
-                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+                    <div class="u-bb2cfc09" id="backup-age-warning" style="display:none"></div>
+                    <div class="u-2b7515d8" style="display:flex">
                         <button class="btn-reauth" id="save-backup-now-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-download"/></svg> Save Backup Now</button>
                         <button class="btn-reauth" id="restore-backup-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-refresh"/></svg> Restore Keys from Backup</button>
                     </div>
                     <p class="u-e6558dda" id="save-backup-status" ></p>
-                    <div id="restore-backup-section" style="display:none;margin-top:10px;">
+                    <div class="u-d2c171b1" id="restore-backup-section" style="display:none">
                         <div class="auth-input-row u-e4ad4a16" >
                             <input type="password" id="restore-backup-password" placeholder="Enter your password" class="modal-input auth-code-input u-7623f055"  autocomplete="current-password" />
                             <button type="button" class="toggle-visibility-btn" id="toggle-restore-backup-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                         </div>
-                        <div style="display:flex;gap:8px;">
+                        <div class="u-33fcd4c3" style="display:flex">
                             <button class="btn-reauth-confirm u-e78c7fe9" id="restore-backup-confirm-btn" ><svg class="ui-icon" width="14" height="14"><use href="#icon-refresh"/></svg> Restore</button>
                             <button class="btn-reauth u-e78c7fe9" id="restore-backup-cancel-btn" >Cancel</button>
                         </div>
@@ -1184,7 +1184,7 @@
                     <h4>Danger Zone</h4>
                     <p class="settings-hint">Permanently delete your account and all associated data. This cannot be undone.</p>
                     <button class="btn-delete-account" id="delete-account-btn">Delete Account</button>
-                    <div id="delete-account-section" style="display:none;margin-top:10px;">
+                    <div class="u-d2c171b1" id="delete-account-section" style="display:none">
                         <div class="auth-input-row u-e4ad4a16" >
                             <input type="password" id="delete-account-password" placeholder="Enter your password to confirm deletion" class="modal-input auth-code-input u-7623f055"  autocomplete="current-password" />
                             <button type="button" class="toggle-visibility-btn" id="toggle-delete-account-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
@@ -1280,11 +1280,11 @@
                         <span class="toggle-slider"></span>
                         <span class="toggle-label u-9d3f8575" >Local captions of everyone in the call</span>
                     </label>
-                    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+                    <div class="u-a7584b80" style="display:flex">
                         <span class="u-9d3f8575" >Spoken language</span>
                         <select id="captions-language" class="settings-field u-a828909e" ></select>
                     </div>
-                    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+                    <div class="u-a7584b80" style="display:flex">
                         <span class="u-9d3f8575" >Speech model</span>
                         <select id="captions-model" class="settings-field u-55585d51" >
                             <option value="tiny">whisper-tiny — fastest (~44 MB)</option>
@@ -1304,11 +1304,11 @@
                     </label>
                     <p class="settings-hint">Off by default (CPU). On, the speech model runs on the graphics card, which decodes a window several times faster on a machine that has one — turn it on if captions lag behind the call — and measure it instead of assuming, with the benchmark below. It changes speed, not accuracy: a wrong word came from the model itself. If the GPU cannot take it (no WebGPU in this webview, no driver, an out-of-memory card) the page falls back to the CPU and the status line says which engine is actually running. Captions carry no new exposure either way — the model is still the one bundled in the app, run on this device.</p>
                     <p class="settings-hint" id="captions-gpu-hint"></p>
-                    <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+                    <div class="u-e7a5c1dd" style="display:flex">
                         <button class="btn btn-secondary" id="captions-bench-btn">Benchmark this machine</button>
                         <span class="u-2d30a691" id="captions-bench-status" ></span>
                     </div>
-                    <pre class="settings-hint" id="captions-bench-result" style="display:none;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;margin:6px 0 0;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:8px;padding:8px 10px"></pre>
+                    <pre class="settings-hint u-387138cf" id="captions-bench-result" style="display:none"></pre>
                     <p class="settings-hint" id="captions-status"></p>
                     <p class="settings-hint">Captions are transcribed <b>on this device</b> by a speech model bundled in the app — no speech service, no network, nothing decrypted ever leaves the machine. Each participant is transcribed from the audio this device already decrypts to play it, so every line says who said it; captions are never sent to the other people in the call, never written to disk, and never put in notifications or logs.</p>
                 </div>
@@ -1323,16 +1323,16 @@
                 </div>
                 <div class="settings-group">
                     <h4>Hear Yourself (Test Mic)</h4>
-                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                    <div class="u-fcdb2ff4" style="display:flex">
                         <button type="button" id="voice-hear-self-btn" class="btn btn-primary u-651945a0" ><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Start Test</button>
                         <span class="u-ead6fb9c" id="voice-hear-self-status" ></span>
                     </div>
-                    <div id="voice-hear-self-meter-wrap" style="display:none;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:8px;padding:10px 12px;margin-top:4px">
-                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <div class="u-af28797f" id="voice-hear-self-meter-wrap" style="display:none">
+                        <div class="u-d37408dd" style="display:flex">
                             <span class="u-1c6bb4b3" >Volume</span>
                             <div class="u-1c671c8f" >
                                 <div class="u-f8749616" id="voice-hear-self-meter" ></div>
-                                <div style="position:absolute;right:4px;top:0;height:100%;display:flex;align-items:center;font-size:10px;color:var(--text-muted)" id="voice-hear-self-db"></div>
+                                <div class="u-8aba21a3" style="display:flex" id="voice-hear-self-db"></div>
                             </div>
                         </div>
                         <div class="u-7491483f" >Noise suppression: <strong id="voice-hear-self-ns-mode"></strong> &middot; Mic gain: <strong id="voice-hear-self-gain"></strong></div>
@@ -1544,10 +1544,10 @@
                 <div class="settings-group">
                     <h4>Advanced — Call Diagnostics</h4>
                     <p class="settings-hint">Live <code>getStats</code> for every peer in the current call/voice channel: frames encoded/decoded, packet loss, and whether the E2EE media transform is attached to each sender/receiver. A black feed usually shows <strong>0 frames decoded</strong> on the receiving side or a missing <strong>E2EE</strong> badge.</p>
-                    <div style="display:flex;align-items:center;gap:14px;margin-top:6px">
+                    <div class="u-191132de" style="display:flex">
                         <button type="button" id="voice-diag-refresh" class="btn btn-secondary">Refresh now</button>
                         <button type="button" id="voice-diag-heal" class="btn btn-secondary u-566ccd38" >Rejoin &amp; heal</button>
-                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer">
+                        <label class="u-6af5509a" style="display:flex">
                             <input type="checkbox" id="voice-diag-auto" checked>
                             Auto-refresh (every 2.5s)
                         </label>
@@ -1568,17 +1568,17 @@
                         <button class="btn btn-secondary" id="ringtone-record-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-mic"/></svg> Record</button>
                         <button class="btn btn-danger" id="ringtone-reset-btn">Reset to Default</button>
                     </div>
-                    <div id="ringtone-recording" style="display:none;margin-top:8px;padding:8px 12px;background:rgba(244,67,54,0.1);border-radius:6px;border:1px solid rgba(244,67,54,0.3);font-size:13px;color:var(--text-primary);">
-                        <span id="ringtone-record-indicator" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f44336;margin-right:8px;animation:pulse 1s infinite;"></span>
+                    <div class="u-10c34ff3" id="ringtone-recording" style="display:none">
+                        <span class="u-a60f809e" id="ringtone-record-indicator" style="display:inline-block"></span>
                         Recording... <span id="ringtone-record-timer">0:00</span>
                         <button class="btn btn-secondary u-4ba40a15" id="ringtone-record-stop-btn" >Stop</button>
                         <button class="btn-cancel u-dd2196f8" id="ringtone-record-cancel-btn" >Cancel</button>
                     </div>
-                    <p class="notif-sound-file-name" id="ringtone-file-name" style="display:none;margin-top:8px;"></p>
+                    <p class="notif-sound-file-name u-8a77e5a3" id="ringtone-file-name" style="display:none"></p>
                     <p class="notif-sound-status u-cb5a88fc" id="ringtone-status" ></p>
-                    <div id="ringtone-trim" style="display:none;margin-top:10px;padding:10px 12px;background:rgba(88,101,242,0.08);border-radius:6px;border:1px solid var(--border-color);font-size:13px;color:var(--text-primary);">
+                    <div class="u-c275bbe4" id="ringtone-trim" style="display:none">
                         <div class="u-63312162" >This audio is <span id="ringtone-trim-total">0:00</span> — pick the part to keep (1s–30s):</div>
-                        <canvas id="ringtone-trim-waveform" width="560" height="80" style="display:block;width:100%;height:80px;margin-top:8px;border-radius:6px;background:#0e0e14;cursor:pointer;" title="Click to jump the start time there"></canvas>
+                        <canvas class="u-451a797a" id="ringtone-trim-waveform" width="560" height="80" style="display:block" title="Click to jump the start time there"></canvas>
                         <div class="u-b17b0beb" >Click the waveform to set the start time.</div>
                         <div class="u-b1ecc496" >
                             <label class="u-d59a4f23" for="ringtone-trim-start" >Start</label>
@@ -1590,18 +1590,18 @@
                             <input class="u-cad980f4" type="range" id="ringtone-trim-len" min="1" max="30" step="1" value="10" >
                             <div class="u-9b4e79d3"  id="ringtone-trim-len-label">10s</div>
                         </div>
-                        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                        <div class="u-6ea24883" style="display:flex">
                             <button class="btn btn-secondary" id="ringtone-trim-preview-btn"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg> Preview</button>
                             <button class="btn btn-primary" id="ringtone-trim-save-btn">Save This Part</button>
                             <button class="btn btn-secondary" id="ringtone-trim-cancel-btn">Cancel</button>
                         </div>
                     </div>
-                    <div class="notif-volume-row" style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;color:var(--text-muted)">
+                    <div class="notif-volume-row u-07b0440b" style="display:flex">
                         <label for="ringtone-volume-slider">Volume:</label>
                         <input type="range" id="ringtone-volume-slider" min="0" max="100" value="60" class="notif-volume-slider">
                         <span id="ringtone-volume-label">60%</span>
                     </div>
-                    <canvas class="notif-visualizer" id="ringtone-visualizer" width="280" height="50" style="display:none;margin-top:8px;border-radius:6px;"></canvas>
+                    <canvas class="notif-visualizer u-1ae38463" id="ringtone-visualizer" width="280" height="50" style="display:none"></canvas>
                 </div>
             </div>
 
@@ -1620,11 +1620,11 @@
                 <div class="vault-quota-bar"><div class="vault-quota-fill" id="vault-quota-fill"></div></div>
                 <span class="vault-quota-text" id="vault-quota-text"></span>
             </div>
-            <div style="display:flex;gap:8px;margin-bottom:12px">
+            <div class="u-0f88b512" style="display:flex">
                 <button class="btn btn-primary" id="vault-upload-btn"><svg class="ui-icon" width="16" height="16"><use href="#icon-upload"/></svg> Upload File</button>
                 <input type="file" id="vault-file-input" style="display:none" multiple>
             </div>
-            <div id="vault-upload-progress" style="display:none;margin-bottom:8px">
+            <div class="u-fdf33f23" id="vault-upload-progress" style="display:none">
                 <div class="u-bf992ad0"  id="vault-upload-status">Encrypting...</div>
                 <div class="u-40acbb68" >
                     <div class="u-7fbcae15" id="vault-upload-bar" ></div>
@@ -1661,13 +1661,13 @@
             <h3 class="u-4ea9d16b" >Upload File</h3>
             <div id="upload-file-info" class="upload-file-info"></div>
             <div id="upload-preview" class="upload-preview"></div>
-            <div id="upload-progress-container" style="display:none;margin:12px 0">
+            <div class="u-d60550f6" id="upload-progress-container" style="display:none">
                 <div class="progress-bar-container">
                     <div class="progress-bar-fill" id="upload-progress-fill"></div>
                 </div>
                 <div id="upload-progress-text" class="progress-text">0%</div>
             </div>
-            <div id="upload-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="upload-error" style="display:none"></div>
             <div id="upload-quick-actions" class="upload-quick-actions" style="display:none">
                 <button class="upload-action-btn" id="upload-btn-edit" title="Edit"><svg class="ui-icon" width="14" height="14"><use href="#icon-edit"/></svg></button>
                 <button class="upload-action-btn" id="upload-btn-mirror" title="Mirror"><svg class="ui-icon" width="14" height="14"><use href="#icon-mirror"/></svg></button>
@@ -1676,7 +1676,7 @@
             </div>
             <div class="modal-actions u-aed3b51d" >
                 <button class="btn-cancel u-6c4e7058" id="add-more-files" >+ Add Files</button>
-                <div style="display:flex;gap:8px">
+                <div class="u-33fcd4c3" style="display:flex">
                     <button class="btn-cancel" id="cancel-upload">Cancel</button>
                     <button class="btn-invite" id="confirm-upload">Upload</button>
                 </div>
@@ -1686,7 +1686,7 @@
     </div>
 
     <!-- Photo Edit Modal -->
-    <div class="modal" id="photo-edit-modal" style="display:none;z-index:10001">
+    <div class="modal u-a93646fb" id="photo-edit-modal" style="display:none">
         <div class="photo-edit-container">
             <div class="photo-edit-header">
                 <span class="photo-edit-title">Edit Photo</span>
@@ -1725,7 +1725,7 @@
             <div id="photo-crop-settings" class="photo-brush-settings" style="display:none">
                 <label class="photo-bs-label">Width: <input type="number" id="photo-crop-w" min="10" value="100"> px</label>
                 <label class="photo-bs-label">Height: <input type="number" id="photo-crop-h" min="10" value="100"> px</label>
-                <div style="margin-left:auto;display:flex;gap:6px">
+                <div class="u-c71ea9d0" style="display:flex">
                     <button class="btn-cancel u-6cb285c6" id="photo-crop-cancel" >Cancel Crop</button>
                     <button class="btn-invite u-6cb285c6" id="photo-crop-confirm" >Apply Crop</button>
                 </div>
@@ -1738,7 +1738,7 @@
     </div>
 
     <!-- Video Edit Modal -->
-    <div class="modal" id="video-edit-modal" style="display:none;z-index:10001">
+    <div class="modal u-a93646fb" id="video-edit-modal" style="display:none">
         <div class="video-edit-container">
             <div class="video-edit-header">
                 <span class="video-edit-title">Edit Video</span>
@@ -1758,7 +1758,7 @@
                     <button class="btn-invite" id="video-edit-confirm">Confirm</button>
                 </div>
             </div>
-            <div id="video-edit-error" style="display:none;color:var(--danger);font-size:13px;padding:8px 16px;background:var(--bg-secondary)"></div>
+            <div class="u-e091bef1" id="video-edit-error" style="display:none"></div>
             <div class="video-edit-canvas-wrap" id="video-edit-wrap">
                 <canvas id="video-edit-canvas"></canvas>
                 <video id="video-edit-source" style="display:none"></video>
@@ -1799,7 +1799,7 @@
             <div id="video-crop-settings" class="photo-brush-settings" style="display:none">
                 <label class="photo-bs-label">Width: <input type="number" id="video-crop-w" min="10" value="100"> px</label>
                 <label class="photo-bs-label">Height: <input type="number" id="video-crop-h" min="10" value="100"> px</label>
-                <div style="margin-left:auto;display:flex;gap:6px">
+                <div class="u-c71ea9d0" style="display:flex">
                     <button class="btn-cancel u-6cb285c6" id="video-crop-cancel" >Cancel Crop</button>
                     <button class="btn-invite u-6cb285c6" id="video-crop-confirm" >Apply Crop</button>
                 </div>
@@ -1808,7 +1808,7 @@
     </div>
 
     <!-- Audio Edit Modal -->
-    <div class="modal" id="audio-edit-modal" style="display:none;z-index:10001">
+    <div class="modal u-a93646fb" id="audio-edit-modal" style="display:none">
         <div class="audio-edit-container">
             <div class="audio-edit-header">
                 <span class="audio-edit-title">Edit Audio</span>
@@ -1915,7 +1915,7 @@
     <!-- Forward Modal -->
     <div class="modal-overlay" id="forward-modal" style="display:none">
         <div class="modal-content u-46842656" >
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <div class="u-ce63d6d8" style="display:flex">
                 <h3 class="u-9897f0f0" >Forward message to...</h3>
                 <button class="u-924b313a" id="cancel-forward" >&times;</button>
             </div>
@@ -1980,7 +1980,7 @@
             </div>
 
             <!-- Step 2: Crop preview -->
-            <div id="sticker-upload-step-crop" style="display:none;text-align:center;">
+            <div class="u-91a87015" id="sticker-upload-step-crop" style="display:none">
                 <div id="sticker-crop-container" class="sticker-crop-container">
                     <div class="sticker-crop-frame" id="sticker-crop-frame">
                         <img class="u-3f01e7c1" id="sticker-crop-image" >
@@ -1995,11 +1995,11 @@
                     </div>
                 </div>
                 <input class="u-92a5c6f2" type="text" id="sticker-upload-name" placeholder="Sticker name" maxlength="50" >
-                <div id="sticker-upload-progress" style="display:none;margin-bottom:12px">
+                <div class="u-da12f285" id="sticker-upload-progress" style="display:none">
                     <div class="progress-bar-container"><div class="progress-bar-fill" id="sticker-progress-fill"></div></div>
                     <div class="progress-text" id="sticker-progress-text">0%</div>
                 </div>
-                <div id="sticker-upload-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+                <div class="u-cb63bb92" id="sticker-upload-error" style="display:none"></div>
                 <div class="modal-actions">
                     <button class="btn-cancel" id="cancel-sticker-upload">Cancel</button>
                     <button class="btn-invite" id="confirm-sticker-upload">Crop & Upload</button>
@@ -2019,13 +2019,13 @@
                 Your password is checked against this device's key vault, and everything stored here is then encrypted with the key it releases.
             </p>
             <div class="u-87c136df" >
-                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Your password</label>
+                <label class="u-746612da" style="display:block">Your password</label>
                 <div class="auth-input-row u-ef0b7a11" >
                     <input type="password" id="vault-pw-input" placeholder="Password" autocomplete="current-password" class="modal-input auth-code-input" />
                     <button type="button" class="toggle-visibility-btn" id="toggle-vault-pw" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
             </div>
-            <div id="vault-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="vault-pw-error" style="display:none"></div>
             <div class="modal-actions u-4725bb71" >
                 <button class="btn-cancel" id="vault-pw-cancel-btn">Cancel</button>
                 <button class="btn-invite" id="vault-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Confirm</button>
@@ -2042,24 +2042,24 @@
             </p>
             <div id="export-pw-fields">
                 <div class="u-87c136df" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Passphrase (min 8 characters)</label>
+                    <label class="u-746612da" style="display:block">Passphrase (min 8 characters)</label>
                     <input type="password" id="export-pw-input" placeholder="Enter a passphrase" autocomplete="new-password" class="modal-input u-4d62056b" >
                 </div>
                 <div class="u-87c136df" id="export-pw-confirm-wrap" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm passphrase</label>
+                    <label class="u-746612da" style="display:block">Confirm passphrase</label>
                     <input type="password" id="export-pw-confirm-input" placeholder="Repeat the passphrase" autocomplete="new-password" class="modal-input u-4d62056b" >
                 </div>
             </div>
-            <div id="export-pw-nopw-wrap" style="margin-bottom:16px;display:none">
-                <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer">
+            <div class="u-87c136df" id="export-pw-nopw-wrap" style="display:none">
+                <label class="settings-checkbox-label u-f3829e5e" style="display:flex">
                     <input class="u-ebb3297b" type="checkbox" id="export-pw-nopw" >
                     Export without a passphrase (not encrypted)
                 </label>
             </div>
-            <div id="export-pw-nopw-note" style="display:none;margin-bottom:16px;padding:10px 12px;border:1px solid var(--bg-border);border-radius:8px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13px">
+            <div class="u-4ff23f84" id="export-pw-nopw-note" style="display:none">
                 This export has no passphrase — it is <b>not encrypted</b>. It contains your identity keys and recent message text in the clear (plain JSON, <b>e2e-chat-export.json</b>), so anyone who gets the file can read all of it and can impersonate you with the keys inside. Store it somewhere safe.
             </div>
-            <div id="export-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="export-pw-error" style="display:none"></div>
             <div class="modal-actions u-4725bb71" >
                 <button class="btn-cancel" id="export-pw-cancel-btn">Cancel</button>
                 <button class="btn-invite" id="export-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Export</button>
@@ -2075,24 +2075,24 @@
             </p>
             <div id="appearance-pw-fields">
                 <div class="u-87c136df" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                    <label class="u-746612da" style="display:block">Password</label>
                     <input type="password" id="appearance-pw-input" placeholder="Enter a password" autocomplete="new-password" class="modal-input u-4d62056b" >
                 </div>
                 <div class="u-87c136df" id="appearance-pw-confirm-wrap" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm password</label>
+                    <label class="u-746612da" style="display:block">Confirm password</label>
                     <input type="password" id="appearance-pw-confirm-input" placeholder="Repeat the password" autocomplete="new-password" class="modal-input u-4d62056b" >
                 </div>
             </div>
-            <div id="appearance-pw-nopw-wrap" style="margin-bottom:16px;display:none">
-                <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer">
+            <div class="u-87c136df" id="appearance-pw-nopw-wrap" style="display:none">
+                <label class="settings-checkbox-label u-f3829e5e" style="display:flex">
                     <input class="u-ebb3297b" type="checkbox" id="appearance-pw-nopw" >
                     Export without a password (not encrypted)
                 </label>
             </div>
-            <div id="appearance-pw-nopw-note" style="display:none;margin-bottom:16px;padding:10px 12px;border:1px solid var(--bg-border);border-radius:8px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13px">
+            <div class="u-4ff23f84" id="appearance-pw-nopw-note" style="display:none">
                 This backup has no password — it is not encrypted. Anyone with the file can read your appearance settings.
             </div>
-            <div id="appearance-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="appearance-pw-error" style="display:none"></div>
             <div class="modal-actions u-4725bb71" >
                 <button class="btn-cancel" id="appearance-pw-cancel-btn">Cancel</button>
                 <button class="btn-invite" id="appearance-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Confirm</button>
@@ -2109,24 +2109,24 @@
             </p>
             <div id="css-pw-fields">
                 <div class="u-87c136df" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Password</label>
+                    <label class="u-746612da" style="display:block">Password</label>
                     <input type="password" id="css-pw-input" placeholder="Enter a password" autocomplete="new-password" class="modal-input u-4d62056b" >
                 </div>
                 <div class="u-87c136df" id="css-pw-confirm-wrap" >
-                    <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Confirm password</label>
+                    <label class="u-746612da" style="display:block">Confirm password</label>
                     <input type="password" id="css-pw-confirm-input" placeholder="Repeat the password" autocomplete="new-password" class="modal-input u-4d62056b" >
                 </div>
             </div>
-            <div id="css-pw-nopw-wrap" style="margin-bottom:16px;display:none">
-                <label class="settings-checkbox-label" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary);cursor:pointer">
+            <div class="u-87c136df" id="css-pw-nopw-wrap" style="display:none">
+                <label class="settings-checkbox-label u-f3829e5e" style="display:flex">
                     <input class="u-ebb3297b" type="checkbox" id="css-pw-nopw" >
                     Export without a password (not encrypted)
                 </label>
             </div>
-            <div id="css-pw-nopw-note" style="display:none;margin-bottom:16px;padding:10px 12px;border:1px solid var(--bg-border);border-radius:8px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13px">
+            <div class="u-4ff23f84" id="css-pw-nopw-note" style="display:none">
                 This backup has no password — it is not encrypted. Anyone with the file can read your CSS.
             </div>
-            <div id="css-pw-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="css-pw-error" style="display:none"></div>
             <div class="modal-actions u-4725bb71" >
                 <button class="btn-cancel" id="css-pw-cancel-btn">Cancel</button>
                 <button class="btn-invite" id="css-pw-confirm-btn"><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Confirm</button>
@@ -2141,11 +2141,11 @@
                 Enter your <strong>account password</strong> to continue.
             </p>
             <div class="u-87c136df" >
-                <label style="display:block;margin-bottom:6px;color:var(--text-muted);font-size:13px">Account Password</label>
+                <label class="u-746612da" style="display:block">Account Password</label>
                 <input type="password" id="fc-password-input" placeholder="Enter your password" autocomplete="off" class="modal-input u-4d62056b" >
             </div>
-            <div id="fc-password-error" style="color:var(--danger);margin-bottom:12px;display:none;font-size:13px"></div>
-            <div id="fc-password-success" style="color:#4caf50;margin-bottom:12px;display:none;font-size:13px"></div>
+            <div class="u-cb63bb92" id="fc-password-error" style="display:none"></div>
+            <div class="u-b83b4013" id="fc-password-success" style="display:none"></div>
             <div class="modal-actions u-4725bb71" >
                 <button class="btn-cancel" id="fc-cancel-btn">Cancel</button>
                 <button class="btn-invite u-fed4b277" id="fc-recover-btn" ><svg class="ui-icon" width="14" height="14"><use href="#icon-lock"/></svg> Recover Code</button>
@@ -2180,7 +2180,7 @@
                         <!-- Edit button (own profile only) — bottom-right, small pencil icon -->
                         <button class="profile-edit-btn" id="profile-edit-btn" style="display:none" title="Edit Profile" aria-label="Edit profile"><svg class="ui-icon" width="16" height="16" aria-hidden="true"><use href="#icon-edit"/></svg></button>
                         <!-- 5.4: device verification (SAS) — for other people only -->
-                        <div id="profile-verify-row" style="display:none;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap;">
+                        <div class="u-3375afb4" id="profile-verify-row" style="display:none">
                             <button class="btn-reauth u-4ad99861" id="profile-verify-btn" >Verify device</button>
                             <span class="u-4c462afd" id="profile-verify-status" ></span>
                         </div>
@@ -2206,7 +2206,7 @@
             <div class="u-9ae3da0d" id="device-verify-emoji" ></div>
             <div class="u-d396ce21" id="device-verify-digits" ></div>
             <div class="settings-hint u-45e779d5" >Yours: <span id="device-verify-mine"></span><br>Theirs: <span id="device-verify-theirs"></span></div>
-            <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap;">
+            <div class="u-92558f7c" style="display:flex">
                 <button class="btn-reauth" id="device-verify-confirm">They match — mark verified</button>
                 <button class="btn-reauth u-b65222cf" id="device-verify-cancel" >Close</button>
             </div>
@@ -2408,7 +2408,7 @@
                 <span class="u-5a5bc850" id="voice-popup-speaker-volume-val" >100%</span>
                 <button type="button" id="voice-popup-speaker-reset" class="voice-popup-reset-btn" title="Reset speaker volume to 100%">↺</button>
             </div>
-            <label class="voice-popup-check" style="display:flex;align-items:center;gap:8px">
+            <label class="voice-popup-check u-250fc4eb" style="display:flex">
                 <select class="u-9c8f05b6" id="voice-popup-noise-suppression" >
                     <option value="rnnoise">NS: RNNoise</option>
                     <option value="rnnoise-gate">NS: Krisp-like</option>
@@ -2416,7 +2416,7 @@
                     <option value="off">NS: Off</option>
                 </select>
             </label>
-            <label class="voice-popup-check" style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary);cursor:pointer;margin-top:4px">
+            <label class="voice-popup-check u-fc00ece1" style="display:flex">
                 <input class="u-6a3a862a" type="checkbox" id="voice-popup-disable-sb" >
                 Disable soundboard sounds
             </label>
@@ -2428,12 +2428,12 @@
         <div class="soundboard-panel">
             <div class="soundboard-header">
                 <h3>Soundboard</h3>
-                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer">
+                <div class="u-de466684" style="display:flex">
+                    <label class="u-36b927f4" style="display:flex">
                         <input class="u-0c1aea14" type="checkbox" id="soundboard-self-hear" >
                         Hear myself
                     </label>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer">
+                    <label class="u-36b927f4" style="display:flex">
                         <input class="u-0c1aea14" type="checkbox" id="soundboard-loop" >
                         Loop
                     </label>
@@ -2539,17 +2539,17 @@
                     <button type="button" class="toggle-visibility-btn" id="toggle-twofa-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
                 </div>
                 <button class="btn-invite" id="twofa-start-btn">Begin enrollment</button>
-                <p id="twofa-password-error" style="color:var(--danger);display:none;font-size:13px;margin-top:8px;"></p>
+                <p class="u-406b1209" id="twofa-password-error" style="display:none"></p>
             </div>
             <div id="twofa-step-qr" style="display:none;">
                 <p class="u-35cc8073" >Scan the QR with your authenticator app, or enter the secret manually:</p>
                 <div class="u-e8dec544" >
-                    <div id="twofa-qr" style="display:inline-block;background:#fff;padding:8px;border-radius:8px;"></div>
+                    <div class="u-ac71cadb" id="twofa-qr" style="display:inline-block"></div>
                 </div>
                 <p class="u-3dd41e45" id="twofa-secret-text" ></p>
                 <p class="u-613a61a1" ><strong>Recovery codes</strong> — save these now, they&rsquo;re shown only once:</p>
                 <div id="twofa-recovery-codes"></div>
-                <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+                <div class="u-9142b70b" style="display:flex">
                     <button class="btn-invite u-4ad99861" id="twofa-copy-codes" >Copy codes</button>
                     <button class="btn-invite u-4ad99861" id="twofa-save-codes" ><svg class="ui-icon" width="12" height="12"><use href="#icon-download"/></svg> Save codes</button>
                     <span class="u-4c462afd" id="twofa-copy-status" ></span>
@@ -2557,7 +2557,7 @@
                 <p class="u-dd782726" >Enter the 6-digit code from your app to confirm:</p>
                 <input type="text" id="twofa-verify-code" placeholder="6-digit code" maxlength="12" class="modal-input u-5b173057"  />
                 <button class="btn-invite" id="twofa-verify-btn">Verify &amp; Enable</button>
-                <p id="twofa-verify-error" style="color:var(--danger);display:none;font-size:13px;margin-top:8px;"></p>
+                <p class="u-406b1209" id="twofa-verify-error" style="display:none"></p>
             </div>
             <div class="modal-actions u-88b9d5c6" >
                 <button class="btn-cancel" id="twofa-enroll-cancel">Cancel</button>
@@ -2570,7 +2570,7 @@
             <h3 class="u-bff1e648" >Disable Two-Factor Authentication</h3>
             <p class="u-35cc8073" >Enter your current code or a recovery code to disable 2FA.</p>
             <input type="text" id="twofa-disable-code" placeholder="Code" maxlength="12" class="modal-input u-5b173057"  />
-            <p id="twofa-disable-error" style="color:var(--danger);display:none;font-size:13px;margin-bottom:8px;"></p>
+            <p class="u-c05aca17" id="twofa-disable-error" style="display:none"></p>
             <div class="modal-actions">
                 <button class="btn-cancel" id="twofa-disable-cancel">Cancel</button>
                 <button class="btn-invite u-8ca0e139" id="twofa-disable-confirm" >Disable 2FA</button>
@@ -2625,7 +2625,7 @@
                 <input type="password" id="kick-all-password" placeholder="Enter your password to confirm" class="modal-input auth-code-input u-7623f055"  autocomplete="current-password" />
                 <button type="button" class="toggle-visibility-btn" id="toggle-kick-all-password" title="Show/Hide"><svg class="ui-icon" width="14" height="14"><use href="#icon-eye"/></svg></button>
             </div>
-            <p id="kick-all-error" style="color:var(--danger,#ed4245);font-size:13px;margin-bottom:10px;display:none;"></p>
+            <p class="u-eea5b4cf" id="kick-all-error" style="display:none"></p>
             <div class="modal-actions">
                 <button class="btn-cancel" id="kick-all-confirm-cancel">Cancel</button>
                 <button class="btn-invite u-8ca0e139" id="kick-all-confirm-yes" >Yes, Sign Out</button>
@@ -2635,10 +2635,10 @@
 
     <!-- Channel/Category Permissions modal -->
     <div class="modal" id="channel-perm-modal" style="display:none">
-        <div class="modal-content" style="max-width:500px;max-height:80vh;display:flex;flex-direction:column">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="modal-content u-ccf8077a" style="display:flex">
+            <div class="u-072a6ac8" style="display:flex">
                 <h3 class="u-3754b0fc" id="channel-perm-modal-title" >Edit Permissions</h3>
-                <div style="display:flex;gap:6px;align-items:center">
+                <div class="u-aebb47c0" style="display:flex">
                     <button class="btn-cancel u-ab5fb27a" id="channel-perm-cancel" >Cancel</button>
                     <button class="btn-invite u-ca143b13" id="channel-perm-save" >Save</button>
                     <button class="u-089cc371" id="channel-perm-modal-close"  title="Close">&times;</button>
@@ -2659,7 +2659,7 @@
             <h3 class="u-21011b65" >Schedule Message</h3>
             <p class="u-8bd9c67e" >Your message is encrypted locally and sent automatically at the scheduled time.</p>
             <textarea id="schedule-msg-text" placeholder="Type your message..." rows="3" class="modal-input u-65a2e0eb" ></textarea>
-            <div style="display:flex;gap:10px;margin-bottom:12px">
+            <div class="u-a7a349e9" style="display:flex">
                 <div class="auth-input-row u-0b472152" >
                     <label class="u-7b479dff" >Date</label>
                     <input type="date" id="schedule-msg-date" class="modal-input u-97445a8d"  />
@@ -2669,7 +2669,7 @@
                     <input type="time" id="schedule-msg-time" class="modal-input u-97445a8d"  />
                 </div>
             </div>
-            <p id="schedule-msg-error" style="color:var(--danger,#ed4245);font-size:12px;margin-bottom:8px;display:none"></p>
+            <p class="u-0b41b3df" id="schedule-msg-error" style="display:none"></p>
             <div class="u-9e00ace2" id="schedule-msg-list" ></div>
             <div class="modal-actions">
                 <button class="btn-cancel" id="schedule-msg-cancel">Cancel</button>
@@ -2681,12 +2681,12 @@
 <script src="ui-dialog.js?v=1"></script>
 <script src="keyvault.js?v=2"></script>
 <script src="secure-storage.js?v=6"></script>
-    <script src="voice.js?v=37"></script>
-    <script src="soundboard-pairing.js?v=13"></script>
-    <script src="thread_categories_shortcuts.js?v=13"></script>
+    <script src="voice.js?v=38"></script>
+    <script src="soundboard-pairing.js?v=14"></script>
+    <script src="thread_categories_shortcuts.js?v=15"></script>
     <script src="roles.js?v=7"></script>
     <script src="doc-preview.js?v=9"></script>
-    <script src="chat.js?v=84"></script>
+    <script src="chat.js?v=86"></script>
 <!-- The always-on "clear all app data" overlay: one button, every page, whether
      or not a connection exists. Inert in the mini call-controls window. -->
 <script src="app-overlay.js?v=5"></script>

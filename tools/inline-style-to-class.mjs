@@ -7,7 +7,12 @@
 //     or containing a backslash (an escaped quote inside a JS string);
 //   * any `style="…"` not clearly inside one HTML tag (no `<` before it, no
 //     `>` after it, or those bounds crossed by a quote/plus);
-//   * files under libs/ or vendor/ (third-party code).
+//   * `display:`/`opacity:` declarations — the app and test suite read
+//     `el.style.display`/`el.style.opacity` back as visibility flags, so
+//     those stay inline while the rest of the attribute is extracted;
+//   * files under libs/ or vendor/ (third-party code), and documents that do
+//     not load static/style.css (box-setup.html, box-wipe.html, the sandboxed
+//     doc-preview frames) — a class they cannot see would silently do nothing.
 //
 // Usage:
 //   node tools/inline-style-to-class.mjs [--apply] [files…]
@@ -46,17 +51,50 @@ function isDynamic(value) {
         value.includes('&quot;') ||
         value.includes('\n') ||
         value.includes('\r') ||
-        value.trim() === '' ||
-        // `display` is deliberately NOT extracted: both the app (46 sites) and
-        // the test suite (347 assertions) read `element.style.display` as a
-        // visibility flag, and a class-backed value reads as '' there. Moving
-        // those needs an accessor refactor (getComputedStyle/classList) first.
-        /(^|;)\s*display\s*:/.test(value)
+        value.trim() === ''
     );
+}
+
+// Declarations that must stay inline because the app and the test suite read
+// them back as visibility flags (`el.style.display === 'none'`,
+// `el.style.opacity === '0'` — custom-css.spec.ts:21,47) — a class-backed
+// value reads as '' there. Everything else in the same attribute is still
+// extracted: `style="display:none;padding:8px"` becomes
+// `style="display:none" class="u-…"` + `.u-… { padding: 8px }`.
+const PROTECTED_PROPS = new Set(['display', 'opacity']);
+
+// Split a declaration list on top-level `;`, respecting quotes and parens so
+// `url(data:image/svg+xml;base64,…)` and quoted values survive intact, then
+// partition it into declarations that stay inline and the ones to extract.
+function splitDecls(value) {
+    const parts = [];
+    let depth = 0, quote = '', cur = '';
+    for (let i = 0; i < value.length; i++) {
+        const ch = value[i];
+        if (quote) {
+            cur += ch;
+            if (ch === quote && value[i - 1] !== '\\') quote = '';
+            continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+        if (ch === '(') depth++;
+        else if (ch === ')') depth = depth > 0 ? depth - 1 : 0;
+        if (ch === ';' && depth === 0) { parts.push(cur); cur = ''; continue; }
+        cur += ch;
+    }
+    parts.push(cur);
+    const kept = [], rest = [];
+    for (const p of parts) {
+        if (p.trim() === '') continue;
+        const prop = p.trim().split(':', 1)[0].trim().toLowerCase();
+        (PROTECTED_PROPS.has(prop) ? kept : rest).push(p);
+    }
+    return { kept: kept.join(';'), extracted: rest.join(';') };
 }
 
 let converted = 0;
 let skippedDynamic = 0;
+let skippedProtectedOnly = 0;
 
 function convert(text) {
     const re = /style="([^"]*)"/g;
@@ -85,10 +123,18 @@ function convert(text) {
             continue;
         }
 
-        const cls = classFor(value);
+        // Move the static declarations to a class; keep display/opacity inline.
+        const { kept, extracted } = splitDecls(value);
+        if (!extracted) {
+            skippedProtectedOnly++;
+            continue;
+        }
+
+        const cls = classFor(extracted);
         const tag = text.slice(tagStart, tagEnd + 1);
         const rel = at - tagStart;
-        let tagNoStyle = tag.slice(0, rel) + tag.slice(rel + match[0].length);
+        const styleBack = kept ? 'style="' + kept + '"' : '';
+        let tagNoStyle = tag.slice(0, rel) + styleBack + tag.slice(rel + match[0].length);
         const cm = /class="([^"]*)"/.exec(tagNoStyle);
         if (cm) {
             const merged = (cm[1].trim() + ' ' + cls).trim();
@@ -114,7 +160,7 @@ for (const file of files) {
     results.push({ file, text, convertedText });
 }
 
-console.log(`converted: ${converted}, skipped (dynamic/non-attribute): ${skippedDynamic}, classes: ${declByClass.size}`);
+console.log(`converted: ${converted}, skipped (dynamic/non-attribute): ${skippedDynamic}, skipped (display/opacity only): ${skippedProtectedOnly}, classes: ${declByClass.size}`);
 if (!apply) {
     for (const r of results) {
         console.log(`  ${r.file}: ${r.text === r.convertedText ? 'unchanged' : 'would change'}`);
@@ -124,14 +170,17 @@ if (!apply) {
 
 // Append the generated rules to style.css in one block. Appended at the end on
 // purpose: they take the place of inline styles, which beat every stylesheet
-// rule, so they must win against the base sheet by source order.
-const cssLines = ['', '/* ─── Extracted inline styles ──────────────────────────────────────────', '   Every rule here replaced a static inline `style="…"` so a custom-CSS', '   upload can override it. Do not delete the block wholesale: the class is', '   still referenced by the element it was extracted from. */'];
-for (const [cls, decl] of declByClass) {
-    cssLines.push(`.${cls} { ${decl} }`);
+// rule, so they must win against the base sheet by source order. Nothing to do
+// on a re-run (every convertible value is already a class by then).
+if (declByClass.size > 0) {
+    const cssLines = ['', '/* ─── Extracted inline styles ──────────────────────────────────────────', '   Every rule here replaced a static inline `style="…"` so a custom-CSS', '   upload can override it (inline styles always beat a stylesheet, classes', '   do not). `display`/`opacity` declarations were deliberately left inline —', '   the app and tests read them back as visibility flags. Do not delete the', '   block wholesale: the class is still referenced by what it came from. */'];
+    for (const [cls, decl] of declByClass) {
+        cssLines.push(`.${cls} { ${decl} }`);
+    }
+    cssLines.push('');
+    const css = readFileSync(CSS_FILE, 'utf8');
+    writeFileSync(CSS_FILE, css.replace(/\s*$/, '') + '\r\n' + cssLines.join('\r\n'));
 }
-cssLines.push('');
-const css = readFileSync(CSS_FILE, 'utf8');
-writeFileSync(CSS_FILE, css.replace(/\s*$/, '') + '\r\n' + cssLines.join('\r\n'));
 
 for (const r of results) {
     if (r.text !== r.convertedText) writeFileSync(r.file, r.convertedText);

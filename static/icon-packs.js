@@ -858,7 +858,7 @@
             var reader = new FileReader();
             reader.onload = function () {
                 var parsed = parsePack(reader.result);
-                if (parsed.error) { status.style.color = 'var(--danger,#ed4245)'; status.textContent = parsed.error; return; }
+                if (parsed.error) { status.style.color = '', status.classList.add('u-68b8dbec'); status.textContent = parsed.error; return; }
                 var known = iconNames();
                 var added = 0, unknown = [];
                 Object.keys(parsed.icons).forEach(function (name) {
@@ -874,7 +874,7 @@
                 flash(msg, !added);
                 renderTab(container);
             };
-            reader.onerror = function () { status.style.color = 'var(--danger,#ed4245)'; status.textContent = 'Could not read that file.'; };
+            reader.onerror = function () { status.style.color = '', status.classList.add('u-68b8dbec'); status.textContent = 'Could not read that file.'; };
             reader.readAsText(file);
         });
 
@@ -898,11 +898,11 @@
             var reader = new FileReader();
             reader.onload = function () {
                 var parsed = parsePack(reader.result);
-                if (parsed.error) { status.style.color = 'var(--danger,#ed4245)'; status.textContent = parsed.error; return; }
+                if (parsed.error) { status.style.color = '', status.classList.add('u-68b8dbec'); status.textContent = parsed.error; return; }
                 // A one-icon file usually carries the name in its id; otherwise the
                 // icon the user clicked wins, which is what they meant.
                 var entry = parsed.icons[name] || parsed.icons[Object.keys(parsed.icons)[0]];
-                if (!entry) { status.style.color = 'var(--danger,#ed4245)'; status.textContent = 'That SVG has no drawable content.'; return; }
+                if (!entry) { status.style.color = '', status.classList.add('u-68b8dbec'); status.textContent = 'That SVG has no drawable content.'; return; }
                 _draft[name] = entry;
                 applyMap(_draft);
                 scheduleAutosave();

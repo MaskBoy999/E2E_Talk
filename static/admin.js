@@ -34,9 +34,9 @@ function toggleAutoRefresh() {
         clearInterval(autoRefreshInterval);
         autoRefreshInterval = null;
         btn.textContent = 'Auto-Refresh: OFF';
-        btn.style.background = '#555';
-        btn.style.color = '#aaa';
-        btn.style.borderColor = '#777';
+        btn.classList.remove('u-65bf9e94', 'u-7c48d376', 'u-e7883a5c', 'u-50173f01'), btn.classList.add('u-65bf9e94');
+        btn.style.color = '', btn.classList.remove('u-1d85e1b4', 'u-729d2fa4', 'u-a1b79af8', 'u-a86fac23'), btn.classList.add('u-1d85e1b4');
+        btn.classList.remove('u-9940d12f', 'u-5edb21aa'), btn.classList.add('u-9940d12f');
     } else {
         autoRefreshInterval = setInterval(function() {
             loadAllData().then(function() {
@@ -45,9 +45,9 @@ function toggleAutoRefresh() {
             });
         }, 5000);
         btn.textContent = 'Auto-Refresh: ON';
-        btn.style.background = '#2e7d32';
-        btn.style.color = '#fff';
-        btn.style.borderColor = '#4caf50';
+        btn.classList.remove('u-65bf9e94', 'u-7c48d376', 'u-e7883a5c', 'u-50173f01'), btn.classList.add('u-7c48d376');
+        btn.style.color = '', btn.classList.remove('u-1d85e1b4', 'u-729d2fa4', 'u-a1b79af8', 'u-a86fac23'), btn.classList.add('u-729d2fa4');
+        btn.classList.remove('u-9940d12f', 'u-5edb21aa'), btn.classList.add('u-5edb21aa');
     }
 }
 document.addEventListener('DOMContentLoaded', () => {
@@ -159,16 +159,16 @@ function updateAdmin2faButton() {
         .then(function (data) {
             if (data.enabled) {
                 btn.textContent = '2FA: ON';
-                btn.style.background = '#2e7d32';
+                btn.classList.remove('u-65bf9e94', 'u-7c48d376', 'u-e7883a5c', 'u-50173f01'), btn.classList.add('u-7c48d376');
             } else {
                 btn.textContent = '2FA: OFF';
-                btn.style.background = '#555';
+                btn.classList.remove('u-65bf9e94', 'u-7c48d376', 'u-e7883a5c', 'u-50173f01'), btn.classList.add('u-65bf9e94');
             }
         })
         .catch(function (e) {
             console.error('2FA status check failed:', e);
             btn.textContent = '2FA: OFF (err)';
-            btn.style.background = '#555';
+            btn.classList.remove('u-65bf9e94', 'u-7c48d376', 'u-e7883a5c', 'u-50173f01'), btn.classList.add('u-65bf9e94');
         });
 }
 
@@ -200,10 +200,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     codesWrap.style.display = 'none';
                     codeInput.placeholder = 'Enter 6-digit code';
                     codeInput.maxLength = 6;
-                    codeInput.style.letterSpacing = '2px';
-                    codeInput.style.fontFamily = 'monospace';
+                    codeInput.classList.remove('u-db32c452', 'u-baf97e0d'), codeInput.classList.add('u-db32c452');
+                    codeInput.classList.remove('u-72126da2', 'u-eb3d076e'), codeInput.classList.add('u-72126da2');
                     submitBtn.textContent = 'Disable';
-                    submitBtn.style.background = 'linear-gradient(135deg,#c62828,#b71c1c)';
+                    submitBtn.classList.remove('u-65bf9e94', 'u-7c48d376', 'u-e7883a5c', 'u-50173f01'), submitBtn.classList.add('u-e7883a5c');
                 } else {
                     _admin2faMode = 'enroll';
                     modal.dataset.step = '';
@@ -214,10 +214,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     codesWrap.style.display = 'none';
                     codeInput.placeholder = 'Enter admin password';
                     codeInput.maxLength = 128;
-                    codeInput.style.letterSpacing = '0';
-                    codeInput.style.fontFamily = 'inherit';
+                    codeInput.classList.remove('u-db32c452', 'u-baf97e0d'), codeInput.classList.add('u-baf97e0d');
+                    codeInput.classList.remove('u-72126da2', 'u-eb3d076e'), codeInput.classList.add('u-eb3d076e');
                     submitBtn.textContent = 'Start Enrollment';
-                    submitBtn.style.background = 'linear-gradient(135deg,#4caf50,#388e3c)';
+                    submitBtn.classList.remove('u-65bf9e94', 'u-7c48d376', 'u-e7883a5c', 'u-50173f01'), submitBtn.classList.add('u-50173f01');
                 }
                 modal.style.display = 'flex';
             })
@@ -318,8 +318,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     codeInput.value = '';
                     codeInput.placeholder = 'Enter 6-digit code';
                     codeInput.maxLength = 6;
-                    codeInput.style.letterSpacing = '2px';
-                    codeInput.style.fontFamily = 'monospace';
+                    codeInput.classList.remove('u-db32c452', 'u-baf97e0d'), codeInput.classList.add('u-db32c452');
+                    codeInput.classList.remove('u-72126da2', 'u-eb3d076e'), codeInput.classList.add('u-72126da2');
                     btnPass.textContent = 'Verify';
                     modal.dataset.step = 'verify-code';
                 })
@@ -444,7 +444,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 btn.textContent = 'Access Panel';
                 document.getElementById('admin-password').value = '';
                 showError('Password set! Now login with it.');
-                document.getElementById('error-message').style.color = '#4caf50';
+                document.getElementById('error-message').style.color = '', document.getElementById('error-message').classList.remove('u-1d85e1b4', 'u-729d2fa4', 'u-a1b79af8', 'u-a86fac23'), document.getElementById('error-message').classList.add('u-a1b79af8');
                 btn.disabled = false;
                 return;
             }
@@ -749,7 +749,7 @@ function showError(msg) {
     const errDiv = document.getElementById('error-message');
     errDiv.textContent = msg;
     errDiv.style.display = 'block';
-    errDiv.style.color = '';
+    errDiv.style.color = '', errDiv.classList.remove('u-1d85e1b4', 'u-729d2fa4', 'u-a1b79af8', 'u-a86fac23');
 }
 
 function showPanel() {
@@ -1296,7 +1296,7 @@ function rtFieldHtml(field, kind) {
         escapeHtml(field.label) + ' <span id="rt-src-' + field.key + '" class="rt-source"></span></label>';
     if (kind === 'size') {
         return '<div>' + label +
-            '<div style="display:flex;gap:8px;">' +
+            '<div class="u-33fcd4c3" style="display:flex">' +
             '<input type="number" id="rt-f-' + field.key + '" min="0" class="modal-input" style="flex:1;box-sizing:border-box;" />' +
             '<select id="rt-u-' + field.key + '" class="modal-input" style="width:72px;">' +
             RT_UNITS.map((u) => '<option value="' + u + '">' + u + '</option>').join('') + '</select></div></div>';
@@ -1308,7 +1308,7 @@ function rtFieldHtml(field, kind) {
 function rtSectionHtml(title, fields, kind) {
     return '<div class="u-b794d9f8" >' +
         '<div class="u-d6be19aa" >' + escapeHtml(title) + '</div>' +
-        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">' +
+        '<div class="u-1afe1b33" style="display:grid">' +
         fields.map((f) => rtFieldHtml(f, kind)).join('') + '</div></div>';
 }
 
@@ -1464,7 +1464,7 @@ function renderUsageBucket(el, rows, limit, nameKey) {
         const name = r[nameKey] || r.username || r.user_id || '?';
         const pct = limit > 0 ? Math.round((r.count / limit) * 100) : 100;
         const color = pct >= 90 ? '#f04747' : (pct >= 60 ? '#faa61a' : 'inherit');
-        return '<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid var(--border,#2a2a3a);">' +
+        return '<div class="u-f8294a14" style="display:flex">' +
             '<span title="' + escapeHtml(r.user_id || '') + '" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px;">' + escapeHtml(name) + '</span>' +
             '<span style="color:' + color + ';white-space:nowrap;">' + r.count + '/' + limit + ' · ' + r.window_remaining_s + 's</span></div>';
     }).join('');
@@ -1485,7 +1485,7 @@ async function loadRateLimitUsage() {
             hitsEl.innerHTML = '<span class="u-8c82a048" >No 429s in the last ' + data.window_seconds + 's window</span>';
         } else {
             hitsEl.innerHTML = data.recent_429s.map((h) =>
-                '<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid var(--border,#2a2a3a);">' +
+                '<div class="u-f8294a14" style="display:flex">' +
                 '<span class="u-804e7a6f" >' + escapeHtml(h.username) + '</span>' +
                 '<span class="u-b3052253" >' + escapeHtml(h.ip) + ' · ' + rtTimeAgo(h.ts) + '</span></div>'
             ).join('');
@@ -2088,7 +2088,7 @@ function showImportResults(data, allowImport, uploadsData) {
         const upOk = uploadsData.ok && missing === 0;
         summaryText += ' · Uploaded files: ' + (uploadsData.files || 0) + ' (' + formatBytes(uploadsData.bytes || 0) + ')' +
             (missing > 0 ? ' · ' + icon('warning') + ' ' + missing + ' file(s) have no DB row (would be swept)' : '');
-        if (!upOk) summary.style.color = '#faa61a';
+        if (!upOk) summary.style.color = '', summary.classList.remove('u-1d85e1b4', 'u-729d2fa4', 'u-a1b79af8', 'u-a86fac23'), summary.classList.add('u-a86fac23');
     }
     summary.textContent = summaryText;
     summary.style.color = (data.integrity_ok && (!uploadsData || (uploadsData.ok && (uploadsData.missing_rows || 0) === 0))) ? 'var(--text-primary)' : '#faa61a';
@@ -2118,7 +2118,7 @@ function showImportResults(data, allowImport, uploadsData) {
 
     // Each table row is clickable → preview its columns + rows.
     body.querySelectorAll('tr[data-import-preview]').forEach(tr => {
-        tr.style.cursor = 'pointer';
+        tr.classList.add('u-3b6a3a65');
         tr.title = 'Click to preview rows';
         tr.addEventListener('click', () => openImportPreview(tr.getAttribute('data-import-preview')));
     });

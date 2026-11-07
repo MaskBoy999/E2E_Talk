@@ -40,7 +40,19 @@
 // no 'unsafe-eval'), so `icon-helper.js`, `sw-register.js`, `pair.js`,
 // `box-setup.js` and the two sandboxed-preview bootstraps are real files that
 // the offline shell must carry.
-const CACHE_NAME = 'e2e-chat-v26';
+// v27: `style.css?v=36` (+ `chat.js?v=85`, `admin.js?v=10`,
+// `soundboard-pairing.js?v=14`, `thread_categories_shortcuts.js?v=14`) —
+// static inline `style="…"` attributes were extracted into `.u-*` classes at
+// the end of style.css (tools/inline-style-to-class.mjs) so the custom-CSS
+// upload can override them; `display`/`opacity` stayed inline because the app
+// and tests read them back as visibility flags.
+// v28: phase 2 of the same migration — static literal `el.style.x = '…'` writes
+// became `.u-*` classes too (tools/js-style-writes-to-class.mjs; `chat.js?v=86`,
+// `voice.js?v=38`, `admin.js?v=11`, `thread_categories_shortcuts.js?v=15`,
+// `style.css?v=37`). Read-back properties (`display`, `opacity`, the drag/crop
+// geometry, `backgroundImage`/`backgroundPosition`) and dynamic values stayed
+// inline.
+const CACHE_NAME = 'e2e-chat-v28';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

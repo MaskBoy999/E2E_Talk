@@ -598,7 +598,7 @@
                 '<div class="soundboard-clip-actions">' +
                 '<button class="sb-play-btn" title="Play">&#9654;</button>' +
                 '<button class="sb-pause-btn" title="Pause/Stop" style="display:none">&#9724;</button>' +
-                '<button class="sb-loading" style="display:none;font-size:14px;color:var(--accent)">&#8987;</button>' +
+                '<button class="sb-loading u-42c9d714" style="display:none">&#8987;</button>' +
                 '<button class="sb-delete-btn" title="Delete">&#128465;</button>' +
                 '</div></div>';
         });

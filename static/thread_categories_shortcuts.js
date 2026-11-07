@@ -89,7 +89,7 @@
         function clearMarks() {
             document.querySelectorAll('.drag-over-top,.drag-over-bottom,.drop-active').forEach(function (el2) {
                 el2.classList.remove('drag-over-top', 'drag-over-bottom', 'drop-active');
-                el2.style.background = '';
+                el2.style.background = '', el2.classList.remove('u-4f755af2');
             });
         }
         function tearDown() {
@@ -145,7 +145,7 @@
                     if (y < rect.top + rect.height / 2) grp.classList.add('drag-over-top');
                     else grp.classList.add('drag-over-bottom');
                 } else if (grp && kind === 'channel') {
-                    grp.style.background = 'rgba(79,195,247,0.1)';
+                    grp.style.background = '', grp.classList.add('u-4f755af2');
                 } else if (chItem && kind === 'channel' && chItem !== el) {
                     var r2 = chItem.getBoundingClientRect();
                     if (y < r2.top + r2.height / 2) chItem.classList.add('drag-over-top');
@@ -446,7 +446,7 @@
 
                 if (avatarEl && info.userId) {
 
-                    avatarEl.style.cursor = 'pointer';
+                    avatarEl.style.cursor = '', avatarEl.classList.remove('u-3b6a3a65', 'u-2a9295c3'), avatarEl.classList.add('u-3b6a3a65');
 
                     avatarEl.setAttribute('data-user-id', info.userId);
 
@@ -1102,7 +1102,7 @@
         group.addEventListener('dragleave', function (e) {
             // Only clean up if we're truly leaving the group (not entering a child)
             if (!group.contains(e.relatedTarget)) {
-                group.style.background = '';
+                group.style.background = '', group.classList.remove('u-4f755af2');
                 group.classList.remove('drag-over-top', 'drag-over-bottom');
             }
         });
@@ -1112,7 +1112,7 @@
             // A drop reloads the channel list, which can remove the drag source
             // before `dragend` fires — so stop scrolling right here.
             stopChannelListAutoScroll();
-            group.style.background = '';
+            group.style.background = '', group.classList.remove('u-4f755af2');
             group.classList.remove('drag-over-top', 'drag-over-bottom');
             var catId = e.dataTransfer.getData('text/category-id');
             var channelId = e.dataTransfer.getData('text/channel-id');
@@ -1500,7 +1500,7 @@
 
             var nameSpan = document.createElement('span');
             nameSpan.innerHTML = (isVoiceCh ? icon('volume-on') + ' ' : '# ') + chDisplayName;
-            nameSpan.style.flex = '1';
+            nameSpan.classList.add('u-97445a8d');
             div.appendChild(nameSpan);
             // Right-click context menu for channel (all users)
             div.addEventListener('contextmenu', function (e) {
@@ -2971,7 +2971,7 @@
     function invalidateCssSlotCache() { _cssSlotsCache = null; }
 
     function renderCustomCssSettings(container) {
-        container.innerHTML = '<div class="u-3936d22c" ><div style="display:inline-block;width:28px;height:28px;border:3px solid #444;border-top-color:var(--accent,#4fc3f7);border-radius:50%;animation:css-spin .6s linear infinite"></div><div class="u-fc09feb0" >Loading CSS settings\u2026</div></div>';
+        container.innerHTML = '<div class="u-3936d22c" ><div class="u-56c28acc" style="display:inline-block"></div><div class="u-fc09feb0" >Loading CSS settings\u2026</div></div>';
 
         fetchCssSlots().then(function (slotsData) {
             var activeSlot = slotsData.active_slot || 0;
@@ -2984,7 +2984,7 @@
             html += '<div class="u-87c136df" >';
             html += '<h3 class="u-87d82625" >CSS Source</h3>';
             html += '<p class="u-a3ede179" >Choose which stylesheet to use. Custom CSS is encrypted and stored on the server.</p>';
-            html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+            html += '<div class="u-4725bb71" style="display:flex">';
 
             var slots = [
                 { id: 0, label: 'Default', desc: 'App default stylesheet', hasContent: true, color: '#666' },
@@ -3063,7 +3063,7 @@
             }
 
             // ── Action Buttons ──
-            html += '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">';
+            html += '<div class="u-3a876f81" style="display:flex">';
 
             if (isEditing && parseInt(isEditing) === activeSlot) {
                 html += '<button class="u-c8d3b8b1" id="css-save-slot" >' + icon('check') + ' Save & Apply</button>';
