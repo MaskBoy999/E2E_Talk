@@ -8,6 +8,31 @@ Source of truth for history is `PROGRESS.md`. This file is the forward-looking l
 
 ---
 
+## Current to-do
+
+State when written: `main` = `4029cb1`, `test` = `d4234e3`, working tree clean, **neither
+pushed**. Feature work happens on `test`; `main` carries the box for releases.
+
+In order — do them top down, and check each off here when it lands:
+
+| # | Task | Detail |
+|---|---|---|
+| 1 | **Three red tests.** `voice-fullscreen` ×2, `dm-call-volume` reset buttons ×1. Fix or delete. | [R9](#r9-three-red-tests--fix-them-do-not-delete-them) |
+| 2 | **Dead multi-device code.** Delete the `user_devices` queries + fan-out, or implement `/api/devices`; the 10 skipped specs must resolve one way or the other. | [R10](#r10-dead-multi-device-code-and-its-skipped-specs) |
+| 3 | **Two broken drag-and-drop operations** sitting on `test.fixme`. | [R11](#r11-two-known-broken-drag-and-drop-operations) |
+| 4 | **One undocumented skip** in `kill-switch.spec.ts` (2FA kill-switch through the real UI). | [R12](#r12-one-undocumented-skip) |
+| 5 | **`tests/pq-envelopes.spec.ts` has never passed 9/9 in one run** — a pre-existing test flakes on `#show-register`. | [N1](#n1-the-pq-spec-has-never-run-99-in-one-pass) |
+| 6 | **Android device pass** — nine features built but never seen on hardware. | [R3](#r3-android-device-pass--several-features-are-marked-device-test-owed) |
+| 7 | **§5 proof artifacts** — produce them, or withdraw the Definition-of-Done claim. | [R4](#r4-5-proof-artifacts-must-exist-or-the-definition-of-done-must-be-withdrawn) |
+| 8 | **External gates** — Firebase, Windows signing cert, Android upload keystore. Blocked outside the repo. | [R7](#r7-external-gates--real-blocking-contact-with-the-outside-world) |
+| 9 | **Decide about pushing** `main` and `test` to origin (65 and 4 commits ahead). | — |
+
+Closed — do **not** redo or re-verify: **R1** (box is on `main`), **R2** (login re-key
+sweep shipped and tested), **R5** (browser ML-DSA login signing is tested), **R6** (admin
+panel covers every tunable), **R8** (`3759a37` is documented).
+
+---
+
 ## R1. The Tauri box IS the product
 
 **Requirement:** the native desktop + Android app (`src-tauri/`, the box-shell and
@@ -259,6 +284,44 @@ through the real UI. Either test it or write down why not.
 
 ---
 
+## N1. The PQ spec has never run 9/9 in one pass
+
+On 2026-11-07 `tests/pq-envelopes.spec.ts` ran **8 passed, 1 failed**. The failure is
+`registration publishes the derived ML-KEM identity key` (~line 206) timing out after 45s
+waiting for `#show-register` on `login.html`, and it passed standalone in 6.2s.
+
+It is not caused by the R2 work — all eight other tests, including both new re-keying
+tests, passed in that run. The likely shape is a race during `login.html` start-up (the PQ
+library loading, or a slow first page under load), since `registerUser` only waits a flat
+`waitForTimeout(400)` after `goto` before clicking.
+
+**Task:** make it deterministic — wait for the element instead of sleeping, or find what
+delays the login page. Do not "fix" it by raising the timeout.
+
+---
+
+## N2. Environment: this volume corrupts Rust build artifacts
+
+Not a code task, but it will waste a session if rediscovered. `/mnt/stocare` is **exFAT**,
+and cargo builds on it fail in three distinct ways:
+
+- `ETXTBSY` executing freshly written build scripts — retries succeed.
+- `couldn't read .../build/serde-*/out/private.rs: stream did not contain valid UTF-8` —
+garbage written into build output.
+- `found invalid metadata files for crate ...` and cargo itself panicking in
+`src/tools/cargo/src/compiler/custom_build.rs` — corrupt `.rmeta` from a partial build.
+
+**Workaround used here:** put the target directory on a native filesystem and point cargo
+at it, e.g. `CARGO_TARGET_DIR=$HOME/.cache/e2e-target cargo build --release`. The launcher
+honours that variable (`start-server.sh`), and Playwright's `webServer` inherits it from the
+shell that launches the run. `server/target` (1.9 GB of corrupt artifacts) was deleted;
+the default path is still `./target`.
+
+Also note `core.fileMode=false` here: a newly added script lands as `100644` even after
+`chmod +x`, so use `git update-index --chmod=+x` and re-check with `git ls-tree HEAD <path>`.
+
+---
+
 ## Deliberate decisions — do NOT reopen
 
 Confirmed by the owner on 2026-11-07. These are settled; treat any suggestion to reverse
@@ -277,11 +340,8 @@ them as a regression, not an improvement.
 
 ## Order of work
 
-1. ~~**R1** — restore the box tree to `main`.~~ Done (`a28898b`).
-2. ~~**R2** — add the login-key sweep and its test.~~ Done, see above.
-3. **R10 / R11 / R12 / R9** — clear the dead code, the two drag bugs, the skipped test, and the three red tests.
-4. **R8** — nothing to do; recorded.
-5. **R3 / R4** — device pass, then proof artifacts.
-6. **R7** — external gates, whenever the accounts and certificates exist.
+The front of this file holds the current, ordered to-do. In shape it is: clear the
+known-broken things (R9, R10, R11, R12, N1) → the device pass (R3) → the proof artifacts
+(R4) → the external gates (R7) whenever the accounts and certificates exist.
 
-**R5 and R6 are closed.** Do not spend time re-verifying them.
+Closed: R1, R2, R5, R6, R8. Do not spend time re-verifying them.
