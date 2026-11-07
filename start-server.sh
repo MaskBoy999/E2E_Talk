@@ -61,6 +61,10 @@ fi
 
 cd "$ROOT/server" || exit 1
 
+# Honor CARGO_TARGET_DIR when it is set (a build directory outside the project
+# is the usual fix for filesystems that corrupt compiled artifacts). Every path
+# below goes through this, so the default stays exactly ./target.
+
 echo "==> Checking for existing server processes..."
 killall e2e-chat 2>/dev/null || true
 for port in 3000 3443; do
@@ -71,10 +75,12 @@ for port in 3000 3443; do
 done
 sleep 1
 
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+
 # Auto-clean debug build artifacts
-if [ -d "target/debug" ]; then
+if [ -d "$TARGET_DIR/debug" ]; then
     echo "==> Cleaning debug build artifacts..."
-    rm -rf target/debug
+    rm -rf "$TARGET_DIR/debug"
 fi
 
 # Auto-clean orphaned test databases
@@ -84,13 +90,13 @@ rm -f admin-bk-*.db admin-panel-*.db admin-probe-*.db admin-wipe-*.db
 rm -f f-test-*.db g2-probe-*.db hardening-*.db ks-rl-*.db ks-user-*.db
 rm -f risky-probe-*.db runtime-test-*.db vault-test-*.db chat.db
 
-if [ ! -f "target/release/e2e-chat" ]; then
+if [ ! -f "$TARGET_DIR/release/e2e-chat" ]; then
     echo "==> Building server (release)..."
 
     # A previous failed/partial build can leave corrupted metadata that trips
     # rustc 1.99.x internal errors (ICEs). Clean the release staging area so
     # every clone starts from a reproducible state.
-    rm -rf target/release/deps target/release/build target/release/.fingerprint/release
+    rm -rf "$TARGET_DIR/release/deps" "$TARGET_DIR/release/build" "$TARGET_DIR/release/.fingerprint/release"
 
     if ! cargo build --release 2>&1; then
         echo "==> First build failed — retrying with opt-level=0 (rustc ICE workaround)..."
@@ -108,4 +114,4 @@ echo "  HTTP:  http://localhost:3000"
 echo "  HTTPS: https://localhost:3443"
 echo ""
 
-exec ./target/release/e2e-chat
+exec "$TARGET_DIR/release/e2e-chat"

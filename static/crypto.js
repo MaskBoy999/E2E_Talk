@@ -705,6 +705,19 @@ var E2ECrypto = (() => {
                 if (String(params.login_public_key).charAt(0) === '{') {
                     await pqReady();
                     body.login_pq_signature = signLoginChallengePq(hashKeyBytes, password, username, params.login_nonce);
+                } else {
+                    // Legacy (v1) account: the server holds a bare Ed25519 key for
+                    // it and `login` only ever verified, so it could never
+                    // upgrade. Send the hybrid bundle derived from the same
+                    // (hash_key, password) and the server re-keys the account
+                    // after this request's Ed25519 proof verifies. Without this
+                    // every login a legacy account records stays forgeable by a
+                    // quantum computer. A missing PQ library leaves the account
+                    // as it was — it never blocks the login.
+                    try {
+                        await pqReady();
+                        body.login_public_key = deriveLoginPublicKeyBundle(hashKeyBytes, password);
+                    } catch (_) {}
                 }
             }
             _secureZero(hashKeyBytes);

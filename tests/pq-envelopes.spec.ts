@@ -14,11 +14,44 @@
 //   * two real accounts exchange a hybrid envelope through their published keys.
 import { test, expect, Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execSync } from 'node:child_process';
 import * as path from 'node:path';
 import { apiLogin } from './_auth-helpers';
 
 const BASE = 'https://localhost:3443';
+const DB = 'server/e2e_chat.db';
+
+// Put an account back into the pre-hybrid state, which no current client can
+// produce: a bare base64 Ed25519 key instead of the v2 bundle. The re-keying
+// sweep only exists for accounts shaped like this.
+function dbExec(sql: string, args: any[] = []): void {
+    const json = JSON.stringify(args).replace(/'/g, "''");
+    const script = `import sqlite3,json;con=sqlite3.connect(${JSON.stringify(DB)});cur=con.cursor();cur.execute(${JSON.stringify(sql)},json.loads('${json}'));con.commit()`;
+    execSync(`python3 -c ${JSON.stringify(script)}`, { encoding: 'utf8' });
+}
+
+/** Fetch the raw stored login key straight from /api/auth-params. */
+async function storedLoginKey(page: Page, uname: string): Promise<string> {
+    return page.evaluate(async (u) => {
+        const p = await (await fetch('/api/auth-params/' + encodeURIComponent(u))).json();
+        return p.login_public_key;
+    }, uname);
+}
+
+/** Derive and install the bare Ed25519 key a pre-hybrid client would have left. */
+async function downgradeToBareLoginKey(page: Page, uname: string): Promise<string> {
+    const bare = await page.evaluate(async (u) => {
+        const E = (window as any).E2ECrypto;
+        const p = await (await fetch('/api/auth-params/' + encodeURIComponent(u))).json();
+        const hk = E.decryptWithPassword(
+            p.encrypted_hash_key, 'password123', p.hash_key_salt, p.hash_key_nonce,
+        );
+        const bytes = new Uint8Array(E.base64ToArrayBuffer(hk));
+        return E.deriveLoginPublicKey(bytes, 'password123');
+    }, uname);
+    dbExec('UPDATE users SET login_public_key = ?1 WHERE username = ?2', [bare, uname]);
+    return bare;
+}
 const KAT = JSON.parse(
     readFileSync(path.join(__dirname, '..', 'server', 'tests', 'fixtures', 'pq-kat.json'), 'utf8'),
 );
@@ -404,5 +437,97 @@ test.describe('hybrid login signatures (PQ Phase 2)', () => {
         // login succeeds end-to-end.
         const ok = await apiLogin(page, uname, 'password123');
         expect(ok.status(), 'the hybrid login body succeeds').toBe(200);
+    });
+});
+
+// PQ Phase 3 — the migration sweep. Envelopes re-key themselves on the
+// heartbeat (publishIdentityPqKeyIfNeeded), but the login key had no such path:
+// `login` verified and never wrote, while the client only sent the ML-DSA
+// signature for accounts that were already hybrid. A v1 account therefore kept
+// recording Ed25519-only logins forever — the harvest-now-decrypt-later hole the
+// whole phase exists to close.
+test.describe('lazy login re-keying (PQ Phase 3)', () => {
+    test('a legacy Ed25519-only account upgrades to hybrid on its next login', async ({ page }) => {
+        const uname = 'pqrekey_' + Date.now();
+        await registerUser(page, uname);
+        const bare = await downgradeToBareLoginKey(page, uname);
+
+        expect(
+            (await storedLoginKey(page, uname)).charAt(0),
+            'the account starts out on a bare Ed25519 key',
+        ).not.toBe('{');
+
+        // A legacy key makes the client offer the derived v2 bundle.
+        const built = await page.evaluate(async (u) => {
+            const b = await (window as any).E2ECrypto.loginRequestBody(u, 'password123');
+            return { body: b, offered: typeof b.login_public_key === 'string' };
+        }, uname);
+        expect(
+            built.offered,
+            'the client must offer the hybrid bundle on a legacy login',
+        ).toBe(true);
+
+        const res = await page.request.post(BASE + '/api/login', {
+            headers: { 'Content-Type': 'application/json' },
+            data: built.body,
+        });
+        expect(res.status(), 'the legacy login still succeeds').toBe(200);
+
+        // …and it is re-keyed: v2 with the same Ed25519 half and a real PQ half.
+        const after = JSON.parse(await storedLoginKey(page, uname));
+        expect(after.v).toBe(2);
+        expect(after.ed25519, 'the Ed25519 half is unchanged').toBe(bare);
+        expect(after.ml_dsa_65, 'the ML-DSA-65 half is now present').toBeTruthy();
+
+        // From here on the account is held to the hybrid rule: an Ed25519-only
+        // login is refused, exactly like an account registered after Phase 2.
+        const edOnly = await page.evaluate(async (u) => {
+            const E = (window as any).E2ECrypto;
+            const p = await (await fetch('/api/auth-params/' + encodeURIComponent(u))).json();
+            const hk = E.decryptWithPassword(
+                p.encrypted_hash_key, 'password123', p.hash_key_salt, p.hash_key_nonce,
+            );
+            const bytes = new Uint8Array(E.base64ToArrayBuffer(hk));
+            return {
+                username: u,
+                login_nonce: p.login_nonce,
+                login_signature: E.signLoginChallenge(bytes, 'password123', u, p.login_nonce),
+            };
+        }, uname);
+        const refused = await page.request.post(BASE + '/api/login', {
+            headers: { 'Content-Type': 'application/json' },
+            data: edOnly,
+        });
+        expect(refused.status(), 'the re-keyed account refuses Ed25519-only').toBe(401);
+    });
+
+    // The sweep must not double as a key-swap primitive: an attacker who captures
+    // a login request cannot attach a bundle of their own and steal the account.
+    test('a bundle with a different Ed25519 half is ignored', async ({ page }) => {
+        const uname = 'pqswap_' + Date.now();
+        await registerUser(page, uname);
+        const bare = await downgradeToBareLoginKey(page, uname);
+
+        const forgedEd25519 = Buffer.alloc(32, 9).toString('base64');
+        const built = await page.evaluate(async ({ u, forgedEd25519 }) => {
+            const E = (window as any).E2ECrypto;
+            const b = await E.loginRequestBody(u, 'password123');
+            b.login_public_key = JSON.stringify({
+                v: 2,
+                ed25519: forgedEd25519,
+                ml_dsa_65: E.arrayBufferToBase64(new Uint8Array(1952)),
+            });
+            return b;
+        }, { u: uname, forgedEd25519 });
+
+        const res = await page.request.post(BASE + '/api/login', {
+            headers: { 'Content-Type': 'application/json' },
+            data: built,
+        });
+        expect(res.status(), 'the real signature still logs in').toBe(200);
+        expect(
+            await storedLoginKey(page, uname),
+            'the stored key must stay on the verified Ed25519 half',
+        ).toBe(bare);
     });
 });

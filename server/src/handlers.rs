@@ -965,6 +965,13 @@ pub struct LoginRequest {
     // Ed25519-only accounts.
     #[serde(default)]
     pub login_pq_signature: Option<String>,
+    // PQ Phase 3 — lazy re-key. A pre-hybrid account's client sends the v2
+    // bundle it derives from the same (hash_key, password) alongside its
+    // Ed25519 proof, so a legacy account upgrades on its next login instead of
+    // recording Ed25519-only logins forever. Stored only after that proof is
+    // verified against the OLD key; carrying it grants nothing by itself.
+    #[serde(default)]
+    pub login_public_key: Option<String>,
     // Optional custom session lifetime in seconds (Settings → Security, max 30 days).
     #[serde(default)]
     pub duration_seconds: Option<u64>,
@@ -1511,6 +1518,32 @@ pub async fn login(
                 .into_response();
         }
     };
+
+    // PQ Phase 3 — lazy re-keying. Accounts registered before hybrid logins hold
+    // a bare Ed25519 key, and this handler used to verify without ever writing,
+    // so they could never upgrade: every login they recorded stayed forgeable by
+    // a quantum computer. Only reached once the signature above verified against
+    // the OLD key, so presenting a bundle grants nothing on its own. The bundle
+    // must repeat the very Ed25519 half that just verified — otherwise a captured
+    // login request could be turned into a key swap.
+    if let Some(offered) = req.login_public_key.as_deref() {
+        let already_hybrid = stored_login_key
+            .as_deref()
+            .map(|k| k.trim_start().starts_with('{'))
+            .unwrap_or(false);
+        if !already_hybrid {
+            if let (Some(stored), Some(new_set)) =
+                (stored_login_key.as_deref(), crate::decode_login_key_set(offered))
+            {
+                let same_ed25519 = crate::decode_login_public_key(stored)
+                    .map(|k| k == new_set.ed25519)
+                    .unwrap_or(false);
+                if same_ed25519 && new_set.ml_dsa_65.is_some() {
+                    let _ = state.db.set_login_public_key(&user.id, offered.trim());
+                }
+            }
+        }
+    }
 
     // 2FA (TOTP): the password stage only earns a short-lived pending token;
     // the real session is minted by /api/login/2fa after a valid code.

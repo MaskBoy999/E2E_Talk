@@ -14,18 +14,21 @@ Source of truth for history is `PROGRESS.md`. This file is the forward-looking l
 call-service plugins, the box-specific frontend files) is the shipping product. It must
 not be treated as abandoned or optional.
 
-**Current state:** `origin/test` (tip `08b84a9`) contains the full box. `main` (tip
-`c018018`) has **rewound it away** — no `src-tauri/`, no box frontend files, no box
-plugins, no Tauri CI. Only the `start-server.sh` portable-deps work survived.
+**DONE (2026-11-07).** `main` was rewound to the web app (no `src-tauri/`, no box
+plugins, no PQ work, migrations stopping at 091). `origin/test` was merged into `main`
+as `a28898b` — 388 files, only `PROGRESS.md` and `server/Cargo.toml` conflicted, and the
+`url = "=2.5.4"` pin was kept over test's 2.5.8 because 2.5.8 pulls ICU4X that ICEs
+rustc 1.99.1. `cargo check --locked` passes on the merged tree.
 
-**Therefore:** `main` must be brought back to the box. Two options, owner's call:
+**New arrangement:** feature work continues on `test` (local branch, tracking
+`origin/test`), which now also carries the portable-launch work as `d0d7636` plus
+`e888e50` restoring `scripts/deps/install.sh` — that file belongs to the earlier
+commit, so it had to be carried separately or every launch aborted on its first
+dependency check. Both branches ship an identical `start-server.sh` and
+`scripts/deps/`.
 
-1. **Merge `origin/test` forward** into `main` and re-apply the `start-server.sh` /
-   `scripts/deps/*` / `Cargo.toml` url-pin work on top (it is only 10 files).
-2. **Reset `main` to `origin/test`,** then re-apply that same 10-file server-start work.
-
-Everything else in this file assumes the box tree is present. Do this first — the rest
-of the list is evaluated against the box tree, not against today's `main`.
+The Tauri build itself is not part of a normal server launch: it only matters for the
+GitHub releases, which are cut rarely. Nothing in the launch path may depend on it.
 
 ---
 
@@ -50,7 +53,8 @@ acceptable — the sweep must exist and be covered by a test.
   `identity_pq_public_key`, and POSTs `/api/identity/pq-key` when it differs. Derived
   deterministically, so it is idempotent across devices.
 
-**The gap — the login half has no sweep.** A v1 (bare Ed25519) account never upgrades:
+**DONE (2026-11-07) — the login half was implemented. The historical gap, for the
+record:** a v1 (bare Ed25519) account never upgraded:
 
 | Login key written by | Upgrades to v2? |
 |---|---|
@@ -63,19 +67,26 @@ And `static/crypto.js` `loginRequestBody()` only attaches `login_pq_signature` w
 alone forever, leaving recorded login signatures quantum-vulnerable — the exact
 harvest-now-decrypt-later hole this work exists to close.
 
-**Implementation (everything needed already exists):**
+**What was implemented:**
 
-1. `static/crypto.js` — `deriveLoginPublicKeyBundle(hashKeyBytes, password)` already
-   returns `{v:2, ed25519, ml_dsa_65}`. No new crypto.
-2. `static/crypto.js` `loginRequestBody()` — when `params.login_public_key` is a bare key
-   (does not start with `{`), also attach `login_public_key: deriveLoginPublicKeyBundle(...)`.
-3. `server/src/handlers.rs` `LoginRequest` — add the optional field.
-4. `server/src/handlers.rs` `login` — **only after** `valid` is computed from the *old*
-   key, if the request carries a v2 bundle and the stored key was v1, persist it with
-   `set_login_public_key`. Doing this before verification is an account-takeover primitive.
-5. Test — register a v1-shaped key directly (the pattern `tests/security-hardening-f.spec.ts`
-   already uses), log in, assert `/api/auth-params` now returns a `{v:2,…}` blob, and
-   assert a subsequent login **without** `login_pq_signature` is refused.
+1. `static/crypto.js` `loginRequestBody()` — for a bare (v1) `login_public_key` it now
+   attaches `login_public_key: deriveLoginPublicKeyBundle(...)`, guarded by try/catch so a
+   missing PQ library leaves a legacy account working as it was rather than blocking login.
+2. `server/src/handlers.rs` `LoginRequest` — gains the optional `login_public_key` field.
+3. `server/src/handlers.rs` `login` — after the signature verifies against the OLD key and
+   before the 2FA branch, a v2 bundle is stored with `set_login_public_key` — but **only**
+   if it repeats the exact Ed25519 half that just verified. That check is what stops a
+   captured login request from being turned into a key swap.
+4. `tests/pq-envelopes.spec.ts` — new `lazy login re-keying (PQ Phase 3)` describe:
+   `a legacy Ed25519-only account upgrades to hybrid on its next login` (downgrade the
+   row to a bare key, log in, assert v2 stored with the same Ed25519 half, then assert an
+   Ed25519-only login is refused with 401) and `a bundle with a different Ed25519 half is
+   ignored` (login still succeeds, stored key never changes).
+
+**Verified:** both new tests pass. Across two runs all nine tests in the spec have
+passed, but not in a single run: the pre-existing `registration publishes the derived
+ML-KEM identity key` flaked once on a missing `#show-register` selector and then passed
+standalone in 6s.
 
 Also required by the same decision: **no legacy fallbacks anywhere.** Confirmed already
 enforced — `verify_user_verifier` accepts only `$e2e$…` and `verifier_needs_upgrade` was
@@ -266,8 +277,8 @@ them as a regression, not an improvement.
 
 ## Order of work
 
-1. **R1** — restore the box tree to `main`. Everything else is evaluated against it.
-2. **R2** — add the login-key sweep and its test.
+1. ~~**R1** — restore the box tree to `main`.~~ Done (`a28898b`).
+2. ~~**R2** — add the login-key sweep and its test.~~ Done, see above.
 3. **R10 / R11 / R12 / R9** — clear the dead code, the two drag bugs, the skipped test, and the three red tests.
 4. **R8** — nothing to do; recorded.
 5. **R3 / R4** — device pass, then proof artifacts.
