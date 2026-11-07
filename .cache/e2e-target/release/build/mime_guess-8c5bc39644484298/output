@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/mnt/stocare/x/Documents/GitHub/E2E_Talk/.cache/e2e-target/release/build/mime_guess-8c5bc39644484298/out/mime_types_generated.rs

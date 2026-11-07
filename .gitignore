@@ -122,3 +122,8 @@ probe-*.js
 !static/icons/*.png
 # Tauri app icons are required by the build (tauri.conf.json bundle.icon)
 !src-tauri/icons/*.png
+
+# Rust build artifacts written outside the project (exFAT-safe target dir).
+# Users do not need this folder; it is created by `cargo build` / start-server.sh
+# when the machine needs compiled artifacts off the working-disk filesystem.
+.cache/
