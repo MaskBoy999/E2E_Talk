@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { dialogMessages, queuePromptAnswer } from './_ui-dialogs';
 import { apiLogin } from './_auth-helpers';
+import { serverBinaryPath } from './_server-binary';
 
 const BASE = 'https://localhost:3443';
 const DB = 'server/e2e_chat.db';
@@ -320,7 +321,7 @@ test.describe('Kill Switch', () => {
         expect(replayErr.error).not.toContain('2FA');
     });
 
-    test.skip('2FA kill-switch via the real login UI stays hidden as the same generic error', async ({ page, browser }) => {
+    test('2FA kill-switch via the real login UI stays hidden as the same generic error', async ({ page, browser }) => {
         test.setTimeout(180000);
         const ts = Date.now();
         const uname = 'ks_ui_2fa_' + ts;
@@ -608,7 +609,7 @@ test.describe('Kill Switch rate limiting (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `ks-rl-${Date.now()}.db`);
         child = spawn(bin, [], {
@@ -699,7 +700,7 @@ test.describe('Kill Switch per-account rate limiting (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `ks-user-rl-${Date.now()}.db`);
         child = spawn(bin, [], {

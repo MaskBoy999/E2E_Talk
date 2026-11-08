@@ -58,8 +58,13 @@ const KAT = JSON.parse(
 
 async function registerUser(page: Page, uname: string) {
     await page.goto(BASE + '/login.html');
-    await page.waitForTimeout(400);
+    // Wait for the element rather than sleeping: the login page has to load its
+    // scripts (PQ included) before the register link exists, and a fixed 400 ms
+    // raced that under load — the one failure this spec ever had in a full run
+    // (`registration publishes the derived ML-KEM identity key`, N1).
+    await page.waitForSelector('#show-register', { timeout: 20000 });
     await page.click('#show-register');
+    await page.waitForSelector('#register-form', { state: 'visible' });
     await page.fill('#register-username', uname);
     await page.fill('#register-password', 'password123');
     await page.fill('#register-confirm-password', 'password123');
