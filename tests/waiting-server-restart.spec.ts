@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import { serverBinaryPath } from './_server-binary';
 
 const BASE = 'https://localhost:3443';
 
@@ -103,7 +104,7 @@ test.describe('Server restart clears stale DM-call waiting state', () => {
         // --- Simulate a server restart: spawn a SECOND instance sharing the DB.
         // Its startup clears every dm_call_waiting row (the restart invariant).
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) {
             throw new Error('server binary not found at ' + bin);
         }

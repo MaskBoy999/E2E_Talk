@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { serverBinaryPath } from './_server-binary';
 
 const BASE = 'https://localhost:3443';
 
@@ -84,7 +85,7 @@ test.describe('G2 — Mutation rate limit + storage quota (isolated server)', ()
 
   test.beforeAll(async () => {
     const serverDir = path.join(__dirname, '..', 'server');
-    const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+    const bin = serverBinaryPath();
     if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
     // Dedicated temp DB so env overrides (which DB rows now take precedence over)
     // always apply — the isolated server must never share the dev DB.

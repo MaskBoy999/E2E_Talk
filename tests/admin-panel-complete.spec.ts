@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { serverBinaryPath } from './_server-binary';
 
 // Isolated server (ports 3485/3486).
 const PORT = '3485';
@@ -32,7 +33,7 @@ test.describe('Admin panel: every tab renders and XSS payloads stay escaped', ()
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-panel-${Date.now()}.db`);
         child = spawn(bin, [], {

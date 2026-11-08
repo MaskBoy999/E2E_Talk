@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
 import * as http from 'http';
+import { serverBinaryPath } from './_server-binary';
 
 const BASE = 'https://localhost:3443';
 
@@ -112,9 +113,9 @@ test.describe('F-series security hardening', () => {
 
     test.beforeAll(async () => {
         const serverDir = path.join(__dirname, '..', 'server');
-        let bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        let bin = serverBinaryPath();
         if (!fs.existsSync(bin)) {
-            bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+            bin = serverBinaryPath();
         }
         if (!fs.existsSync(bin)) throw new Error('server binary not found');
         tmpDb = path.join(serverDir, `f-test-${Date.now()}.db`);

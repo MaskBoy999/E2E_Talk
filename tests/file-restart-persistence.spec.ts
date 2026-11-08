@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { serverBinaryPath } from './_server-binary';
 
 // Isolated server (ports 3465/3466).
 const PORT = '3465';
@@ -68,7 +69,7 @@ test.describe('File persistence across server restart', () => {
 
     async function startServer(request: any) {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         child = spawn(bin, [], {
             cwd: serverDir,
             env: {
@@ -97,7 +98,7 @@ test.describe('File persistence across server restart', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `restart-probe-${Date.now()}.db`);
         await startServer(request);

@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
+import { serverBinaryPath } from './_server-binary';
 
 // The admin-login limiter guards BOTH the first-run admin password setup and
 // every later admin login (the check runs before `is_admin_password_set`), so a
@@ -17,7 +18,7 @@ import * as https from 'https';
 //      switchable).
 
 const serverDir = path.join(__dirname, '..', 'server');
-const BIN = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+const BIN = serverBinaryPath();
 
 function api(port: number, method: string, reqPath: string, body?: unknown) {
     return new Promise<{ status: number; json: any }>((resolve, reject) => {

@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
+import { serverBinaryPath } from './_server-binary';
 
 // Rate limits are raised or disabled for the main server by
 // playwright.config.ts (dozens of users register from one IP), so the budget
@@ -94,7 +95,7 @@ function randomHex64(): string {
 test.describe('Rate Limiting & Friend-Code Validation — isolated server + temp DB', () => {
     test.beforeAll(async () => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `ratelimit-test-${Date.now()}.db`);
         child = spawn(bin, [], {

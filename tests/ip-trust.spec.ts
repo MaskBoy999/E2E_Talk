@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
+import { serverBinaryPath } from './_server-binary';
 
 /**
  * The client address used to be read straight out of `X-Forwarded-For`, which
@@ -96,7 +97,7 @@ async function spawnServer(
     extraEnv: Record<string, string>,
 ): Promise<ChildProcess> {
     const serverDir = path.join(__dirname, '..', 'server');
-    const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+    const bin = serverBinaryPath();
     if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
     const tmpDb = path.join(serverDir, `iptrust-${tag}-${Date.now()}.db`);
     tmpDbs.push(tmpDb);

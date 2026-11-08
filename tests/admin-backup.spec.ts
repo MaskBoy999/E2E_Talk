@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { dialogMessages } from './_ui-dialogs';
 import path from 'path';
 import fs from 'fs';
+import { serverBinaryPath } from './_server-binary';
 
 // Isolated server (ports 3458/3459 — other isolated suites use 3445–3457).
 const PORT = '3458';
@@ -40,7 +41,7 @@ test.describe('Admin backup encryption + raw tables (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-bk-${Date.now()}.db`);
         child = spawn(bin, [], {
@@ -567,7 +568,7 @@ test.describe('Clear-all wipes EVERY table (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-wipe-${Date.now()}.db`);
         child = spawn(bin, [], {
@@ -774,7 +775,7 @@ test.describe('Admin backup restores uploaded files (isolated server)', () => {
 
     test.beforeAll(async ({ request }) => {
         const serverDir = path.join(__dirname, '..', 'server');
-        const bin = path.join(serverDir, 'target', 'release', process.platform === 'win32' ? 'e2e-chat.exe' : 'e2e-chat');
+        const bin = serverBinaryPath();
         if (!fs.existsSync(bin)) throw new Error('server binary not found at ' + bin);
         tmpDb = path.join(serverDir, `admin-up-${Date.now()}.db`);
         child = spawn(bin, [], {
