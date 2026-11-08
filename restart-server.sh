@@ -2,7 +2,9 @@
 # Restart the E2E Chat server.
 # Kills any existing instance, cleans artifacts, rebuilds release, then starts.
 set -e
-cd "$(dirname "$0")/server"
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT/server"
 
 echo "==> Stopping old e2e-chat server..."
 killall e2e-chat 2>/dev/null || true
@@ -14,10 +16,17 @@ for port in 3000 3443; do
 done
 sleep 1
 
+# Same build directory and build rules as start-server.sh — one implementation,
+# so this script cannot build into ./target while start-server.sh execs
+# .cache/e2e-target (or the other way round), and so an exFAT checkout builds
+# off-mount here too.
+. "$ROOT/scripts/target-dir.sh"
+e2e_resolve_target_dir "$ROOT"
+
 # Auto-clean debug build artifacts
-if [ -d "target/debug" ]; then
+if [ -d "$TARGET_DIR/debug" ]; then
     echo "==> Cleaning debug build artifacts..."
-    rm -rf target/debug
+    rm -rf "$TARGET_DIR/debug"
 fi
 
 # Auto-clean orphaned test databases
@@ -27,8 +36,7 @@ rm -f admin-bk-*.db admin-panel-*.db admin-probe-*.db admin-wipe-*.db
 rm -f f-test-*.db g2-probe-*.db hardening-*.db ks-rl-*.db ks-user-*.db
 rm -f risky-probe-*.db runtime-test-*.db vault-test-*.db chat.db
 
-echo "==> Building server (release)..."
-if ! cargo build --release; then
+if ! e2e_build_server_release "$ROOT"; then
     echo "BUILD FAILED" >&2
     exit 1
 fi
@@ -38,4 +46,4 @@ echo "    HTTP:  http://localhost:3000"
 echo "    HTTPS: https://localhost:3443"
 echo "    (Ctrl+C to stop)"
 
-exec ./target/release/e2e-chat
+exec "${TARGET_DIR}/release/e2e-chat"
