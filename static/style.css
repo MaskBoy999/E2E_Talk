@@ -6690,6 +6690,10 @@ select.settings-field { cursor: pointer; }
     gap: 2px;
     z-index: 10;
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    /* The buttons are 24px tall inside a 28px pill: anything a child paints
+       outside its own box (a hover lift, a shadow) would spill past the rounded
+       border and eat the row's edge and its neighbours' icons. */
+    overflow: hidden;
 }
 .message:hover .message-actions { display: flex; }
 /* Settings → Display → Message Actions: 'always' keeps the row up (the
@@ -6712,6 +6716,15 @@ body.show-msg-actions-off .message-actions { display: none !important; }
 }
 .msg-action-btn:hover { background: #3d3d3d; color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
 .msg-action-btn:active { transform: translateY(1px) scale(0.98); box-shadow: none; }
+/* Inside the action row the pill is a fixed-height strip, so the standalone
+   lift/scale has nowhere to go: it pushed the button past the row and, with the
+   row clipping, sliced the top of the icon instead. A flat fill is the whole
+   hover state here; the row itself already lifts away from the message. */
+.message-actions .msg-action-btn:hover,
+.message-actions .msg-action-btn:active {
+    transform: none;
+    box-shadow: none;
+}
 
 /* Message effects */
 @keyframes msg-fireworks {
