@@ -13072,7 +13072,14 @@
         el._fsOrigNext = el.nextSibling;
         var wrap = document.createElement('div');
         wrap.className = 'voice-fs-wrap';
-        if (el.parentNode) el.parentNode.insertBefore(wrap, el);
+        // Body-level, NOT inside the tile's row. Both hosts are rebuilt with
+        // `innerHTML` on every member/media update (renderPopup, renderDmPanel),
+        // which detached the wrapper and its tile along with them: the overlay
+        // stayed on screen around a dead, disconnected element and froze on exit.
+        // A body-level wrapper survives those rebuilds — restoreFromFsWrap →
+        // moveTileBack() re-homes the tile via findTileSlot() once the original
+        // parent is gone, and the PiP path already put its wrapper here.
+        document.body.appendChild(wrap);
         wrap.appendChild(el);
         el._fsWrap = wrap;
         var paint = function () {
