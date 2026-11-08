@@ -1600,6 +1600,33 @@ fn forget_connection(app: &tauri::AppHandle) {
             eprintln!("could not persist the wiped connection: {e}");
         }
     }
+
+    // The app-only settings bug: the setup window is a local page that can hold
+    // its own in-memory session (cookies, localStorage, IndexedDB) separately
+    // from the main window. After the page-side wipe and the config drop above,
+    // that session was still reachable on the next launch through the setup
+    // window — so the user saw the old account / old host settings again. Clear
+    // whichever window is still open, not only the main one.
+    //
+    // This is best-effort: if a window is already closed, or the platform
+    // refuses the call, the config drop above is the authoritative half and the
+    // next launch starts from a clean config file anyway.
+    {
+        let windows: Vec<_> = {
+            let main = app.get_webview_window(MAIN_LABEL);
+            let setup = app.get_webview_window(SETUP_LABEL);
+            main.into_iter().chain(setup).collect()
+        };
+        for win in windows {
+            if let Err(e) = win.clear_all_browsing_data() {
+                eprintln!(
+                    "reset connection: could not clear {}: {e}",
+                    win.label()
+                );
+            }
+        }
+    }
+
     let had_main = app.get_webview_window(MAIN_LABEL).is_some();
     if had_main {
         // Two address screens would be worse than one: the main window is about

@@ -44,6 +44,7 @@
 //! the WebView's storage on every platform.
 
 use super::{forget_connection, AppState, MAIN_LABEL, SETUP_LABEL};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Listener, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// The overlay window's label.
@@ -181,6 +182,23 @@ fn anchor(app: &tauri::AppHandle) -> Option<WebviewWindow> {
     })
 }
 
+/// Whether the overlay is currently kept above other windows. `always_on_top`
+/// is GTK/SDL keep-above — it raises the button above **every** application, not
+/// just this one — so it is only true while the app itself is in front
+/// (see [`sync`]).
+static KEEP_ABOVE: AtomicBool = AtomicBool::new(true);
+
+/// The physical size the overlay must be for the view that is open.
+///
+/// Positioning uses *this* number, never a `set_size` read-back: the resize is
+/// asynchronous on WebKitGTK, so `outer_size()` immediately after `set_size`
+/// still reports the old size, the panel is placed where the button used to fit,
+/// and the next tick moves it — the "it opens lower, then teleports" report.
+fn requested_size(panel_open: bool, scale: f64) -> (f64, f64) {
+    let (width, height) = if panel_open { PANEL_SIZE } else { BUTTON_SIZE };
+    (width * scale, height * scale)
+}
+
 /// Where a [`MARGIN`] gap from the bottom-left corner of a window puts an
 /// `overlay_size` window, in physical pixels, with the margin scaled to the
 /// window's DPI factor. Pure, so the rule is unit-tested rather than argued
@@ -237,24 +255,34 @@ pub fn sync(app: &tauri::AppHandle) {
         .lock()
         .map(|p| *p)
         .unwrap_or(false);
-    let (width, height) = if panel_open { PANEL_SIZE } else { BUTTON_SIZE };
+    // Keep-above follows the app's focus. GTK's keep-above raises this window
+    // over every application on the desktop, which is what puts the erase button
+    // on top of whatever the user switched to; with the app in front it is
+    // exactly what is wanted. The window is never dropped (the button has to be
+    // there the moment the app comes back) — only the keep-above bit changes.
+    let focused = [MAIN_LABEL, SETUP_LABEL].into_iter().any(|label| {
+        app.get_webview_window(label)
+            .and_then(|w| w.is_focused().ok())
+            .unwrap_or(false)
+    }) || overlay.is_focused().unwrap_or(false);
+    if KEEP_ABOVE.swap(focused, Ordering::Relaxed) != focused {
+        let _ = overlay.set_always_on_top(focused);
+    }
+
     let scale = anchor.scale_factor().unwrap_or(1.0);
-    let wanted = (width * scale, height * scale);
+    let wanted = requested_size(panel_open, scale);
     if overlay.inner_size().ok().map(|s| (s.width as f64, s.height as f64)) != Some(wanted) {
+        let (width, height) = if panel_open { PANEL_SIZE } else { BUTTON_SIZE };
         let _ = overlay.set_size(tauri::LogicalSize::new(width, height));
     }
 
-    let (Ok(anchor_pos), Ok(anchor_size), Ok(overlay_size)) = (
-        anchor.outer_position(),
-        anchor.outer_size(),
-        overlay.outer_size(),
-    ) else {
+    let (Ok(anchor_pos), Ok(anchor_size)) = (anchor.outer_position(), anchor.outer_size()) else {
         return;
     };
     let wanted_position = position(
         (anchor_pos.x, anchor_pos.y),
         (anchor_size.width, anchor_size.height),
-        (overlay_size.width, overlay_size.height),
+        (wanted.0.round() as u32, wanted.1.round() as u32),
         scale,
     );
     if overlay.outer_position().ok().map(|p| (p.x, p.y)) != Some(wanted_position) {
@@ -329,16 +357,29 @@ fn wipe_everything(app: &tauri::AppHandle) {
     let for_finish = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(PAGE_WIPE_GRACE_MS));
-        if let Some(main) = for_finish.get_webview_window(MAIN_LABEL) {
-            if let Err(e) = main.clear_all_browsing_data() {
+        // Clear the WebView's own storage on whichever window is still open.
+        // The setup window is a local page with its own loaded session; if it
+        // exists, clear it too — not just the main window.
+        let main = for_finish.get_webview_window(MAIN_LABEL);
+        let setup = for_finish.get_webview_window(SETUP_LABEL);
+        let windows: Vec<_> = main.into_iter().chain(setup).collect();
+        for win in &windows {
+            if let Err(e) = win.clear_all_browsing_data() {
                 eprintln!(
-                    "wipe: could not clear the WebView's own storage ({e}); the saved \
-                     connection is still dropped below"
+                    "wipe: could not clear the WebView's own storage on \
+                     {}: {e}; the saved connection is still dropped below",
+                    if win.label() == SETUP_LABEL {
+                        "setup"
+                    } else {
+                        "main"
+                    }
                 );
             }
         }
+
         forget_connection(&for_finish);
         set_panel(&for_finish, false);
+        sync(&for_finish);
     });
 }
 
@@ -361,5 +402,24 @@ mod tests {
         assert_eq!(position((0, 0), (800, 600), (400, 280), 1.0), (14, 306));
         // The panel is a real expansion of the button, not a different control.
         assert!(PANEL_SIZE.0 > BUTTON_SIZE.0 && PANEL_SIZE.1 > BUTTON_SIZE.1);
+    }
+
+    /// The panel's own size decides where it lands. Placing it with the button's
+    /// size (or with a `set_size` read-back that lags the resize) leaves a gap
+    /// under it and moves it again on the next tick.
+    #[test]
+    fn the_panel_is_placed_at_the_size_it_asked_for() {
+        let (width, height) = requested_size(true, 1.0);
+        assert_eq!((width, height), PANEL_SIZE);
+        let (_, y) = position(
+            (0, 0),
+            (800, 600),
+            (width as u32, height as u32),
+            1.0,
+        );
+        // Bottom edge sits exactly one margin above the window's bottom edge.
+        assert_eq!(y + height as i32, 600 - MARGIN.round() as i32);
+        // DPI scales the requested size, not just the margin.
+        assert_eq!(requested_size(false, 2.0), (BUTTON_SIZE.0 * 2.0, BUTTON_SIZE.1 * 2.0));
     }
 }

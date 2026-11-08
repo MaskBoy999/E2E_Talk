@@ -1,6 +1,6 @@
 [package]
 name = "e2e-chat-app"
-version = "0.2.47"
+version = "0.2.48"
 description = "E2E Chat — native desktop shell for the encrypted chat app"
 authors = ["E2E Chat"]
 edition = "2021"
@@ -75,3 +75,4 @@ opt-level = "s"
 # exactly how the Save & Launch crash presented). Unwinding lets the panic
 # surface and keeps the app alive.
 strip = true
+

@@ -1375,11 +1375,18 @@ const fileKeyCache = {
 
 const token = () => localStorage.getItem('token');
 const authFetch = (url, opts = {}) => {
-    opts.headers = { ...(opts.headers || {}), 'Authorization': 'Bearer ' + token() };
+    const sent = token();
+    opts.headers = { ...(opts.headers || {}), 'Authorization': 'Bearer ' + sent };
     return fetch(url, opts).then(function(res) {
         if (res.status === 401 && !url.includes('/login') && !url.includes('/register')) {
             const stored = localStorage.getItem('token');
-            if (stored) {
+            // Only the *current* token's rejection ends the session. A 401 that
+            // comes back for a request sent with a token which has since been
+            // replaced (a fresh login, a re-key, another window) belongs to that
+            // dead token; treating it as "your session is over" signs the user
+            // out of the session that just replaced it — one of the ways the app
+            // bounced between the chat and the login page.
+            if (stored && stored === sent) {
                 localStorage.removeItem('token');
                 localStorage.removeItem('user');
                 window.location.href = 'login.html';
@@ -1408,6 +1415,8 @@ function getTokenExpiresAt(t) {
 }
 
 let _tokenExpiryTimer = null;
+// The token the live socket authenticated with (see 'auth_error').
+let _wsAuthToken = null;
 function checkTokenExpiry() {
     // Reschedule-safe: a previous timer (e.g. armed for the OLD token before a
     // re-auth) must be cleared so the logout fires against the CURRENT expiry.
@@ -3981,9 +3990,34 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (!t || !userStr) {
+        // Bounded cold-start retry. In the desktop WebView libsodium can still
+        // be initialising when this handler runs, and a password bootstrap that
+        // cannot be derived yet reads as "no session" *on purpose* (minting a
+        // random key there would orphan the stored token forever). Redirecting
+        // on that first read is the login loop: login.html bounces a live
+        // session straight back here, this handler runs again before the key is
+        // ready, and it bounces to login again — forever. Wait once for the
+        // derivation to settle, then reload into the session it unlocks.
+        if (window._secDerivationPending) {
+            let retried = false;
+            try { retried = sessionStorage.getItem('e2e_boot_retry') === '1'; } catch (_) {}
+            if (!retried) {
+                try { sessionStorage.setItem('e2e_boot_retry', '1'); } catch (_) {}
+                setTimeout(function () {
+                    try {
+                        if (typeof window._secRedriveKey === 'function') window._secRedriveKey();
+                    } catch (_) {}
+                    if (token() && localStorage.getItem('user')) window.location.reload();
+                    else window.location.href = 'login.html';
+                }, 600);
+                return;
+            }
+        }
+        try { sessionStorage.removeItem('e2e_boot_retry'); } catch (_) {}
         window.location.href = 'login.html';
         return;
     }
+    try { sessionStorage.removeItem('e2e_boot_retry'); } catch (_) {}
 
     user = JSON.parse(userStr);
     window.currentUserId = user ? user.id : null;
@@ -14502,6 +14536,9 @@ function connectWebSocket(t) {
         // socket open (or between reconnects), the fresh token must be used or
         // the old (revoked) session would be rejected → unexpected sign-out.
         var curToken = token() || t;
+        // Remembered so a later auth_error for a token that has since been
+        // replaced does not end the session that replaced it.
+        _wsAuthToken = curToken;
         ws.send(JSON.stringify({ type: 'auth', token: curToken, device_id: devId || undefined, last_seen_timestamp: lastSeen }));
         // Start periodic key heartbeat (configurable via security tab)
         restartRefreshHeartbeat();
@@ -14594,11 +14631,18 @@ function connectWebSocket(t) {
                     .then(ids => { if (Array.isArray(ids)) { onlineUsers = new Set(ids); updatePresenceDots(); } })
                     .catch(() => {});
                 break;
-            case 'auth_error':
+            case 'auth_error': {
+                // Refuse the socket, but end the session only if the token it
+                // presented is still the live one. A socket that was opened with
+                // a token since replaced (login, re-key, reset) answers on stale
+                // credentials; killing the new session over it is the loop.
+                const live = token();
+                if (live && _wsAuthToken && live !== _wsAuthToken) break;
                 localStorage.removeItem('token');
                 localStorage.removeItem('user');
                 window.location.href = 'login.html';
                 break;
+            }
             case 'session_revoked':
                 // Force-kicked from Settings → Security → Devices, or a password
                 // change elsewhere revoked this session. Show why, then sign out.
@@ -18282,9 +18326,20 @@ async function loadChannels(serverId) {
     }
 }
 
-function markChannelRead(channelId) {    // Mark channel as read: clear unread badge and mention count    if (typeof unreadChannels !== 'undefined' && unreadChannels) {        var idx = unreadChannels.indexOf(channelId);        if (idx !== -1) {            unreadChannels.splice(idx, 1);            updateChannelBadges();        }    }    clearUnreadChannelMentions(channelId);}
+function markChannelRead(channelId) {
+    // Mark channel as read: clear unread badge and mention count
+    if (typeof unreadChannels !== 'undefined' && unreadChannels) {
+        var idx = unreadChannels.indexOf(channelId);
+        if (idx !== -1) {
+            unreadChannels.splice(idx, 1);
+            updateChannelBadges();
+        }
+    }
+    clearUnreadChannelMentions(channelId);
+}
 
-async function selectChannel(channelId, channelName, element) {    markChannelRead(channelId);
+async function selectChannel(channelId, channelName, element) {
+    markChannelRead(channelId);
 
     currentChannelId = channelId;
 

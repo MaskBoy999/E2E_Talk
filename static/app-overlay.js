@@ -391,6 +391,12 @@
      * the app" true in every state, not just the happy one.
      */
     function ensureButton() {
+        // App-only, twice over: the shell's own window draws it on desktop, and
+        // outside the shell there is no connection to forget and no native
+        // storage to clear, so a plain browser must never get this control.
+        // `boot()` already returns early in a browser; this is the gate on the
+        // drawing function itself, so no future caller can re-introduce it.
+        if (!tauri()) return;
         if (nativeOverlayOwnsButton()) return; // the shell's own window draws it (desktop)
         if (hiddenState() !== 'none') return;
         if (!document.body) return;
