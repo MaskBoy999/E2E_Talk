@@ -3283,37 +3283,13 @@ impl Database {
         Ok(())
     }
 
-    // --- User Devices (multi-device support) ---
+    // --- User Devices ---
+    // Migration 057 dropped the table these two helpers below used to read;
+    // they are gone with it (see OUTSTANDING_WORK.md R10).
 
 
 
 
-
-    pub fn update_device_last_active(&self, user_id: &str, device_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE user_devices SET last_active_at = CURRENT_TIMESTAMP WHERE user_id = ?1 AND device_id = ?2",
-            params![user_id, device_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    // Legacy: get all identity keys across all devices for a user
-    pub fn get_all_user_identity_keys(&self, user_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare("SELECT device_id, identity_key FROM user_devices WHERE user_id = ?1")
-            .map_err(|e| e.to_string())?;
-        let keys = stmt
-            .query_map(params![user_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(keys)
-    }
 
     // --- Key Escrow ---
 

@@ -4981,13 +4981,6 @@ pub async fn get_identity_key(
         all_keys.push(base64::engine::general_purpose::STANDARD.encode(&key));
     }
 
-    // Additional keys from user_devices table
-    if let Ok(extra_keys) = state.db.get_all_user_identity_keys(&user_id) {
-        for (_device_id, key_bytes) in extra_keys {
-            all_keys.push(base64::engine::general_purpose::STANDARD.encode(&key_bytes));
-        }
-    }
-
     if all_keys.is_empty() {
         return (
             StatusCode::NOT_FOUND,
