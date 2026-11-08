@@ -13,15 +13,21 @@ Source of truth for history is `PROGRESS.md`. This file is the forward-looking l
 State when written: `main` = `4029cb1`, `test` = `d4234e3`, working tree clean, **neither
 pushed**. Feature work happens on `test`; `main` carries the box for releases.
 
+State on 2026-11-08: `test` = the three launcher/webview/hover fixes (`016e439`, `587c371`,
+`b6d33a0`) plus the R9/R10/R12/N1 fixes; version 0.2.47 and tag `v0.2.47` cut locally at that
+tip. **Still nothing pushed** — this machine has no git credentials (HTTPS asks for a
+username, `git@github.com` says `Permission denied (publickey)`), so the release workflow has
+not run and `main` has not been merged.
+
 In order — do them top down, and check each off here when it lands:
 
 | # | Task | Detail |
 |---|---|---|
-| 1 | **Three red tests.** `voice-fullscreen` ×2, `dm-call-volume` reset buttons ×1. Fix or delete. | [R9](#r9-three-red-tests--fix-them-do-not-delete-them) |
-| 2 | **Dead multi-device code.** Delete the `user_devices` queries + fan-out, or implement `/api/devices`; the 10 skipped specs must resolve one way or the other. | [R10](#r10-dead-multi-device-code-and-its-skipped-specs) |
+| 1 | ~~**Three red tests.**~~ **DONE 2026-11-08** — 4/4 green. | [R9](#r9-three-red-tests--fix-them-do-not-delete-them) |
+| 2 | ~~**Dead multi-device code.**~~ **DONE 2026-11-08** — deleted, not implemented. | [R10](#r10-dead-multi-device-code-and-its-skipped-specs) |
 | 3 | **Two broken drag-and-drop operations** sitting on `test.fixme`. | [R11](#r11-two-known-broken-drag-and-drop-operations) |
-| 4 | **One undocumented skip** in `kill-switch.spec.ts` (2FA kill-switch through the real UI). | [R12](#r12-one-undocumented-skip) |
-| 5 | **`tests/pq-envelopes.spec.ts` has never passed 9/9 in one run** — a pre-existing test flakes on `#show-register`. | [N1](#n1-the-pq-spec-has-never-run-99-in-one-pass) |
+| 4 | ~~**One undocumented skip**~~ **DONE 2026-11-08** — un-skipped, passes. | [R12](#r12-one-undocumented-skip) |
+| 5 | ~~**PQ spec 9/9 in one run**~~ **DONE 2026-11-08** — waits for the element now. | [N1](#n1-the-pq-spec-has-never-run-99-in-one-pass) |
 | 6 | **Android device pass** — nine features built but never seen on hardware. | [R3](#r3-android-device-pass--several-features-are-marked-device-test-owed) |
 | 7 | **§5 proof artifacts** — produce them, or withdraw the Definition-of-Done claim. | [R4](#r4-5-proof-artifacts-must-exist-or-the-definition-of-done-must-be-withdrawn) |
 | 8 | **External gates** — Firebase, Windows signing cert, Android upload keystore. Blocked outside the repo. | [R7](#r7-external-gates--real-blocking-contact-with-the-outside-world) |
@@ -240,6 +246,22 @@ re-running. They exist on `main` too (`tests/voice-fullscreen.spec.ts`,
 genuinely gone; if the behaviour still ships, a deletion is a lie and is not allowed.
 Investigate before touching.
 
+**DONE (2026-11-08) — nothing was deleted, and only one of the three was a product bug:**
+
+- `fullscreened tile survives a re-render` (and its DM twin) — `enterTileFullscreen()` built
+  the wrapper *inside* the tile's row, while `renderPopup()` / `renderDmPanel()` rebuild those
+  rows with `innerHTML` on every member/media update. The wrapper and its tile were detached
+  together, leaving the overlay on screen around a dead element (`hasTile: true,
+  tileConnected: false`) that froze on exit. The wrapper now goes on `document.body` — which is
+  what the CSS comment and the Android PiP path already assumed — and `moveTileBack()` re-homes
+  the tile through `findTileSlot()` once the original parent is gone. `static/voice.js`.
+- `DM call: media re-renders…` also *failed at registration*, in a server started by hand
+  without the suite's raised limits. Not a product bug: run the spec under the config's own
+  `webServer` (or export the same env) and it passes.
+- `dm-call-volume` reset buttons passed unchanged — that entry was stale before this pass.
+
+Verified: `voice-fullscreen` 2/2, `dm-call-volume` 2/2.
+
 ---
 
 ## R10. Dead multi-device code and its skipped specs
@@ -260,6 +282,24 @@ again in 057 ("drop dead X3DH-era tables"). Yet:
 **Requirement: decide and act.** Either implement the device API (then un-skip and make
 those tests pass) or delete the dead queries, the dead fan-out, and the spec file. Do not
 leave a to-do list masquerading as a test suite.
+
+**DONE (2026-11-08) — deleted, not implemented.** The app is single-device by design (there is
+no device key exchange left after X3DH was dropped), so a `/api/devices` API would have been a
+feature invented to satisfy its own tests.
+
+- `server/src/db.rs`: `get_all_user_identity_keys()` and `update_device_last_active()` are
+  gone (the second had zero callers; the first queried a table migration 057 dropped).
+- `server/src/handlers.rs`: `get_identity_key()` no longer appends "additional keys" from that
+  missing table. `GET /api/identity/{id}` still returns `identity_public_key` **and** a
+  one-element `identity_public_keys` — the array is now the truth rather than a multi-device
+  claim it could not keep.
+- `tests/multidevice-api.spec.ts` (347 lines, 10 skips) deleted.
+
+Verified: server builds; `tests/pq-envelopes.spec.ts` — which asserts the published ML-KEM key
+through that exact endpoint — still 9/9.
+
+Left alone deliberately: `tests/multidevice.spec.ts` and `tests/multidevice-sessions.spec.ts`
+are real (0 skips) and cover identity-key recovery from the key blob plus session persistence — neither touches `/api/devices`.
 
 ---
 
@@ -282,6 +322,12 @@ hidden as the same generic error"* with no reason given. The server-side 2FA kil
 path exists (`handlers.rs` ~1408–1440), so the indistinguishability guarantee is unverified
 through the real UI. Either test it or write down why not.
 
+**DONE (2026-11-08) — the skip was removed, not explained.** Its body was already complete
+(enrol 2FA → arm the switch → fresh browser context → submit the kill-switch password in the
+real login form → the 2FA form appears, the code is accepted, the client returns to the
+password form showing "Internal server error", the page never mentions 2FA, the account row is
+gone). It passes in 9.3s, and the whole file is 11/11.
+
 ---
 
 ## N1. The PQ spec has never run 9/9 in one pass
@@ -297,6 +343,10 @@ library loading, or a slow first page under load), since `registerUser` only wai
 
 **Task:** make it deterministic — wait for the element instead of sleeping, or find what
 delays the login page. Do not "fix" it by raising the timeout.
+
+**DONE (2026-11-08).** `registerUser()` now waits for `#show-register` (20s) and for
+`#register-form` to be visible instead of sleeping 400 ms; no timeout was raised. 9/9 in two
+consecutive runs.
 
 ---
 
@@ -319,6 +369,13 @@ the default path is still `./target`.
 
 Also note `core.fileMode=false` here: a newly added script lands as `100644` even after
 `chmod +x`, so use `git update-index --chmod=+x` and re-check with `git ls-tree HEAD <path>`.
+
+The same redirect also broke the test suite: 16 call sites across 11 specs spawned their
+isolated server from a hardcoded `server/target/release/e2e-chat`, so on this checkout they
+died with "server binary not found" (and on Windows that path no longer exists at all). They
+now resolve it through `tests/_server-binary.ts`, in the same order as
+`scripts/target-dir.sh`: `CARGO_TARGET_DIR`, then the config's `target-dir`, then `target`.
+That alone turned `kill-switch.spec.ts` from 8 passed / 3 failed into 11 passed.
 
 ---
 
