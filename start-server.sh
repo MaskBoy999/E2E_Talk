@@ -92,7 +92,9 @@ rm -f f-test-*.db g2-probe-*.db hardening-*.db ks-rl-*.db ks-user-*.db
 rm -f risky-probe-*.db runtime-test-*.db vault-test-*.db chat.db
 
 if [ ! -f "$TARGET_DIR/release/e2e-chat" ]; then
-    if ! e2e_build_server_release "$ROOT"; then
+    # There is no binary to preserve, so this build may as well start from a clean
+    # release staging (see e2e_build_server_release).
+    if ! e2e_build_server_release "$ROOT" clean; then
         echo "BUILD FAILED"
         exit 1
     fi

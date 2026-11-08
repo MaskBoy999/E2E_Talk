@@ -33,10 +33,8 @@ for %%f in (admin-bk-*.db admin-panel-*.db admin-probe-*.db admin-wipe-*.db f-te
 )
 
 echo ==^> Building server (release)...
-rem Clean the release staging first: a partial build leaves metadata behind that
-rem trips the same rustc internal errors the opt-level=0 retry below works around.
-if exist "%CARGO_TARGET_DIR%\release\deps" rd /s /q "%CARGO_TARGET_DIR%\release\deps" >nul 2>&1
-if exist "%CARGO_TARGET_DIR%\release\build" rd /s /q "%CARGO_TARGET_DIR%\release\build" >nul 2>&1
+rem Incremental on purpose: a restart should not recompile the world. A corrupt
+rem staging is what the opt-level=0 retry below is for.
 cargo build --release
 if errorlevel 1 (
     echo ==^> First build failed - retrying from a clean directory with opt-level=0...

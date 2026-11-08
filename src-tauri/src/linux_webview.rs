@@ -17,14 +17,24 @@
 //!    certificate it refused;
 //! 2. we compare that certificate's SHA-256 against the fingerprint the user
 //!    already trusted (`cert_probe.rs`, the app's TOFU pin);
-//! 3. **only on a match** do we tell WebKit's context to allow the certificate
-//!    for that host and reload the URI.
+//! 3. **only on a match** do we let WebKit's context accept that certificate and
+//!    reload the URI, at most once per host.
 //!
-//! That step 3 is deliberately not `webkit_web_context_set_tls_errors_policy`
-//! (the blanket "ignore every TLS error" switch): a changed certificate still
-//! fails, exactly as `check_pinned_cert` refuses to open the window at all when
-//! the live fingerprint no longer matches the pin. The hook is the WebView
-//! catching up with a decision Rust already made, not a downgrade.
+//! Step 3 used to be `allow_tls_certificate_for_host` alone, which is the
+//! per-host API. WebKitGTK deprecated it in 2.40 and, on current releases
+//! (2.54 here), it accepts nothing: the reload was refused again, the handler
+//! reloaded again, and the window never loaded — measured at 872 loads in 25
+//! seconds, which reads as "the Linux build is broken" and can surface as
+//! *"Operation was cancelled"* when a load is cancelled mid-storm. So the policy
+//! is flipped on the context as well, and the reload is capped at one per host:
+//! a second refusal for a host we already trusted leaves WebKit's own error page
+//! up instead of spinning.
+//!
+//! The policy flip is still gated by the pin, which is what keeps this from being
+//! the blanket "ignore every TLS error" switch: it only ever happens *after* the
+//! certificate WebKit refused matched the fingerprint the user trusted, and
+//! `check_pinned_cert` still refuses to open the window at all when the live
+//! fingerprint no longer matches that pin.
 //!
 //! The pin is read **live** from `AppState` on every failure rather than captured
 //! at install time, because one window outlives a *Change Server Address*: the
@@ -36,6 +46,9 @@
 //! is actually developed on — which is why the helpers below are allowed to look
 //! unused off Linux.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use tauri::WebviewWindow;
 
@@ -74,6 +87,23 @@ fn cert_probe_sha256(der: &[u8]) -> String {
     crate::cert_probe::sha256_hex(der)
 }
 
+/// Hosts whose certificate this window already accepted.
+///
+/// The reload is only ever answered once per host. WebKit refused the certificate
+/// again after an acceptance means accepting it did not work, and reloading yet
+/// again would loop forever instead of showing the user why the page is missing.
+#[derive(Default)]
+struct RefusalLog {
+    seen: HashSet<String>,
+}
+
+impl RefusalLog {
+    /// `true` the first time this host is seen, `false` for every repeat.
+    fn claim(&mut self, host: &str) -> bool {
+        self.seen.insert(host.to_string())
+    }
+}
+
 /// Install the certificate hook on the app window.
 ///
 /// **Must run before the window is pointed at the server**, for the same reason
@@ -88,8 +118,10 @@ pub fn install(window: &WebviewWindow, app: tauri::AppHandle) {
         use webkit2gtk::{WebContextExt, WebViewExt};
 
         let pinned_app = app.clone();
+        let refusals = Arc::new(Mutex::new(RefusalLog::default()));
         let attached = window.with_webview(move |platform| {
             let view = platform.inner();
+            let refusals = refusals.clone();
             view.connect_load_failed_with_tls_errors(
                 move |view, failing_uri, certificate, errors| {
                     let pinned = crate::pinned_cert(&pinned_app);
@@ -110,11 +142,26 @@ pub fn install(window: &WebviewWindow, app: tauri::AppHandle) {
                         eprintln!("linux webview: the view has no WebContext");
                         return false;
                     };
+                    // One reload per host, ever. A poisoned lock counts as "seen"
+                    // too (fail closed): a second reload is never worth a spin.
+                    let first = refusals
+                        .lock()
+                        .map(|mut log| log.claim(&host))
+                        .unwrap_or(false);
+                    if !first {
+                        eprintln!(
+                            "linux webview: {host} was refused again after its pinned \
+                             certificate was accepted — leaving WebKit's error page in place \
+                             rather than reloading again"
+                        );
+                        return false;
+                    }
                     // The pin matched, so this is the certificate Rust already
-                    // decided to trust — remember the exception for that host and
-                    // re-issue the load. WebKit then serves the app normally for
-                    // the rest of the session, subresources and WebSockets
-                    // included (the allowance is per host, on the context).
+                    // decided to trust. The per-host allowance below is deprecated
+                    // and a no-op on current WebKitGTK, so the context policy is the
+                    // part that actually takes effect — and it is only ever reached
+                    // with a pinned certificate in hand.
+                    context.set_tls_errors_policy(webkit2gtk::TLSErrorsPolicy::Ignore);
                     context.allow_tls_certificate_for_host(certificate, &host);
                     eprintln!(
                         "linux webview: accepting the pinned certificate for {host} after a \
@@ -161,6 +208,20 @@ mod tests {
         // A scheme with no authority at all — nothing to allow a certificate for.
         assert_eq!(host_of("about:blank"), None);
         assert_eq!(host_of("data:text/plain,hi"), None);
+    }
+
+    /// A host is answered once. Without this, a certificate WebKit refuses to
+    /// accept (every current WebKitGTK, because the per-host call is a no-op)
+    /// turned the hook into an endless reload loop: 872 loads in 25 seconds and no
+    /// app page at all.
+    #[test]
+    fn each_host_is_answered_only_once() {
+        let mut log = RefusalLog::default();
+        assert!(log.claim("100.1.2.3:3443"));
+        assert!(!log.claim("100.1.2.3:3443"));
+        assert!(!log.claim("100.1.2.3:3443"));
+        // A different host is a different decision.
+        assert!(log.claim("chat.example.ts.net"));
     }
 
     /// The rule the whole hook rests on: only the pinned certificate is

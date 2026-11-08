@@ -134,6 +134,12 @@ e2e_resolve_target_dir() {
 # Build server/ in release mode, leaving the binary at
 # $TARGET_DIR/release/e2e-chat. Returns non-zero when it could not be produced.
 #
+# Pass `clean` as the second argument to wipe the release staging first. That is
+# only worth it where the binary is missing anyway (start-server.sh), because it
+# throws away every incremental artefact — restart-server.sh has nothing to gain
+# and everything to lose from it, least of all a 90-second full rebuild on every
+# restart. Corrupted staging is handled by the retry below, not by pre-cleaning.
+#
 # The retry exists because the FIRST failure may be a rustc 1.99.x ICE rather
 # than a real compile error: retrying from a fresh target dir with opt-level=0
 # sidesteps the ICE paths that the release optimisation pipeline hits. On an
@@ -141,14 +147,18 @@ e2e_resolve_target_dir() {
 # native disk by e2e_resolve_target_dir, so the retry runs somewhere that works.
 e2e_build_server_release() {
     local root="${1:-.}"
+    local mode="${2:-}"
     local target_dir="${TARGET_DIR:?TARGET_DIR must be resolved first}"
     local retry_dir="$target_dir/retry-opt0"
 
     echo "==> Building server (release)..."
 
-    # A previous failed or partial build can leave corrupted metadata behind that
-    # trips the same ICEs, so each attempt starts from a clean release staging.
-    rm -rf "$target_dir/release/deps" "$target_dir/release/build" "$target_dir/release/.fingerprint/release"
+    if [ "$mode" = "clean" ]; then
+        # A previous failed or partial build can leave corrupted metadata behind
+        # that trips the same ICEs, so a from-scratch build starts from a clean
+        # release staging.
+        rm -rf "$target_dir/release/deps" "$target_dir/release/build" "$target_dir/release/.fingerprint/release"
+    fi
 
     if ( cd "$root/server" && CARGO_TARGET_DIR="$target_dir" cargo build --release ); then
         return 0
