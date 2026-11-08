@@ -509,11 +509,24 @@ input[type="password"]::-ms-clear {
     height: 12px;
     margin: 2px 0;
     background: rgba(255, 255, 255, 0.06);
+    /* Lift the band over whatever hangs into it. A collapsed folder's icon grid
+       is taller than the header that holds it and overflows upward, so the slot
+       above the first entry was physically covered by the folder it sits above —
+       and that folder's mini icons are deliberately not drop targets, so
+       dragover never resolved, no drop event fired at all, and "put this at the
+       very top" silently did nothing. Only while a drag is live, so the grid
+       keeps its whole hit area at rest. The DM list already does this. */
+    position: relative;
+    z-index: 1;
 }
 
 .server-list-dragging .server-drop-gap.inside {
     height: 8px;
     margin: 2px 0;
+    /* Inside a folder the same overhang exists (the header sits above the first
+       inner slot), so the lift is repeated there. */
+    position: relative;
+    z-index: 1;
 }
 
 .server-list-dragging .server-drop-gap.top {

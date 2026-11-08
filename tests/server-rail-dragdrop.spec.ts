@@ -801,7 +801,6 @@ test.describe.serial('Server rail drag and drop', () => {
         // rail's order actually has, and the missing move needs its own
         // investigation in applyGroupGapDrop. Skipped so the rest of the suite is
         // meaningful; see PROGRESS.md 0.2.40 for the open item.
-        test.fixme(true, 'a collapsed folder drop does not move the folder (open investigation)');
         // "We can't drag a closed group like a server" — a folder only offered
         // itself as a drop target for *other folders*, so a folder drag anywhere
         // else resolved to nothing. The slots take folders now.
@@ -936,7 +935,6 @@ test.describe.serial('Server rail drag and drop', () => {
         // as the collapsed-folder slot above; both need the drop resolution for
         // the no-anchor/folder slots looked at on its own. Skipped so the rest of
         // the suite stays meaningful; see PROGRESS.md 0.2.40 for the open item.
-        test.fixme(true, 'a drop on the top slot does not move the server (open investigation)');
         // A folder at the top of the rail left nothing above it to drop onto, so
         // "put this above the folder" had no slot to mean it.
         const folder = await ensureFolder(page);
@@ -953,6 +951,7 @@ test.describe.serial('Server rail drag and drop', () => {
         const from = await centerOf(page, `.server-icon[data-id="${source}"]`);
 
         await startMouseDrag(page, from, gap, { toSelector: gapSel });
+
         await page.mouse.up();
 
         await expect

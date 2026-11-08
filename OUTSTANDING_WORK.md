@@ -25,7 +25,7 @@ In order — do them top down, and check each off here when it lands:
 |---|---|---|
 | 1 | ~~**Three red tests.**~~ **DONE 2026-11-08** — 4/4 green. | [R9](#r9-three-red-tests--fix-them-do-not-delete-them) |
 | 2 | ~~**Dead multi-device code.**~~ **DONE 2026-11-08** — deleted, not implemented. | [R10](#r10-dead-multi-device-code-and-its-skipped-specs) |
-| 3 | **Two broken drag-and-drop operations** sitting on `test.fixme`. | [R11](#r11-two-known-broken-drag-and-drop-operations) |
+| 3 | ~~**Two broken drag-and-drop operations**~~ **DONE 2026-11-08** — no `test.fixme` left in the file. | [R11](#r11-two-known-broken-drag-and-drop-operations) |
 | 4 | ~~**One undocumented skip**~~ **DONE 2026-11-08** — un-skipped, passes. | [R12](#r12-one-undocumented-skip) |
 | 5 | ~~**PQ spec 9/9 in one run**~~ **DONE 2026-11-08** — waits for the element now. | [N1](#n1-the-pq-spec-has-never-run-99-in-one-pass) |
 | 6 | **Android device pass** — nine features built but never seen on hardware. | [R3](#r3-android-device-pass--several-features-are-marked-device-test-owed) |
@@ -312,6 +312,25 @@ are real (0 skips) and cover identity-key recovery from the key blob plus sessio
 
 Real user-facing bugs, recorded as "open investigation" and then left. **Requirement: fix
 or formally close with a reason.**
+
+**DONE (2026-11-08) — one real CSS bug, one stale mark; both un-skipped and passing:**
+
+- **Top slot:** the slot above the first entry was *physically covered by the folder it
+  sits above*. A collapsed folder's 2×2 icon grid is `clamp(42px, 7vw, 52px)` tall inside a
+  `clamp(16px, 4vw, 22px)` header, so the grid overflows upward over the band — and its mini
+  icons are deliberately not drop targets. `dragover` therefore never resolved, no `drop`
+  event was dispatched at all, and the release did nothing. Instrumented: `elementFromPoint`
+  at the band's centre returned `server-group-collapsed-grid`, and zero drop events reached
+  the document. While a drag is live the band is now `position: relative; z-index: 1` — the
+  same trick the DM list already uses — so the folder keeps its whole hit area at rest. The
+  inside-folder bands got the same lift, since the header overhangs those too.
+- **Collapsed folder drop:** already fixed by earlier work (`applyGroupGapDrop`, and the
+  slots accepting folder drags); the `fixme` was stale. The interleaving its comment worried
+  about only shows with several folders — with one, "members sit right behind the anchor" is
+  exactly the shape the rail has.
+
+Verified: all four slot tests pass — folder-drag, drop under a folder, drop inside a
+folder, and the top slot.
 
 ---
 
