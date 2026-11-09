@@ -76,3 +76,6 @@ opt-level = "s"
 # surface and keeps the app alive.
 strip = true
 
+
+[patch.crates-io]
+keyboard-types = { path = "/tmp/patched-keyboard-types" }
