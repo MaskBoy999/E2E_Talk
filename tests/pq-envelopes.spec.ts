@@ -174,6 +174,22 @@ test.describe('post-quantum hybrid envelopes', () => {
                 E.envelopeDecrypt(E.arrayBufferToBase64(tampered), bob.privateKey, alice.publicKey, enc.nonce);
             } catch (_) { tamperRejected = true; }
 
+            // Fail closed: a recipient that has published a PQ key is never
+            // addressed with a v1 envelope, even when the vendored library is
+            // not loaded in this tab — that used to be a silent downgrade.
+            const savedPq = (window as any).NoblePQ;
+            (window as any).NoblePQ = undefined;
+            let crossUserDowngradeRefused = false;
+            let downgradeCode = '';
+            try {
+                E.envelopeEncrypt('must not be v1', bob.publicKey, alice.privateKey, bobPqPub);
+            } catch (e) { crossUserDowngradeRefused = true; downgradeCode = (e as any).code || ''; }
+            let selfDowngradeRefused = false;
+            try {
+                E.envelopeEncrypt('must not be v1 either', alice.publicKey, alice.privateKey);
+            } catch (_) { selfDowngradeRefused = true; }
+            (window as any).NoblePQ = savedPq;
+
             // v1 fallback: no published PQ key → byte-identical legacy envelope.
             const v1 = E.envelopeEncrypt('legacy', bob.publicKey, alice.privateKey);
             const v1dec = E.envelopeDecrypt(v1.ciphertext, bob.privateKey, alice.publicKey, v1.nonce);
@@ -193,6 +209,11 @@ test.describe('post-quantum hybrid envelopes', () => {
                 tamperRejected,
                 v1IsNotV2: !v1.pq && magic(v1.ciphertext) !== 'E2EPQv',
                 v1dec: new TextDecoder().decode(v1dec),
+                crossUserDowngradeRefused,
+                downgradeCode,
+                selfDowngradeRefused,
+                pqStateLegacy: E.pqPeerState(null),
+                pqStateHybrid: E.pqPeerState(E.arrayBufferToBase64(bobPqPub)),
                 selfIsV2: !!self.pq,
                 selfDec: new TextDecoder().decode(selfDec),
             };
@@ -204,6 +225,12 @@ test.describe('post-quantum hybrid envelopes', () => {
         expect(r.tamperRejected).toBe(true);
         expect(r.v1IsNotV2).toBe(true);
         expect(r.v1dec).toBe('legacy');
+        // A peer with a published key (or ourselves) must never fall back to v1.
+        expect(r.crossUserDowngradeRefused).toBe(true);
+        expect(r.downgradeCode).toBe('PQ_NOT_READY');
+        expect(r.selfDowngradeRefused).toBe(true);
+        expect(r.pqStateLegacy).toBe('legacy');
+        expect(r.pqStateHybrid).toBe('hybrid');
         expect(r.selfIsV2).toBe(true);
         expect(r.selfDec).toBe('to myself');
     });

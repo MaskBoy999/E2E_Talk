@@ -166,19 +166,31 @@ var E2ECrypto = (() => {
         // (recipient == sender): the PQ identity is derived deterministically
         // from the identity private key, so self-wrapped keys (notification
         // sound, ringtone, own server/channel key, soundboard clips) upgrade
-        // without touching their call sites. Peers with no published PQ key
-        // and recorded v1 data keep producing byte-identical v1 envelopes.
-        if (pqAvailable() && !recipientPqPublicKey) {
-            try {
-                var ownPub = x25519DerivePublicKey(senderPrivateKey);
-                if (equalBytes(ownPub, new Uint8Array(recipientPublicKey))) {
-                    recipientPqPublicKey = getIdentityPqKeyPair(senderPrivateKey).publicKey;
-                }
-            } catch (_) {}
+        // without touching their call sites.
+        //
+        // FAIL CLOSED. v1 is only for a recipient that has published no ML-KEM
+        // key at all (a legacy account, whose traffic is already v1 by their
+        // choice to exist). If a PQ key *was* supplied, or the recipient is us,
+        // this function never writes a v1 envelope: when the vendored library
+        // has not loaded it throws instead. The previous shape gated on
+        // pqAvailable() and silently produced v1 — a slow or failed import() was
+        // indistinguishable from a legacy peer, so a page that never loaded the
+        // library encrypted everything classically with no signal at all.
+        var selfWrap = false;
+        try {
+            var ownPub = x25519DerivePublicKey(senderPrivateKey);
+            selfWrap = equalBytes(ownPub, new Uint8Array(recipientPublicKey));
+        } catch (_) {}
+        if (!recipientPqPublicKey && selfWrap) {
+            if (!pqAvailable()) throw pqNotReadyError();
+            recipientPqPublicKey = getIdentityPqKeyPair(senderPrivateKey).publicKey;
         }
-        if (recipientPqPublicKey && pqAvailable()) {
+        if (recipientPqPublicKey) {
+            if (!pqAvailable()) throw pqNotReadyError();
             return envelopeEncryptV2(plaintext, recipientPublicKey, senderPrivateKey, recipientPqPublicKey);
         }
+        // Legacy recipient: the only account shape that legitimately reaches the
+        // v1 path below. Such conversations are marked in the UI by pqPeerState().
         const shared = x25519SharedSecret(senderPrivateKey, recipientPublicKey);
         const key = hkdf(shared, shared, 'e2e-envelope-v1', 32);
         _secureZero(shared);
@@ -347,16 +359,37 @@ var E2ECrypto = (() => {
         return pt;
     }
 
-    // Defensive wrappers for call sites. They never throw: an unavailable
-    // library or a peer that has no published PQ key simply produces / expects
-    // a v1 envelope, so the features keep working during rollout.
+    // Defensive wrappers for call sites. These never throw: a peer with no
+    // published PQ key is reported as such (and gets v1, the only envelope it
+    // can open), while a *present* key is returned even before the library
+    // loads, so envelopeEncrypt can refuse the downgrade instead of guessing.
     var PQ_MLKEM768_PUB_BYTES = 1184;
     function pqPublicKeyFromB64(b64) {
-        if (!b64 || !pqAvailable()) return null;
+        // Deliberately not gated on pqAvailable(): whether a recipient is
+        // PQ-capable is a property of their account, not of this tab's load
+        // progress. Gating it here is what made a still-loading library look
+        // exactly like a legacy peer and let envelopeEncrypt fall back to v1.
+        if (!b64) return null;
         try {
             var bytes = new Uint8Array(base64ToArrayBuffer(b64));
             return bytes.length === PQ_MLKEM768_PUB_BYTES ? bytes : null;
         } catch (_) { return null; }
+    }
+
+    // Thrown instead of writing a v1 envelope for a recipient that has a PQ key.
+    // Callers surface it as "try again" rather than sending something recorded
+    // traffic could decrypt later.
+    function pqNotReadyError() {
+        var err = new Error('Post-quantum layer not ready — refusing to send a classical-only envelope');
+        err.code = 'PQ_NOT_READY';
+        return err;
+    }
+
+    // How a peer's published key reads from here: 'hybrid' when the account has
+    // an ML-KEM-768 key, 'legacy' when it has none (v1 envelopes are the only
+    // option, and everything recorded to it stays quantum-decryptable).
+    function pqPeerState(pqPublicKeyB64) {
+        return pqPublicKeyFromB64(pqPublicKeyB64) ? 'hybrid' : 'legacy';
     }
     function identityPqPublicKeyOrNull(identityKeyPair) {
         if (!identityKeyPair || !identityKeyPair.privateKey || !pqAvailable()) return null;
@@ -1236,6 +1269,7 @@ var E2ECrypto = (() => {
         pqAvailable: pqAvailable,
         getIdentityPqKeyPair: getIdentityPqKeyPair,
         pqPublicKeyFromB64: pqPublicKeyFromB64,
+        pqPeerState: pqPeerState,
         identityPqPublicKeyOrNull: identityPqPublicKeyOrNull,
         identityPqSecretKeyOrNull: identityPqSecretKeyOrNull,
         decryptEscrowPayload: decryptEscrowPayload,

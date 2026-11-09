@@ -21980,6 +21980,18 @@ function renderDmSidebar() {
     updateDmStripWaiting();
 }
 
+// A DM peer whose account publishes no ML-KEM-768 key can only be addressed
+// with v1 envelopes, which a future quantum computer could decrypt from traffic
+// recorded today. The header says so rather than leaving the downgrade
+// invisible; the state comes from the same /api/identity fetch that already
+// decrypts the conversation. envelopeEncrypt refuses v1 for anyone who *does*
+// publish a key (see static/crypto.js), so legacy is the only remaining case.
+var dmPeerPqState = Object.create(null);
+function dmPqBadgeHtml(otherUserId) {
+    if (!otherUserId || dmPeerPqState[otherUserId] !== 'legacy') return '';
+    return ' <span class="pq-legacy-badge" title="This account has not published a post-quantum key, so envelopes to it use classical X25519 only.">PQ: classical</span>';
+}
+
 async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element) {
     currentDmChannelId = dmChannelId;
     // Save last active DM channel so it can be restored after page refresh
@@ -21999,7 +22011,7 @@ async function selectDmChannel(dmChannelId, otherUserId, otherUsername, element)
     var dmHeaderPicUrl = dmHeaderPicFileId ? getProfilePicUrl(dmHeaderPicFileId, otherUserId) : null;
     var dmHeaderPicHtml = dmHeaderPicUrl ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + dmHeaderPicUrl + '" alt=""></div>' : (dmHeaderPicFileId ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + dmHeaderPicFileId + '">' + displayName.charAt(0).toUpperCase() + '</div></div>' : '');
     var headerDotClass = 'presence-dot ' + (onlineUsers.has(otherUserId) ? 'online' : 'offline');
-    document.getElementById('channel-name').innerHTML = dmHeaderPicHtml + '<span>' + escapeHtml(displayName) + '</span>' +
+    document.getElementById('channel-name').innerHTML = dmHeaderPicHtml + '<span>' + escapeHtml(displayName) + '</span>' + dmPqBadgeHtml(otherUserId) +
         ' <button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
     // Add presence dot to header pic
     var headerWrap = document.querySelector('#channel-name .dm-header-pic-wrap');
@@ -22301,6 +22313,7 @@ async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {
                 if (otherUserData.identity_public_key) {
                     otherPublicKey = new Uint8Array(E2ECrypto.base64ToArrayBuffer(otherUserData.identity_public_key));
                 }
+                dmPeerPqState[otherUserId] = E2ECrypto.pqPeerState(otherUserData.identity_pq_public_key);
             }
         } catch (_) {
             // Identity key unavailable — messages will show as encrypted
@@ -22325,7 +22338,7 @@ async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {
                     var _picIdEmpty = dmConv && (dmConv.other_profile_picture_file_id || (_cacheEmpty && _cacheEmpty.profile_picture_file_id));
                     var _picUrlEmpty = _picIdEmpty ? getProfilePicUrl(_picIdEmpty, otherUserId) : null;
                     var _headerPicEmpty = _picUrlEmpty ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + _picUrlEmpty + '" alt=""></div>' : (_picIdEmpty ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + _picIdEmpty + '">' + _dnEmpty.charAt(0).toUpperCase() + '</div></div>' : '');
-                    document.getElementById('channel-name').innerHTML = _headerPicEmpty + '<span' + (_colorEmpty ? ' style="color:' + _colorEmpty + ';text-shadow:' + getDisplayNameTextShadow(_colorEmpty, _borderEmpty) + '"' : '') + '>' + escapeHtml(_dnEmpty) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+                    document.getElementById('channel-name').innerHTML = _headerPicEmpty + '<span' + (_colorEmpty ? ' style="color:' + _colorEmpty + ';text-shadow:' + getDisplayNameTextShadow(_colorEmpty, _borderEmpty) + '"' : '') + '>' + escapeHtml(_dnEmpty) + '</span>' + dmPqBadgeHtml(otherUserId) + '<button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
                     document.getElementById('unfriend-btn').addEventListener('click', function() { unfriend(otherUserId, dmConv ? dmConv.other_username : ''); });
                 }
                 return;
@@ -22339,7 +22352,7 @@ async function loadDmMessages(dmChannelId, otherUserId, skipBottomScroll) {
             var _picId2 = dmConv && (dmConv.other_profile_picture_file_id || (_cache2 && _cache2.profile_picture_file_id));
             var _picUrl2 = _picId2 ? getProfilePicUrl(_picId2, otherUserId) : null;
             var _headerPicHtml2 = _picUrl2 ? '<div class="dm-header-pic-wrap"><img class="dm-chat-header-pic" src="' + _picUrl2 + '" alt=""></div>' : (_picId2 ? '<div class="dm-header-pic-wrap"><div class="dm-chat-header-pic dm-chat-header-pic-load" data-profile-pic-load="' + otherUserId + ':' + _picId2 + '">' + _dn2.charAt(0).toUpperCase() + '</div></div>' : '');
-            var _headerHtml2 = _headerPicHtml2 + '<span' + (_color2 ? ' style="color:' + _color2 + ';text-shadow:' + getDisplayNameTextShadow(_color2, _border2) + '"' : '') + '>' + escapeHtml(_dn2) + '</span><button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
+            var _headerHtml2 = _headerPicHtml2 + '<span' + (_color2 ? ' style="color:' + _color2 + ';text-shadow:' + getDisplayNameTextShadow(_color2, _border2) + '"' : '') + '>' + escapeHtml(_dn2) + '</span>' + dmPqBadgeHtml(otherUserId) + '<button class="btn-unfriend" id="unfriend-btn" title="Unfriend">Unfriend</button>';
             document.getElementById('channel-name').innerHTML = _headerHtml2;
             // Add presence dot to header pic
             var _hw2 = document.querySelector('#channel-name .dm-header-pic-wrap');

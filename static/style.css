@@ -2920,6 +2920,25 @@ select.settings-field:focus {
     color: #fff;
 }
 
+/* A DM partner with no published ML-KEM key can only be addressed with
+   classical (v1) envelopes. The badge is the visible half of that: the crypto
+   layer refuses to silently downgrade, and the header stops implying the
+   conversation is quantum-safe. */
+.pq-legacy-badge {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 7px;
+    border: 1px solid rgba(240, 184, 73, .45);
+    border-radius: 9px;
+    background: rgba(240, 184, 73, .14);
+    color: #f0b849;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    vertical-align: middle;
+    cursor: help;
+}
+
 .inline-badge {
     display: block;
     width: 8px;
